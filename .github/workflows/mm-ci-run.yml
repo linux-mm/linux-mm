@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Most simple Linux kernel subsystems can be tested with this target
+# test setup. For more elaborates tests look for a topic branch under the
+# mm-ci-ci tree. For example to test a filesystem look at the fstests
+# branch.
+
+name: Run generic mm-ci CI tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+  workflow_dispatch:  # Allow manual triggering
+  concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+
+
+jobs:
+  setup:
+    uses: ./.github/workflows/mm-ci-init.yml
+    secrets: inherit
+
+  base-config:
+    needs: setup
+    name: Create base kernel configuration
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Create base kernel configuration
+        run: |
+          set -x
+          pwd
+          cd devops/linux
+          echo "CONFIG_DEBUG_VM=y" > mm-ci.config
+          echo "CONFIG_TRANSPARENT_HUGEPAGE=y" >> mm-ci.config
+          echo "CONFIG_USERFAULTFD=y" >> mm-ci.config
+          echo "CONFIG_HUGETLBFS=y" >> mm-ci.config
+
+  build:
+    needs: base-config
+    name: Build kernel
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Build kernel
+        run: |
+          cd devops/linux
+          vng --build --config mm-ci.config --verbose
+          cd tools/testing/selftests/mm
+          make -k -j$(nproc)
+
+  run-vma-tests:
+    needs: setup
+    name: Run VMA tests
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Run VMA tests
+        run: |
+          cd devops/linux/tools/testing/vma
+          make && ./vma
+          echo "ok" > ci.result
+
+  run-radix-tests:
+    needs: setup
+    name: Run maple and xarray tests
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Run maple and xarray tests
+        run: |
+          cd devops/linux/tools/testing/radix-tree
+          make && ./main
+          echo "ok" > ci.result
+
+  run-memblock-tests:
+    needs: setup
+    name: Run membolck tests
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Run memblock tests
+        run: |
+          cd devops/linux/tools/testing/memblock
+          make && ./main
+          echo "ok" > ci.result
+
+  run-selftests:
+    needs: build
+    name: Run selftests
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Run selftests
+        run: |
+          cd devops/linux
+          vng --exec "cd tools/testing/selftests/mm; sudo ./run_vmtests.sh -t userfaultfd"
+          echo "ok" > ci.result
