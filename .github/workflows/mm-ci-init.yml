@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# This can be used as a initialization workflow for most Linux kernel
+# development environments. This takes care of:
+#
+#   - Checks out and re-using a local mirror for your kernel tree
+#   - Looks for a defconfig in kdevops to use for your kernel tree
+#   - Sets up CI metadata for kdevops-results-archive
+#   - Ensures your kernel tree at least builds with defconfig
+#   - Brings up target DUTs nodes
+#   - Installs your Linux kernel tree on them
+#   - Builds all of your test requirements for your Linux kernel tree
+
+name: Base mm-ci workflow
+
+on:
+  workflow_call:  # Makes this workflow reusable
+    inputs:
+      kdevops_defconfig:
+        required: false
+        type: string
+
+jobs:
+  setup:
+    name: Setup mm-ci environment
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      - name: Checkout Linux branch
+        run: |
+          set -x
+          pwd
+          LINUX_TREE="git@github.com:${{ github.repository }}"
+          LINUX_TREE_REF="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          mkdir -p devops && cd devops
+          rm -fr linux
+          git clone $LINUX_TREE --reference /mnt/devops/git/linux/.git/ --depth=5 linux
+          cd linux
+          git fetch origin $LINUX_TREE_REF
+          git checkout $LINUX_TREE_REF
+          git log -1
