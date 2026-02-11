@@ -19,8 +19,9 @@ jobs:
           echo "Server: $GITHUB_SERVER_URL"
           echo "Repo: $GITHUB_REPOSITORY"
           echo "SHA: $GITHUB_SHA"
-          REPO_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
-          echo "Cloning from $REPO_URL"
+          # Use GITHUB_TOKEN for authentication with private repository
+          REPO_URL="https://x-access-token:${{ github.token }}@${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY"
+          echo "Cloning from ${GITHUB_SERVER_URL}/$GITHUB_REPOSITORY"
           git clone --depth 2 "$REPO_URL" linux
           cd linux
           git checkout "$GITHUB_SHA"
