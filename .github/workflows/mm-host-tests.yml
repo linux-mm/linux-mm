@@ -15,14 +15,12 @@ jobs:
     steps:
       - name: Checkout repository
         run: |
-          bash -c '
           set -euo pipefail
           REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           git clone --depth 2 "$REPO_URL" linux
           cd linux
           git checkout "${GITHUB_SHA}"
           echo "Checked out $(git rev-parse HEAD)"
-          '
 
       - name: Install dependencies
         run: |
