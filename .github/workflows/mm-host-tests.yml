@@ -10,7 +10,7 @@ on:
 jobs:
   host-tests:
     name: Run MM host tests
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     steps:
       - name: Checkout repository
