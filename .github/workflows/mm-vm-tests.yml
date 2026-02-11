@@ -1,0 +1,28 @@
+name: MM VM Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  vm-tests:
+    name: Run MM VM tests
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout repository
+        run: bash .github/scripts/checkout.sh
+        
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y build-essential flex bison libelf-dev bc
+          command -v pipx > /dev/null 2>&1 || sudo apt-get install -qq -y pipx
+          pipx list | grep -q virtme-ng || pipx install virtme-ng
+        
+      - name: Run VM tests
+        run: bash .github/scripts/run-vm-tests.sh
+        working-directory: linux
