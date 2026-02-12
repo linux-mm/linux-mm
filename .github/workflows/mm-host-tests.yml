@@ -13,38 +13,11 @@ jobs:
     uses: ./.github/workflows/mm-tests-setup.yml
 
   host-tests:
-    name: Run MM host tests on ${{ matrix.os }}
+    name: Run MM host tests
     needs: setup
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [self-hosted, ubuntu-latest]
-      fail-fast: false
+    runs-on: self-hosted
 
     steps:
-      # For ubuntu-latest, we need to checkout and install deps since setup job ran elsewhere
-      - name: Checkout repository (ubuntu-latest only)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          set -euo pipefail
-          REPO_URL="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}"
-          LINUX_TREE_REF="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-          
-          rm -rf linux
-          git clone --depth 2 "$REPO_URL" linux
-          
-          cd linux
-          git fetch origin "$LINUX_TREE_REF"
-          git checkout "$LINUX_TREE_REF"
-          echo "Checked out $(git rev-parse HEAD)"
-
-      - name: Install dependencies (ubuntu-latest only)
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: linux
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y build-essential libasan6 liburcu-dev
-
       - name: Run memblock tests
         run: bash .github/scripts/run-memblock-tests.sh
         working-directory: linux
