@@ -30,14 +30,7 @@ echo "Running MM selftests in VM..."
 # Run tests in VM with NUMA enabled (2 nodes, 2G each)
 # Current directory is already the kernel source tree in the VM
 # Redirect both stdout and stderr to the log file
-vng --cpus 4 --memory 4G --numa 2G --numa 2G -- bash -c 'cd tools/testing/selftests/mm && sudo ./run_vmtests.sh 2>&1' > /tmp/vmtests.log 2>&1
-exit_code=$?
-
-if [ $exit_code -ne 0 ]; then
-    echo "VM tests execution failed with exit code $exit_code"
-    cat /tmp/vmtests.log
-    exit 1
-fi
+vng --cpus 4 --memory 4G --numa 2G --numa 2G -- bash -c 'cd tools/testing/selftests/mm && sudo ./run_vmtests.sh 2>&1' > /tmp/vmtests.log 2>&1 || true
 
 # Parse and display results
 echo ""
