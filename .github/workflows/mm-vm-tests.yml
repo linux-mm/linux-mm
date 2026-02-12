@@ -14,12 +14,26 @@ jobs:
 
     steps:
       - name: Checkout repository
-        run: bash .github/scripts/checkout.sh
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          LINUX_TREE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          REPO_URL="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}"
+          MIRROR_PATH="/mirror/linux.git"
+          LINUX_TREE_REF="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
+          
+          rm -rf linux
+          
+          if [ -d "$MIRROR_PATH" ]; then
+              echo "Using local mirror at $MIRROR_PATH"
+              git clone --depth 2 --reference "$MIRROR_PATH" "$REPO_URL" linux
+          else
+              echo "Cloning from $REPO_URL"
+              git clone --depth 2 "$REPO_URL" linux
+          fi
+          
+          cd linux
+          git fetch origin "$LINUX_TREE_REF"
+          git checkout "$LINUX_TREE_REF"
+          echo "Checked out $(git rev-parse HEAD)"
 
       - name: Install dependencies
         working-directory: linux
