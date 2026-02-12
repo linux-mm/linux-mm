@@ -13,28 +13,19 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      - name: Setup environment
-        uses: ./.github/workflows/mm-ci-init.yml
-      # - name: Checkout repository
-      #   run: |
-      #     set -euox pipefail
-      #     MIRROR_PATH="/mirror/linux.git"
-      #     LINUX_TREE="https://x-access-token:${{ github.token }}@${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY"
-      #     LINUX_TREE_REF="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-      #     rm -fr linux
-      #     (echo "Using local mirror at $MIRROR_PATH"
-      #     git clone --depth 2 --reference "$MIRROR_PATH" "$LINUX_TREE" linux) || \
-      #     (echo "Cloning from $LINUX_TREE" \
-      #     git clone --depth 2 "$LINUX_TREE" linux)
-      #     cd linux
-      #     git fetch origin $LINUX_TREE_REF
-      #     git checkout $LINUX_TREE_REF
-      #     echo "Checked out $(git rev-parse HEAD)"
+      - name: Checkout repository
+        run: bash .github/scripts/checkout.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LINUX_TREE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
-      # - name: Install dependencies
-      #   run: |
-      #     sudo apt-get update -qq
-      #     sudo apt-get install -qq -y build-essential
+      - name: Install dependencies
+        working-directory: linux
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y build-essential libasan6 liburcu-dev
 
       - name: Run memblock tests
         run: bash .github/scripts/run-memblock-tests.sh

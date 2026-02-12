@@ -1,48 +1,19 @@
-name: Setup form mm-ci workflows
+name: MM Tests Setup
 
 on:
   workflow_call:  # Makes this workflow reusable
-    inputs:
-      kdevops_defconfig:
-        required: false
-        type: string
 
 jobs:
   setup:
-    name: Setup mm-ci environment
-#    runs-on: [self-hosted, ubuntu-latest]
-    runs-on: [ubuntu-latest]
-
-on:
-  push:
-    branches: ['**']
-  pull_request:
-    branches: ['**']
-  workflow_dispatch:
-
-jobs:
-  setup:
-    name: Run MM host tests
+    name: Setup test environment
     runs-on: self-hosted
 
     steps:
       - name: Checkout repository
-        run: |
-          set -euo pipefail
-          MIRROR_PATH="/mirror/linux.git"
-          LINUX_TREE="https://x-access-token:${{ github.token }}@${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY"
-          LINUX_TREE_REF="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-          rm -fr linux
-          (echo "Using local mirror at $MIRROR_PATH"
-          git clone --depth 2 --reference "$MIRROR_PATH" "$LINUX_TREE" linux) || \
-          (echo "Cloning from $LINUX_TREE" \
-          git clone --depth 2 "$LINUX_TREE" linux)
-          cd linux
-          git fetch origin $LINUX_TREE_REF
-          git checkout $LINUX_TREE_REF
-          echo "Checked out $(git rev-parse HEAD)"
+        run: bash .github/scripts/checkout.sh
 
       - name: Install dependencies
+        working-directory: linux
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -qq -y build-essential
+          sudo apt-get install -qq -y build-essential libasan6 liburcu-dev

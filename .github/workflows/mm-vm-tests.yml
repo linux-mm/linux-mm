@@ -2,9 +2,9 @@ name: MM VM Tests
 
 on:
   push:
-    branches: [ main, master ]
+    branches: ['**']
   pull_request:
-    branches: [ main, master ]
+    branches: ['**']
   workflow_dispatch:
 
 jobs:
@@ -14,25 +14,15 @@ jobs:
 
     steps:
       - name: Checkout repository
-        run: |
-          set -euox pipefail
-          MIRROR_PATH="/mirror/linux.git"
-          # Use GITHUB_TOKEN for authentication with private repository
-          REPO_URL="https://x-access-token:${{ github.token }}@${GITHUB_SERVER_URL#https://}/$GITHUB_REPOSITORY"
-
-          if [ -d "$MIRROR_PATH" ]; then
-            echo "Using local mirror at $MIRROR_PATH"
-            git clone --depth 2 --reference "$MIRROR_PATH" "$REPO_URL" linux
-          else
-            echo "Cloning from ${GITHUB_SERVER_URL}/$GITHUB_REPOSITORY"
-            git clone --depth 2 "$REPO_URL" linux
-          fi
-
-          cd linux
-          git checkout "$GITHUB_SHA"
-          echo "Checked out $(git rev-parse HEAD)"
+        run: bash .github/scripts/checkout.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LINUX_TREE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Install dependencies
+        working-directory: linux
         run: |
           sudo apt-get update -qq
           sudo apt-get install -qq -y build-essential flex bison libelf-dev bc
