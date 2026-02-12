@@ -8,41 +8,18 @@ on:
   workflow_dispatch:
 
 jobs:
+  setup:
+    name: Setup environment
+    uses: ./.github/workflows/mm-tests-setup.yml
+    with:
+      install_vm_deps: true
+
   vm-tests:
     name: Run MM VM tests
+    needs: setup
     runs-on: self-hosted
 
     steps:
-      - name: Checkout repository
-        run: |
-          set -euo pipefail
-          REPO_URL="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}"
-          MIRROR_PATH="/mirror/linux.git"
-          LINUX_TREE_REF="${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
-          
-          rm -rf linux
-          
-          if [ -d "$MIRROR_PATH" ]; then
-              echo "Using local mirror at $MIRROR_PATH"
-              git clone --depth 2 --reference "$MIRROR_PATH" "$REPO_URL" linux
-          else
-              echo "Cloning from $REPO_URL"
-              git clone --depth 2 "$REPO_URL" linux
-          fi
-          
-          cd linux
-          git fetch origin "$LINUX_TREE_REF"
-          git checkout "$LINUX_TREE_REF"
-          echo "Checked out $(git rev-parse HEAD)"
-
-      - name: Install dependencies
-        working-directory: linux
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y build-essential flex bison libelf-dev bc
-          command -v pipx > /dev/null 2>&1 || sudo apt-get install -qq -y pipx
-          pipx list | grep -q virtme-ng || pipx install virtme-ng
-
       - name: Run VM tests
         run: bash .github/scripts/run-vm-tests.sh
         working-directory: linux
