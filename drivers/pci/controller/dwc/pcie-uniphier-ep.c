@@ -425,11 +425,11 @@ static const struct uniphier_pcie_ep_soc_data uniphier_pro5_data = {
 		.msix_capable = false,
 		.align = 1 << 16,
 		.bar[BAR_0] = { .only_64bit = true, },
-		.bar[BAR_1] = { .type = BAR_RESERVED, },
+		.bar[BAR_1] = { .type = BAR_RESERVED, },	/* high half of 64-bit BAR0 */
 		.bar[BAR_2] = { .only_64bit = true, },
-		.bar[BAR_3] = { .type = BAR_RESERVED, },
-		.bar[BAR_4] = { .type = BAR_RESERVED, },
-		.bar[BAR_5] = { .type = BAR_RESERVED, },
+		.bar[BAR_3] = { .type = BAR_RESERVED, },	/* high half of 64-bit BAR2 */
+		.bar[BAR_4] = { .type = BAR_DISABLED, },	/* unused */
+		.bar[BAR_5] = { .type = BAR_DISABLED, },	/* unused */
 	},
 };
 
