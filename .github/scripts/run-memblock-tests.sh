@@ -1,23 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-# Run memblock tests
+source "$(dirname "$0")/common.sh"
 
-cd "$(dirname "$0")/../../tools/testing/memblock"
+test_dir=$linux_dir/tools/testing/memblock
 
 echo "Building memblock tests..."
-if ! make -s > /tmp/memblock-build.log 2>&1; then
-    echo "Build failed:"
-    cat /tmp/memblock-build.log
-    exit 1
-fi
+make -C $test_dir 2>&1 >$log  || fail "build of memblock tests failed"
 
 echo "Running memblock tests..."
-if ! ./main > /tmp/memblock-run.log 2>&1; then
-    echo "Tests failed:"
-    cat /tmp/memblock-run.log
-    exit 1
-fi
+$test_dir/main -v 2>&1 > $log || fail "memblock tests failed"
 
 # memblock tests use assert() which will abort on failure
 # If we reach here, all tests passed
