@@ -1926,11 +1926,15 @@ static irqreturn_t tegra_pcie_ep_pex_rst_irq(int irq, void *arg)
 static void tegra_pcie_ep_init(struct dw_pcie_ep *ep)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_ep(ep);
-	enum pci_barno bar;
 
-	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++)
-		dw_pcie_ep_reset_bar(pci, bar);
-};
+	/*
+	 * Only reset the first 64-bit BAR (BAR0+BAR1); EPF will enable it via set_bar.
+	 * BAR2+BAR3 (MSI-X table) and BAR4+BAR5 (DMA regs) are HW-backed and must
+	 * stay enabled.
+	 */
+	dw_pcie_ep_reset_bar(pci, BAR_0);
+	dw_pcie_ep_reset_bar(pci, BAR_1);
+}
 
 static int tegra_pcie_ep_raise_intx_irq(struct tegra_pcie_dw *pcie, u16 irq)
 {
@@ -1987,16 +1991,16 @@ static int tegra_pcie_ep_raise_irq(struct dw_pcie_ep *ep, u8 func_no,
 	return 0;
 }
 
+/* Tegra194 EP: BAR0 = programmable BAR, BAR2 = MSI-X table, BAR4 = DMA regs. */
 static const struct pci_epc_features tegra_pcie_epc_features = {
 	.linkup_notifier = true,
 	.msi_capable = true,
-	.bar[BAR_0] = { .type = BAR_FIXED, .fixed_size = SZ_1M,
-			.only_64bit = true, },
-	.bar[BAR_1] = { .type = BAR_RESERVED, },
-	.bar[BAR_2] = { .type = BAR_RESERVED, },
-	.bar[BAR_3] = { .type = BAR_RESERVED, },
-	.bar[BAR_4] = { .type = BAR_RESERVED, },
-	.bar[BAR_5] = { .type = BAR_RESERVED, },
+	.bar[BAR_0] = { .type = BAR_PROGRAMMABLE, .only_64bit = true, },
+	.bar[BAR_1] = { .type = BAR_RESERVED, },	/* high half of 64-bit BAR0 */
+	.bar[BAR_2] = { .type = BAR_RESERVED, .only_64bit = true, },	/* MSI-X table */
+	.bar[BAR_3] = { .type = BAR_RESERVED, },	/* high half of 64-bit BAR2 */
+	.bar[BAR_4] = { .type = BAR_RESERVED, .only_64bit = true, },	/* DMA regs */
+	.bar[BAR_5] = { .type = BAR_RESERVED, },	/* high half of 64-bit BAR4 */
 	.align = SZ_64K,
 };
 
