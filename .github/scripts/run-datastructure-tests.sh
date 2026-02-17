@@ -1,59 +1,38 @@
 #!/bin/bash
 set -euo pipefail
 
-# Run radix-tree tests (multiple executables)
+source "$(dirname "$0")/common.sh"
 
-cd "$(dirname "$0")/../../tools/testing/radix-tree"
+test_dir=$linux_dir/tools/testing/radix-tree
 
-echo "Building radix-tree tests..."
-if ! make -s > /tmp/radix-tree-build.log 2>&1; then
-    echo "Build failed:"
-    cat /tmp/radix-tree-build.log
-    exit 1
-fi
+echo "Building data structure tests..."
+make -C $test_dir -s 2>&1 > $log || fail "Build of data structure tests failed"
 
-# List of test executables in order
-TESTS=(
-    "main"
-    "idr-test"
-    "multiorder"
-    "xarray"
-    "maple"
-)
+declare -A TESTS
+TESTS["main"]="Radix tree and IDA"
+TESTS["idr-test"]="IDR"
+TESTS["multiorder"]="Multiorder XArray"
+TESTS["xarray"]="XArray"
+TESTS["maple"]="Maple tree"
 
-failed=0
-failed_tests=()
+failed=()
 
-for test in "${TESTS[@]}"; do
-    echo "Running $test..."
-    if ! ./$test > /tmp/radix-tree-${test}.log 2>&1; then
-        echo "✗ $test failed"
-        cat /tmp/radix-tree-${test}.log
-        failed=$((failed + 1))
-        failed_tests+=("$test")
+for test in "${!TESTS[@]}"; do
+    test_name="${TESTS[$test]}"
+    echo "Running $test_name tests"
+    if ! $test_dir/$test > $log 2>&1; then
+        echo "✗ $test_name tests failed"
+        cat $log
+        failed+=("$test_name")
     else
-        # Check for test result summary in output
-        if grep -q "tests passed" /tmp/radix-tree-${test}.log; then
-            result=$(grep "tests passed" /tmp/radix-tree-${test}.log | tail -1)
-            echo "✓ $test: $result"
-        else
-            echo "✓ $test passed"
-        fi
+        echo "✓ $test_name tests passed"
     fi
 done
 
-echo ""
-echo "=========================================="
-echo "Radix-tree test summary:"
-echo "  Total executables: ${#TESTS[@]}"
-echo "  Passed: $((${#TESTS[@]} - failed))"
-echo "  Failed: $failed"
-echo "=========================================="
-
-if [ $failed -gt 0 ]; then
+if [ ${#failed[@]} -gt 0 ]; then
     echo ""
     echo "Failed tests:"
-    for test in "${failed_tests[@]}"; do
+    for test in "${failed[@]}"; do
         echo "  - $test"
     done
     exit 1
