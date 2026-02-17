@@ -6,10 +6,10 @@ source "$(dirname "$0")/common.sh"
 test_dir=$linux_dir/tools/testing/memblock
 
 echo "Building memblock tests..."
-make -C $test_dir 2>&1 >$log  || fail "build of memblock tests failed"
+make -C $test_dir >$log 2>&1  || fail "build of memblock tests failed"
 
 echo "Running memblock tests..."
-$test_dir/main -v 2>&1 > $log || fail "memblock tests failed"
+$test_dir/main -v >$log 2>&1 || fail "memblock tests failed"
 
 # memblock tests use assert() which will abort on failure
 # If we reach here, all tests passed
