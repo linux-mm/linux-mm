@@ -100,6 +100,12 @@
 
 #define PCI_DEVICE_ID_ROCKCHIP_RK3588		0x3588
 
+#define PCI_DEVICE_ID_NVIDIA_TEGRA194_EP	0x1ad4
+#define PCI_DEVICE_ID_NVIDIA_TEGRA234_EP	0x229b
+
+/* BARs 1-5 are HW-backed (MSI-X, DMA) or high half of 64-bit BAR0; skip BAR test */
+#define TEGRA_EP_BAR_SKIP_MASK	(BIT(1) | BIT(2) | BIT(3) | BIT(4) | BIT(5))
+
 static DEFINE_IDA(pci_endpoint_test_ida);
 
 #define to_endpoint_test(priv) container_of((priv), struct pci_endpoint_test, \
@@ -130,11 +136,15 @@ struct pci_endpoint_test {
 	size_t alignment;
 	u32 ep_caps;
 	const char *name;
+	/* Bitmask of BARs to skip in BAR test (bit N set = skip BAR N) */
+	u8 bar_skip_mask;
 };
 
 struct pci_endpoint_test_data {
 	enum pci_barno test_reg_bar;
 	size_t alignment;
+	/* Bitmask of BARs to skip in BAR test (bit N set = skip BAR N) */
+	u8 bar_skip_mask;
 };
 
 static inline u32 pci_endpoint_test_readl(struct pci_endpoint_test *test,
@@ -393,9 +403,10 @@ static int pci_endpoint_test_bars(struct pci_endpoint_test *test)
 	int ret;
 
 	/* Write all BARs in order (without reading). */
-	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++)
-		if (test->bar[bar])
+	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++) {
+		if (test->bar[bar] && !(test->bar_skip_mask & (1 << bar)))
 			pci_endpoint_test_bars_write_bar(test, bar);
+	}
 
 	/*
 	 * Read all BARs in order (without writing).
@@ -404,7 +415,7 @@ static int pci_endpoint_test_bars(struct pci_endpoint_test *test)
 	 * (Reading back the BAR directly after writing can not detect this.)
 	 */
 	for (bar = 0; bar < PCI_STD_NUM_BARS; bar++) {
-		if (test->bar[bar]) {
+		if (test->bar[bar] && !(test->bar_skip_mask & (1 << bar))) {
 			ret = pci_endpoint_test_bars_read_bar(test, bar);
 			if (ret)
 				return ret;
@@ -941,6 +952,10 @@ static long pci_endpoint_test_ioctl(struct file *file, unsigned int cmd,
 			goto ret;
 		if (is_am654_pci_dev(pdev) && bar == BAR_0)
 			goto ret;
+		if (test->bar_skip_mask & (1 << bar)) {
+			ret = 0;
+			goto ret;
+		}
 		ret = pci_endpoint_test_bar(test, bar);
 		break;
 	case PCITEST_BARS:
@@ -1028,6 +1043,7 @@ static int pci_endpoint_test_probe(struct pci_dev *pdev,
 		test_reg_bar = data->test_reg_bar;
 		test->test_reg_bar = test_reg_bar;
 		test->alignment = data->alignment;
+		test->bar_skip_mask = data->bar_skip_mask;
 	}
 
 	init_completion(&test->irq_raised);
@@ -1173,6 +1189,12 @@ static const struct pci_endpoint_test_data rk3588_data = {
 	.alignment = SZ_64K,
 };
 
+static const struct pci_endpoint_test_data tegra_ep_data = {
+	.test_reg_bar = BAR_0,
+	.alignment = SZ_64K,
+	.bar_skip_mask = TEGRA_EP_BAR_SKIP_MASK,
+};
+
 /*
  * If the controller's Vendor/Device ID are programmable, you may be able to
  * use one of the existing entries for testing instead of adding a new one.
@@ -1216,6 +1238,12 @@ static const struct pci_device_id pci_endpoint_test_tbl[] = {
 	},
 	{ PCI_DEVICE(PCI_VENDOR_ID_ROCKCHIP, PCI_DEVICE_ID_ROCKCHIP_RK3588),
 	  .driver_data = (kernel_ulong_t)&rk3588_data,
+	},
+	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TEGRA194_EP),
+	  .driver_data = (kernel_ulong_t)&tegra_ep_data,
+	},
+	{ PCI_DEVICE(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TEGRA234_EP),
+	  .driver_data = (kernel_ulong_t)&tegra_ep_data,
 	},
 	{ }
 };
