@@ -20,8 +20,8 @@ jobs:
       - name: Run memblock tests
         run: bash .github/scripts/run-memblock-tests.sh
 
-      - name: Run radix-tree tests
-        run: bash .github/scripts/run-radix-tree-tests.sh
-
       - name: Run VMA tests
         run: bash .github/scripts/run-vma-tests.sh
+
+      - name: Run data structure tests
+        run: bash .github/scripts/run-datastructure-tests.sh
