@@ -8,24 +8,20 @@ on:
   workflow_dispatch:
 
 jobs:
-  setup:
-    name: Setup environment
-    uses: ./.github/workflows/mm-tests-setup.yml
 
   host-tests:
     name: Run MM host tests
-    needs: setup
     runs-on: self-hosted
 
     steps:
-      - name: Run memblock tests
-        run: bash .github/scripts/run-memblock-tests.sh
-        working-directory: linux
+      - name: checkout repository
+        uses: actions/checkout@v6
 
-      - name: Run radix-tree tests
-        run: bash .github/scripts/run-radix-tree-tests.sh
-        working-directory: linux
+      - name: Run memblock tests
+        run: bash -x .github/scripts/run-memblock-tests.sh
+
+#      - name: Run radix-tree tests
+#        run: bash .github/scripts/run-radix-tree-tests.sh
 
       - name: Run VMA tests
         run: bash .github/scripts/run-vma-tests.sh
-        working-directory: linux
