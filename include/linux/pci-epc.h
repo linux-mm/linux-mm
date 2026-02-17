@@ -191,13 +191,21 @@ struct pci_epc {
  * @BAR_RESIZABLE: The BAR implements the PCI-SIG Resizable BAR Capability.
  *		   NOTE: An EPC driver can currently only set a single supported
  *		   size.
- * @BAR_RESERVED: The BAR should not be touched by an EPF driver.
+ * @BAR_RESERVED: The BAR should not be touched by an EPF driver. Used for:
+ *		  (1) HW-backed BARs (e.g. MSI-X table, DMA regs) that the EPC
+ *		      may leave enabled for the host; (2) the second register
+ *		      of a 64-bit BAR (the high 32 bits), when the preceding
+ *		      BAR has only_64bit set.
+ * @BAR_DISABLED: The BAR is unused; the EPC must disable it in .init(); the
+ *		  EPF must not use it; it is not returned by
+ *		  pci_epc_get_next_free_bar().
  */
 enum pci_epc_bar_type {
 	BAR_PROGRAMMABLE = 0,
 	BAR_FIXED,
 	BAR_RESIZABLE,
 	BAR_RESERVED,
+	BAR_DISABLED,
 };
 
 /**
@@ -212,7 +220,8 @@ enum pci_epc_bar_type {
  *		only_64bit should not be set on a BAR of type BAR_RESERVED.
  *		(If BARx is a 64-bit BAR that an EPF driver is not allowed to
  *		touch, then both BARx and BARx+1 must be set to type
- *		BAR_RESERVED.)
+ *		BAR_RESERVED. BAR_RESERVED is used both for HW-backed BARs and
+ *		for the high half of a 64-bit BAR.)
  */
 struct pci_epc_bar_desc {
 	enum pci_epc_bar_type type;
