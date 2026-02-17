@@ -8,14 +8,14 @@ log_dir=$(mktemp -d)
 log=$log_dir/$test_script.log
 
 function cleanup() {
-echo    rm -fr "$log_dir"
+    rm -fr "$log_dir"
 }
 trap cleanup EXIT
 
 function fail() {
 	local msg=${1:-"X Test failed"}
 
-	echo "$msg"
 	cat $log
+	echo "X $msg"
 	exit 1
 }
