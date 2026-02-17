@@ -13,9 +13,9 @@ function cleanup() {
 trap cleanup EXIT
 
 function fail() {
-	local msg=${1:-"X Test failed"}
+	local msg=${1:-"✗ Test failed"}
 
 	cat $log
-	echo "X $msg"
+	echo "✗ $msg"
 	exit 1
 }
