@@ -1,0 +1,20 @@
+name: MM VM Tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  vm-tests:
+    name: Run MM VM tests
+    runs-on: self-hosted
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run VM tests
+        run: bash .github/scripts/run-vm-tests.sh
