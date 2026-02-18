@@ -4,11 +4,11 @@ set -euo pipefail
 test_script=$(basename $(realpath $0))
 linux_dir=$(dirname $(realpath $0))"/../.."
 
-log_dir=$(mktemp -d)
-log=$log_dir/$test_script.log
+tmp_dir=$(mktemp -d)
+log=$tmp_dir/$test_script.log
 
 function cleanup() {
-    rm -fr "$log_dir"
+    rm -fr "$tmp_dir"
 }
 trap cleanup EXIT
 
