@@ -837,8 +837,45 @@ static void __init pmd_softleaf_tests(struct pgtable_debug_args *args)
 	pmd2 = __swp_entry_to_pmd(arch_entry);
 	WARN_ON(memcmp(&pmd1, &pmd2, sizeof(pmd1)));
 }
+
+
+static void __init pmd_thp_migration_zap_tests(struct pgtable_debug_args *args)
+{
+	pmd_t pmd;
+	unsigned long vaddr = args->vaddr & HPAGE_PMD_MASK;
+
+	if (!has_transparent_hugepage() || !thp_migration_supported())
+		return;
+
+	pr_debug("Validating PMD zap on THP migration entry\n");
+
+	pmd = swp_entry_to_pmd(args->leaf_entry);
+	pgtable_trans_huge_deposit(args->mm, args->pmdp, args->start_ptep);
+
+	/* Verify that it's a valid migration PMD before we proceed */
+	WARN_ON(!pmd_is_huge(pmd));
+	WARN_ON(!pmd_is_valid_softleaf(pmd));
+	WARN_ON(pmd_present(pmd));
+	WARN_ON(pmd_none(pmd));
+
+	/* Install the migration PMD entry */
+	set_pmd_at(args->mm, vaddr, args->pmdp, pmd);
+
+	/*
+	 * THP migration path can race with zap_huge_pmd(), which calls
+	 * pmdp_huge_get_and_clear_full().
+	 */
+	pmd = pmdp_huge_get_and_clear_full(args->vma, vaddr, args->pmdp, 1);
+
+	WARN_ON(!pmd_is_valid_softleaf(pmd));
+	WARN_ON(!pmd_none(pmdp_get(args->pmdp)));
+
+	pgtable_trans_huge_withdraw(args->mm, args->pmdp);
+}
+
 #else  /* !CONFIG_ARCH_ENABLE_THP_MIGRATION */
 static void __init pmd_softleaf_tests(struct pgtable_debug_args *args) { }
+static void __init pmd_thp_migration_zap_tests(struct pgtable_debug_args *args) { }
 #endif /* CONFIG_ARCH_ENABLE_THP_MIGRATION */
 
 static void __init swap_migration_tests(struct pgtable_debug_args *args)
@@ -1348,6 +1385,7 @@ static int __init debug_vm_pgtable(void)
 	pmd_clear_tests(&args);
 	pmd_advanced_tests(&args);
 	pmd_huge_tests(&args);
+	pmd_thp_migration_zap_tests(&args);
 	pmd_populate_tests(&args);
 	spin_unlock(ptl);
 
