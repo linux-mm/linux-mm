@@ -210,8 +210,23 @@ pmd_t pmdp_huge_get_and_clear_full(struct vm_area_struct *vma,
 {
 	pmd_t pmd;
 	VM_BUG_ON(addr & ~HPAGE_PMD_MASK);
-	VM_BUG_ON((pmd_present(*pmdp) && !pmd_trans_huge(*pmdp)) ||
-		   !pmd_present(*pmdp));
+	VM_BUG_ON((pmd_present(*pmdp) && !pmd_trans_huge(*pmdp)));
+
+	if (!pmd_present(*pmdp)) {
+		/*
+		 * Non-present PMDs can be migration entries or device-private
+		 * THP entries. Since these are non-present, so there is no TLB
+		 * backing. This happens when the address space is being
+		 * unmapped zap_huge_pmd(), and we encounter non-present pmds.
+		 * So it is safe to just clear the PMDs here. zap_huge_pmd(),
+		 * will take care of withdraw of the deposited table.
+		 */
+		pmd = pmdp_get(pmdp);
+		pmd_clear(pmdp);
+		page_table_check_pmd_clear(vma->vm_mm, addr, pmd);
+		return pmd;
+	}
+
 	pmd = pmdp_huge_get_and_clear(vma->vm_mm, addr, pmdp);
 	/*
 	 * if it not a fullmm flush, then we can possibly end up converting
