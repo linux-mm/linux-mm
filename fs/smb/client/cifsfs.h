@@ -9,18 +9,7 @@
 #ifndef _CIFSFS_H
 #define _CIFSFS_H
 
-#include <linux/hash.h>
-
 #define ROOT_I 2
-
-/*
- * With i_ino being u64, we can store the full 64-bit uniqueid directly.
- */
-static inline u64
-cifs_uniqueid_to_ino_t(u64 fileid)
-{
-	return fileid;
-}
 
 static inline void cifs_set_time(struct dentry *dentry, unsigned long time)
 {

@@ -919,7 +919,7 @@ static bool cifs_dir_emit(struct dir_context *ctx,
 {
 	size_t delta_bytes = 0;
 	bool rc, added = false;
-	ino_t ino = cifs_uniqueid_to_ino_t(fattr->cf_uniqueid);
+	ino_t ino = fattr->cf_uniqueid;
 
 	rc = dir_emit(ctx, name, namelen, ino, fattr->cf_dtype);
 	if (!rc)
