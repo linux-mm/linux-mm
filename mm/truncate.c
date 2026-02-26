@@ -847,13 +847,32 @@ void pagecache_isize_extended(struct inode *inode, loff_t from, loff_t to)
 
 	WARN_ON(to > inode->i_size);
 
-	if (from >= to || bsize >= PAGE_SIZE)
+	if (from >= to)
 		return;
+
+	/*
+	 * For filesystems with bsize >= PAGE_SIZE, the traditional buffer_head
+	 * path handles post-EOF zeroing correctly at writeback time. However,
+	 * with large folios enabled, a single folio can span multiple PAGE_SIZE
+	 * blocks, so mmap writes beyond EOF within the same folio are not zeroed
+	 * at writeback time before i_size is extended. We must handle this here.
+	 */
+	if (bsize >= PAGE_SIZE) {
+		/*
+		 * Only needed if the mapping supports large folios, since otherwise
+		 * each folio is exactly one page and writeback handles EOF zeroing.
+		 */
+		if (!mapping_large_folio_support(inode->i_mapping))
+			return;
+		goto find_folio;
+	}
+
 	/* Page straddling @from will not have any hole block created? */
 	rounded_from = round_up(from, bsize);
 	if (to <= rounded_from || !(rounded_from & (PAGE_SIZE - 1)))
 		return;
 
+find_folio:
 	folio = filemap_lock_folio(inode->i_mapping, from / PAGE_SIZE);
 	/* Folio not cached? Nothing to do */
 	if (IS_ERR(folio))
