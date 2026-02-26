@@ -19,7 +19,7 @@ DECLARE_EVENT_CLASS(ctime,
 
 	TP_STRUCT__entry(
 		__field(dev_t,		dev)
-		__field(ino_t,		ino)
+		__field(u64,		ino)
 		__field(time64_t,	ctime_s)
 		__field(u32,		ctime_ns)
 		__field(u32,		gen)
@@ -33,7 +33,7 @@ DECLARE_EVENT_CLASS(ctime,
 		__entry->ctime_ns	= ctime->tv_nsec;
 	),
 
-	TP_printk("ino=%d:%d:%ld:%u ctime=%lld.%u",
+	TP_printk("ino=%d:%d:%llu:%u ctime=%lld.%u",
 		MAJOR(__entry->dev), MINOR(__entry->dev), __entry->ino, __entry->gen,
 		__entry->ctime_s, __entry->ctime_ns
 	)
@@ -59,7 +59,7 @@ TRACE_EVENT(ctime_ns_xchg,
 
 	TP_STRUCT__entry(
 		__field(dev_t,		dev)
-		__field(ino_t,		ino)
+		__field(u64,		ino)
 		__field(u32,		gen)
 		__field(u32,		old)
 		__field(u32,		new)
@@ -75,7 +75,7 @@ TRACE_EVENT(ctime_ns_xchg,
 		__entry->cur		= cur;
 	),
 
-	TP_printk("ino=%d:%d:%ld:%u old=%u:%s new=%u cur=%u:%s",
+	TP_printk("ino=%d:%d:%llu:%u old=%u:%s new=%u cur=%u:%s",
 		MAJOR(__entry->dev), MINOR(__entry->dev), __entry->ino, __entry->gen,
 		__entry->old & ~I_CTIME_QUERIED,
 		__print_flags(__entry->old & I_CTIME_QUERIED, "|", CTIME_QUERIED_FLAGS),
@@ -94,7 +94,7 @@ TRACE_EVENT(fill_mg_cmtime,
 
 	TP_STRUCT__entry(
 		__field(dev_t,		dev)
-		__field(ino_t,		ino)
+		__field(u64,		ino)
 		__field(time64_t,	ctime_s)
 		__field(time64_t,	mtime_s)
 		__field(u32,		ctime_ns)
@@ -112,7 +112,7 @@ TRACE_EVENT(fill_mg_cmtime,
 		__entry->mtime_ns	= mtime->tv_nsec;
 	),
 
-	TP_printk("ino=%d:%d:%ld:%u ctime=%lld.%u mtime=%lld.%u",
+	TP_printk("ino=%d:%d:%llu:%u ctime=%lld.%u mtime=%lld.%u",
 		MAJOR(__entry->dev), MINOR(__entry->dev), __entry->ino, __entry->gen,
 		__entry->ctime_s, __entry->ctime_ns,
 		__entry->mtime_s, __entry->mtime_ns
