@@ -667,13 +667,10 @@ static inline loff_t nfs_size_to_loff_t(__u64 size)
 	return min_t(u64, size, OFFSET_MAX);
 }
 
-static inline ino_t
+static inline u64
 nfs_fileid_to_ino_t(u64 fileid)
 {
-	ino_t ino = (ino_t) fileid;
-	if (sizeof(ino_t) < sizeof(u64))
-		ino ^= fileid >> (sizeof(u64)-sizeof(ino_t)) * 8;
-	return ino;
+	return fileid;
 }
 
 static inline void nfs_ooo_clear(struct nfs_inode *nfsi)
