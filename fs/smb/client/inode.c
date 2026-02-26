@@ -1611,13 +1611,13 @@ inode_has_hashed_dentries(struct inode *inode)
 struct inode *
 cifs_iget(struct super_block *sb, struct cifs_fattr *fattr)
 {
-	unsigned long hash;
+	u64 hash;
 	struct inode *inode;
 
 retry_iget5_locked:
 	cifs_dbg(FYI, "looking for uniqueid=%llu\n", fattr->cf_uniqueid);
 
-	/* hash down to 32-bits on 32-bit arch */
+	/* With u64 i_ino, we can use the full uniqueid */
 	hash = cifs_uniqueid_to_ino_t(fattr->cf_uniqueid);
 
 	inode = iget5_locked(sb, hash, cifs_find_inode, cifs_init_inode, fattr);

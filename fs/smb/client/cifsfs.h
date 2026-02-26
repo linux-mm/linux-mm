@@ -14,18 +14,12 @@
 #define ROOT_I 2
 
 /*
- * ino_t is 32-bits on 32-bit arch. We have to squash the 64-bit value down
- * so that it will fit. We use hash_64 to convert the value to 31 bits, and
- * then add 1, to ensure that we don't end up with a 0 as the value.
+ * With i_ino being u64, we can store the full 64-bit uniqueid directly.
  */
-static inline ino_t
+static inline u64
 cifs_uniqueid_to_ino_t(u64 fileid)
 {
-	if ((sizeof(ino_t)) < (sizeof(u64)))
-		return (ino_t)hash_64(fileid, (sizeof(ino_t) * 8) - 1) + 1;
-
-	return (ino_t)fileid;
-
+	return fileid;
 }
 
 static inline void cifs_set_time(struct dentry *dentry, unsigned long time)
