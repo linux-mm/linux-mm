@@ -2266,3 +2266,8 @@ int arch_set_user_pkey_access(int pkey, unsigned long init_val)
 	return 0;
 }
 #endif
+
+void __init mem_init(void)
+{
+	kpkeys_hardened_pgtables_init();
+}
