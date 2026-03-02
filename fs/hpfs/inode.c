@@ -250,7 +250,7 @@ void hpfs_write_inode_nolock(struct inode *i)
 			hpfs_brelse4(&qbh);
 		} else
 			hpfs_error(i->i_sb,
-				"directory %08" PRIino "x doesn't have '.' entry",
+				"directory %08llx doesn't have '.' entry",
 				i->i_ino);
 	}
 	mark_buffer_dirty(bh);
