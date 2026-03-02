@@ -758,8 +758,8 @@ struct inode_state_flags {
 	enum inode_state_flags_enum __state;
 };
 
-typedef unsigned long	kino_t;
-#define PRIino		"l"
+typedef u64		kino_t;
+#define PRIino		"ll"
 
 /*
  * Keep mostly read-only and often accessed (especially for
