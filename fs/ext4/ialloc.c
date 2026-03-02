@@ -253,13 +253,13 @@ void ext4_free_inode(handle_t *handle, struct inode *inode)
 		return;
 	}
 	if (icount_read(inode) > 1) {
-		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%" PRIino "u: count=%d",
+		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%llu: count=%d",
 			 __func__, __LINE__, inode->i_ino,
 			 icount_read(inode));
 		return;
 	}
 	if (inode->i_nlink) {
-		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%" PRIino "u: nlink=%d\n",
+		ext4_msg(sb, KERN_ERR, "%s:%d: inode #%llu: nlink=%d\n",
 			 __func__, __LINE__, inode->i_ino, inode->i_nlink);
 		return;
 	}
@@ -1275,7 +1275,7 @@ got:
 		 * twice.
 		 */
 		err = -EIO;
-		ext4_error(sb, "failed to insert inode %" PRIino "u: doubly allocated?",
+		ext4_error(sb, "failed to insert inode %llu: doubly allocated?",
 			   inode->i_ino);
 		ext4_mark_group_bitmap_corrupted(sb, group,
 					EXT4_GROUP_INFO_IBITMAP_CORRUPT);
@@ -1344,7 +1344,7 @@ got:
 		goto fail_free_drop;
 	}
 
-	ext4_debug("allocating inode %" PRIino "u\n", inode->i_ino);
+	ext4_debug("allocating inode %llu\n", inode->i_ino);
 	trace_ext4_allocate_inode(inode, dir, mode);
 	brelse(inode_bitmap_bh);
 	return ret;
