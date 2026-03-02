@@ -81,15 +81,15 @@ DECLARE_EVENT_CLASS(page_cache_ra_op,
 
 	TP_STRUCT__entry(
 		__field(u64, i_ino)
-		__field(dev_t, s_dev)
+		__field(loff_t, prev_pos)
 		__field(pgoff_t, index)
+		__field(unsigned long, req_count)
+		__field(dev_t, s_dev)
 		__field(unsigned int, order)
 		__field(unsigned int, size)
 		__field(unsigned int, async_size)
 		__field(unsigned int, ra_pages)
 		__field(unsigned int, mmap_miss)
-		__field(loff_t, prev_pos)
-		__field(unsigned long, req_count)
 	),
 
 	TP_fast_assign(

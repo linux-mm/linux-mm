@@ -249,10 +249,10 @@ TRACE_EVENT(cachefiles_lookup,
 	    TP_ARGS(obj, dir, de),
 
 	    TP_STRUCT__entry(
-		    __field(unsigned int,		obj)
-		    __field(short,			error)
 		    __field(u64,			dino)
 		    __field(u64,			ino)
+		    __field(unsigned int,		obj)
+		    __field(short,			error)
 			     ),
 
 	    TP_fast_assign(
@@ -578,8 +578,8 @@ TRACE_EVENT(cachefiles_mark_active,
 
 	    /* Note that obj may be NULL */
 	    TP_STRUCT__entry(
-		    __field(unsigned int,		obj)
 		    __field(u64,			inode)
+		    __field(unsigned int,		obj)
 			     ),
 
 	    TP_fast_assign(
@@ -599,8 +599,8 @@ TRACE_EVENT(cachefiles_mark_failed,
 
 	    /* Note that obj may be NULL */
 	    TP_STRUCT__entry(
-		    __field(unsigned int,		obj)
 		    __field(u64,			inode)
+		    __field(unsigned int,		obj)
 			     ),
 
 	    TP_fast_assign(
@@ -620,8 +620,8 @@ TRACE_EVENT(cachefiles_mark_inactive,
 
 	    /* Note that obj may be NULL */
 	    TP_STRUCT__entry(
-		    __field(unsigned int,		obj)
 		    __field(u64,			inode)
+		    __field(unsigned int,		obj)
 			     ),
 
 	    TP_fast_assign(

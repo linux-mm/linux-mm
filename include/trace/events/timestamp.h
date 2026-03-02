@@ -18,9 +18,9 @@ DECLARE_EVENT_CLASS(ctime,
 	TP_ARGS(inode, ctime),
 
 	TP_STRUCT__entry(
-		__field(dev_t,		dev)
 		__field(u64,		ino)
 		__field(time64_t,	ctime_s)
+		__field(dev_t,		dev)
 		__field(u32,		ctime_ns)
 		__field(u32,		gen)
 	),
@@ -58,8 +58,8 @@ TRACE_EVENT(ctime_ns_xchg,
 	TP_ARGS(inode, old, new, cur),
 
 	TP_STRUCT__entry(
-		__field(dev_t,		dev)
 		__field(u64,		ino)
+		__field(dev_t,		dev)
 		__field(u32,		gen)
 		__field(u32,		old)
 		__field(u32,		new)
@@ -93,10 +93,10 @@ TRACE_EVENT(fill_mg_cmtime,
 	TP_ARGS(inode, ctime, mtime),
 
 	TP_STRUCT__entry(
-		__field(dev_t,		dev)
 		__field(u64,		ino)
 		__field(time64_t,	ctime_s)
 		__field(time64_t,	mtime_s)
+		__field(dev_t,		dev)
 		__field(u32,		ctime_ns)
 		__field(u32,		mtime_ns)
 		__field(u32,		gen)
