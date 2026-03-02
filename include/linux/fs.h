@@ -758,6 +758,9 @@ struct inode_state_flags {
 	enum inode_state_flags_enum __state;
 };
 
+typedef unsigned long	kino_t;
+#define PRIino		"l"
+
 /*
  * Keep mostly read-only and often accessed (especially for
  * the RCU path lookup and 'stat' data) fields at the beginning
@@ -783,7 +786,7 @@ struct inode {
 #endif
 
 	/* Stat data, not accessed from path walking */
-	unsigned long		i_ino;
+	kino_t			i_ino;
 	/*
 	 * Filesystems may only read i_nlink directly.  They shall use the
 	 * following functions for modification:
