@@ -520,36 +520,37 @@ static ssize_t anon_enabled_store(struct kobject *kobj,
 				  const char *buf, size_t count)
 {
 	int order = to_thpsize(kobj)->order;
+	bool changed = false;
 	ssize_t ret = count;
 
 	if (sysfs_streq(buf, "always")) {
 		spin_lock(&huge_anon_orders_lock);
-		clear_bit(order, &huge_anon_orders_inherit);
-		clear_bit(order, &huge_anon_orders_madvise);
-		set_bit(order, &huge_anon_orders_always);
+		changed = test_and_clear_bit(order, &huge_anon_orders_inherit);
+		changed |= test_and_clear_bit(order, &huge_anon_orders_madvise);
+		changed |= !test_and_set_bit(order, &huge_anon_orders_always);
 		spin_unlock(&huge_anon_orders_lock);
 	} else if (sysfs_streq(buf, "inherit")) {
 		spin_lock(&huge_anon_orders_lock);
-		clear_bit(order, &huge_anon_orders_always);
-		clear_bit(order, &huge_anon_orders_madvise);
-		set_bit(order, &huge_anon_orders_inherit);
+		changed = test_and_clear_bit(order, &huge_anon_orders_always);
+		changed |= test_and_clear_bit(order, &huge_anon_orders_madvise);
+		changed |= !test_and_set_bit(order, &huge_anon_orders_inherit);
 		spin_unlock(&huge_anon_orders_lock);
 	} else if (sysfs_streq(buf, "madvise")) {
 		spin_lock(&huge_anon_orders_lock);
-		clear_bit(order, &huge_anon_orders_always);
-		clear_bit(order, &huge_anon_orders_inherit);
-		set_bit(order, &huge_anon_orders_madvise);
+		changed = test_and_clear_bit(order, &huge_anon_orders_always);
+		changed |= test_and_clear_bit(order, &huge_anon_orders_inherit);
+		changed |= !test_and_set_bit(order, &huge_anon_orders_madvise);
 		spin_unlock(&huge_anon_orders_lock);
 	} else if (sysfs_streq(buf, "never")) {
 		spin_lock(&huge_anon_orders_lock);
-		clear_bit(order, &huge_anon_orders_always);
-		clear_bit(order, &huge_anon_orders_inherit);
-		clear_bit(order, &huge_anon_orders_madvise);
+		changed = test_and_clear_bit(order, &huge_anon_orders_always);
+		changed |= test_and_clear_bit(order, &huge_anon_orders_inherit);
+		changed |= test_and_clear_bit(order, &huge_anon_orders_madvise);
 		spin_unlock(&huge_anon_orders_lock);
 	} else
 		ret = -EINVAL;
 
-	if (ret > 0) {
+	if (ret > 0 && changed) {
 		int err;
 
 		err = start_stop_khugepaged();
