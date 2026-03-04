@@ -320,21 +320,28 @@ static ssize_t enabled_store(struct kobject *kobj,
 			     struct kobj_attribute *attr,
 			     const char *buf, size_t count)
 {
+	bool changed = false;
 	ssize_t ret = count;
 
 	if (sysfs_streq(buf, "always")) {
-		clear_bit(TRANSPARENT_HUGEPAGE_REQ_MADV_FLAG, &transparent_hugepage_flags);
-		set_bit(TRANSPARENT_HUGEPAGE_FLAG, &transparent_hugepage_flags);
+		changed = test_and_clear_bit(TRANSPARENT_HUGEPAGE_REQ_MADV_FLAG,
+					     &transparent_hugepage_flags);
+		changed |= !test_and_set_bit(TRANSPARENT_HUGEPAGE_FLAG,
+					     &transparent_hugepage_flags);
 	} else if (sysfs_streq(buf, "madvise")) {
-		clear_bit(TRANSPARENT_HUGEPAGE_FLAG, &transparent_hugepage_flags);
-		set_bit(TRANSPARENT_HUGEPAGE_REQ_MADV_FLAG, &transparent_hugepage_flags);
+		changed = test_and_clear_bit(TRANSPARENT_HUGEPAGE_FLAG,
+					     &transparent_hugepage_flags);
+		changed |= !test_and_set_bit(TRANSPARENT_HUGEPAGE_REQ_MADV_FLAG,
+					     &transparent_hugepage_flags);
 	} else if (sysfs_streq(buf, "never")) {
-		clear_bit(TRANSPARENT_HUGEPAGE_FLAG, &transparent_hugepage_flags);
-		clear_bit(TRANSPARENT_HUGEPAGE_REQ_MADV_FLAG, &transparent_hugepage_flags);
+		changed = test_and_clear_bit(TRANSPARENT_HUGEPAGE_FLAG,
+					     &transparent_hugepage_flags);
+		changed |= test_and_clear_bit(TRANSPARENT_HUGEPAGE_REQ_MADV_FLAG,
+					     &transparent_hugepage_flags);
 	} else
 		ret = -EINVAL;
 
-	if (ret > 0) {
+	if (ret > 0 && changed) {
 		int err = start_stop_khugepaged();
 		if (err)
 			ret = err;
