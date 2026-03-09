@@ -1692,6 +1692,8 @@ void __folio_put(struct folio *folio);
 void split_page(struct page *page, unsigned int order);
 void folio_copy(struct folio *dst, struct folio *src);
 int folio_mc_copy(struct folio *dst, struct folio *src);
+int folios_mc_copy(struct list_head *dst_list, struct list_head *src_list,
+		unsigned int __always_unused folios_cnt);
 
 unsigned long nr_free_buffer_pages(void);
 
