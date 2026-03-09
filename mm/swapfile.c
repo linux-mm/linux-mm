@@ -623,6 +623,9 @@ static struct swap_cluster_info *isolate_lock_cluster(
 	spin_unlock(&si->lock);
 
 	if (found && !cluster_table_is_alloced(found)) {
+		/* Table of full cluster must be allocated. */
+		VM_WARN_ON(ci->flags == CLUSTER_FLAG_FULL);
+
 		/* Only an empty free cluster's swap table can be freed. */
 		VM_WARN_ON_ONCE(flags != CLUSTER_FLAG_FREE);
 		VM_WARN_ON_ONCE(list != &si->free_clusters);
