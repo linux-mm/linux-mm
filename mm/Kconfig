@@ -648,6 +648,15 @@ config MIGRATION
 config DEVICE_MIGRATION
 	def_bool MIGRATION && ZONE_DEVICE
 
+config MIGRATION_COPY_OFFLOAD
+	bool "Page migration copy offload"
+	depends on MIGRATION
+	help
+	  Adds migration copy offload infrastructure which allow
+	  offload engines (DMA, multi-threaded CPU copy, etc.) to
+	  register as the batch-copy provider for page migration
+	  via migrate_offload_start()/migrate_offload_stop().
+
 config ARCH_ENABLE_HUGEPAGE_MIGRATION
 	bool
 

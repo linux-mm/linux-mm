@@ -44,6 +44,8 @@
 #include <linux/memory-tiers.h>
 #include <linux/pagewalk.h>
 #include <linux/jump_label.h>
+#include <linux/static_call.h>
+#include <linux/migrate_copy_offload.h>
 
 #include <asm/tlbflush.h>
 
@@ -53,6 +55,17 @@
 #include "swap.h"
 
 DEFINE_STATIC_KEY_FALSE(migrate_offload_enabled);
+
+#ifdef CONFIG_MIGRATION_COPY_OFFLOAD
+DEFINE_SRCU(migrate_offload_srcu);
+DEFINE_STATIC_CALL(migrate_offload_copy, folios_mc_copy);
+
+bool migrate_should_batch_default(int reason)
+{
+	return false;
+}
+DEFINE_STATIC_CALL(migrate_should_batch, migrate_should_batch_default);
+#endif
 
 static const struct movable_operations *offline_movable_ops;
 static const struct movable_operations *zsmalloc_movable_ops;
@@ -1822,10 +1835,17 @@ static int migrate_pages_batch(struct list_head *from,
 	LIST_HEAD(dst_batch);
 	LIST_HEAD(src_std);
 	LIST_HEAD(dst_std);
+	bool do_batch = false;
 	bool nosplit = (reason == MR_NUMA_MISPLACED);
 
 	VM_WARN_ON_ONCE(mode != MIGRATE_ASYNC &&
 			!list_empty(from) && !list_is_singular(from));
+
+#ifdef CONFIG_MIGRATION_COPY_OFFLOAD
+	/* Check if the offload driver wants to batch for this reason */
+	if (static_branch_unlikely(&migrate_offload_enabled))
+		do_batch = static_call(migrate_should_batch)(reason);
+#endif
 
 	for (pass = 0; pass < nr_pass && retry; pass++) {
 		retry = 0;
@@ -1969,7 +1989,7 @@ static int migrate_pages_batch(struct list_head *from,
 				break;
 			case 0:
 				if (static_branch_unlikely(&migrate_offload_enabled) &&
-				    folio_supports_batch_copy(folio)) {
+				    do_batch && folio_supports_batch_copy(folio)) {
 					list_move_tail(&folio->lru, &src_batch);
 					list_add_tail(&dst->lru, &dst_batch);
 					nr_batch++;
@@ -1999,11 +2019,17 @@ move:
 	/* Flush TLBs for all unmapped folios */
 	try_to_unmap_flush();
 
+#ifdef CONFIG_MIGRATION_COPY_OFFLOAD
 	/* Batch-copy eligible folios before the move phase */
 	if (!list_empty(&src_batch)) {
-		rc = folios_mc_copy(&dst_batch, &src_batch, nr_batch);
+		int idx = srcu_read_lock(&migrate_offload_srcu);
+
+		rc = static_call(migrate_offload_copy)(&dst_batch,
+				&src_batch, nr_batch);
+		srcu_read_unlock(&migrate_offload_srcu, idx);
 		batch_copied = (rc == 0);
 	}
+#endif
 
 	retry = 1;
 	for (pass = 0; pass < nr_pass && retry; pass++) {
