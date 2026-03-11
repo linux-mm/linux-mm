@@ -2029,16 +2029,19 @@ static inline void *mtree_range_walk(struct ma_state *mas)
 		end = ma_data_end(node, type, pivots, max);
 		prev_min = min;
 		prev_max = max;
-		if (pivots[0] >= mas->index) {
+		
+		unsigned long pivot = READ_ONCE(pivots[0]);
+		if (pivot >= mas->index) {
 			offset = 0;
-			max = pivots[0];
+			max = pivot;
 			goto next;
 		}
 
 		offset = 1;
 		while (offset < end) {
-			if (pivots[offset] >= mas->index) {
-				max = pivots[offset];
+			pivot = READ_ONCE(pivots[offset]);
+			if (pivot >= mas->index) {
+				max = pivot;
 				break;
 			}
 			offset++;
@@ -3225,11 +3228,11 @@ static inline void mas_wr_slot_store(struct ma_wr_state *wr_mas)
 		if (mas->index == wr_mas->r_min) {
 			/* Overwriting the range and a part of the next one */
 			rcu_assign_pointer(slots[offset], wr_mas->entry);
-			wr_mas->pivots[offset] = mas->last;
+			WRITE_ONCE(wr_mas->pivots[offset], mas->last);
 		} else {
 			/* Overwriting a part of the range and the next one */
 			rcu_assign_pointer(slots[offset + 1], wr_mas->entry);
-			wr_mas->pivots[offset] = mas->index - 1;
+			WRITE_ONCE(wr_mas->pivots[offset], mas->index - 1);
 			mas->offset++; /* Keep mas accurate. */
 		}
 	} else {
