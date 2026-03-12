@@ -1063,6 +1063,8 @@ static __always_inline struct maple_node *mas_pop_node(struct ma_state *mas)
 		return NULL;
 
 	ret = kmem_cache_alloc_from_sheaf(maple_node_cache, GFP_NOWAIT, mas->sheaf);
+	if (WARN_ON_ONCE(!ret))
+		return NULL;
 
 out:
 	memset(ret, 0, sizeof(*ret));
