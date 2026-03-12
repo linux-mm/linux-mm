@@ -433,8 +433,9 @@ static inline long get_nr_swap_pages(void)
 }
 
 extern void si_swapinfo(struct sysinfo *);
-int swap_type_of(dev_t device, sector_t offset);
+int swap_type_of(dev_t device, sector_t offset, bool ref);
 int find_first_swap(dev_t *device);
+void put_swap_device_by_type(int type);
 extern unsigned int count_swap_pages(int, int);
 extern sector_t swapdev_block(int, pgoff_t);
 extern int __swap_count(swp_entry_t entry);

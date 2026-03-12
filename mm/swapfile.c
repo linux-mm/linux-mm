@@ -2147,7 +2147,7 @@ void swap_free_hibernation_slot(swp_entry_t entry)
  *
  * This is needed for the suspend to disk (aka swsusp).
  */
-int swap_type_of(dev_t device, sector_t offset)
+int swap_type_of(dev_t device, sector_t offset, bool ref)
 {
 	int type;
 
@@ -2161,13 +2161,16 @@ int swap_type_of(dev_t device, sector_t offset)
 		if (!(sis->flags & SWP_WRITEOK))
 			continue;
 
-		if (device == sis->bdev->bd_dev) {
-			struct swap_extent *se = first_se(sis);
+		if (device != sis->bdev->bd_dev)
+			continue;
 
-			if (se->start_block == offset) {
-				spin_unlock(&swap_lock);
-				return type;
-			}
+		struct swap_extent *se = first_se(sis);
+		if (se->start_block != offset)
+			continue;
+
+		if (ref && get_swap_device_info(sis)) {
+			spin_unlock(&swap_lock);
+			return type;
 		}
 	}
 	spin_unlock(&swap_lock);
@@ -2190,6 +2193,17 @@ int find_first_swap(dev_t *device)
 	}
 	spin_unlock(&swap_lock);
 	return -ENODEV;
+}
+
+void put_swap_device_by_type(int type)
+{
+	struct swap_info_struct *sis;
+
+	if (type < 0 || type >= MAX_SWAPFILES)
+		return;
+
+	sis = swap_info[type];
+	put_swap_device(sis);
 }
 
 /*

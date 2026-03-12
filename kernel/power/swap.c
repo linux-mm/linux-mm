@@ -341,7 +341,7 @@ static int swsusp_swap_check(void)
 	 * This is called before saving the image.
 	 */
 	if (swsusp_resume_device)
-		res = swap_type_of(swsusp_resume_device, swsusp_resume_block);
+		res = swap_type_of(swsusp_resume_device, swsusp_resume_block, false);
 	else
 		res = find_first_swap(&swsusp_resume_device);
 	if (res < 0)
