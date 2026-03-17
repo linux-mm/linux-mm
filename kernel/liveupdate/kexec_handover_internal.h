@@ -41,9 +41,12 @@ static inline void kho_debugfs_fdt_remove(struct kho_debugfs *dbg,
 #endif /* CONFIG_KEXEC_HANDOVER_DEBUGFS */
 
 #ifdef CONFIG_KEXEC_HANDOVER_DEBUG
-bool kho_scratch_overlap(phys_addr_t phys, size_t size);
+static inline bool kho_scratch_overlap_debug(phys_addr_t phys, size_t size)
+{
+	return kho_scratch_overlap(phys, size);
+}
 #else
-static inline bool kho_scratch_overlap(phys_addr_t phys, size_t size)
+static inline bool kho_scratch_overlap_debug(phys_addr_t phys, size_t size)
 {
 	return false;
 }

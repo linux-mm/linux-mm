@@ -820,7 +820,8 @@ int kho_preserve_folio(struct folio *folio)
 	const unsigned long pfn = folio_pfn(folio);
 	const unsigned int order = folio_order(folio);
 
-	if (WARN_ON(kho_scratch_overlap(pfn << PAGE_SHIFT, PAGE_SIZE << order)))
+	if (WARN_ON(kho_scratch_overlap_debug(pfn << PAGE_SHIFT,
+					      PAGE_SIZE << order)))
 		return -EINVAL;
 
 	return kho_radix_add_page(tree, pfn, order);
@@ -864,10 +865,9 @@ int kho_preserve_pages(struct page *page, unsigned long nr_pages)
 	unsigned long failed_pfn = 0;
 	int err = 0;
 
-	if (WARN_ON(kho_scratch_overlap(start_pfn << PAGE_SHIFT,
-					nr_pages << PAGE_SHIFT))) {
+	if (WARN_ON(kho_scratch_overlap_debug(start_pfn << PAGE_SHIFT,
+					      nr_pages << PAGE_SHIFT)))
 		return -EINVAL;
-	}
 
 	while (pfn < end_pfn) {
 		unsigned int order =
@@ -1326,6 +1326,26 @@ int kho_retrieve_subtree(const char *name, phys_addr_t *phys)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(kho_retrieve_subtree);
+
+bool kho_scratch_overlap(phys_addr_t phys, size_t size)
+{
+	phys_addr_t scratch_start, scratch_end;
+	unsigned int i;
+
+	if (!kho_scratch)
+		return false;
+
+	for (i = 0; i < kho_scratch_cnt; i++) {
+		scratch_start = kho_scratch[i].addr;
+		scratch_end = kho_scratch[i].addr + kho_scratch[i].size;
+
+		if (phys < scratch_end && (phys + size) > scratch_start)
+			return true;
+	}
+
+	return false;
+}
+EXPORT_SYMBOL_GPL(kho_scratch_overlap);
 
 static int __init kho_mem_retrieve(const void *fdt)
 {
