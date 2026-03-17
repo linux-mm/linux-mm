@@ -55,6 +55,7 @@
 #include <linux/cacheinfo.h>
 #include <linux/pgalloc_tag.h>
 #include <linux/mmzone_lock.h>
+#include <linux/kexec_handover.h>
 #include <asm/div64.h>
 #include "internal.h"
 #include "shuffle.h"
@@ -548,6 +549,12 @@ void __meminit init_pageblock_migratetype(struct page *page,
 	if (unlikely(page_group_by_mobility_disabled &&
 		     migratetype < MIGRATE_PCPTYPES))
 		migratetype = MIGRATE_UNMOVABLE;
+
+	/*
+	 * Mark KHO scratch as CMA so no unmovable allocations are made there.
+	 */
+	if (unlikely(kho_scratch_overlap(page_to_phys(page), PAGE_SIZE)))
+		migratetype = MIGRATE_CMA;
 
 	flags = migratetype;
 
