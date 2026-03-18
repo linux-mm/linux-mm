@@ -20777,6 +20777,13 @@ K:	(?i)pidfd
 K:	(?i)clone3
 K:	\b(clone_args|kernel_clone_args)\b
 
+PID NAMESPACE: TEST INIT CREATION VIA SETNS
+M:	Christian Brauner <christian@brauner.io>
+R:	Pavel Tikhomirov <ptikhomirov@virtuozzo.com>
+L:	linux-kernel@vger.kernel.org
+S:	Maintained
+F:	tools/testing/selftests/pid_namespace/pidns_init_via_setns.c
+
 PIN CONTROL SUBSYSTEM
 M:	Linus Walleij <linusw@kernel.org>
 L:	linux-gpio@vger.kernel.org
