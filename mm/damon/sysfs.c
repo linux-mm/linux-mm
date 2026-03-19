@@ -1735,6 +1735,8 @@ static int damon_sysfs_update_schemes_tried_regions(
 
 	if (!ctx)
 		return -EINVAL;
+	if (sysfs_kdamond->contexts->nr != 1)
+		return -EINVAL;
 
 	damon_sysfs_schemes_clear_regions(
 			sysfs_kdamond->contexts->contexts_arr[0]->schemes);
