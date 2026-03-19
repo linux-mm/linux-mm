@@ -133,7 +133,7 @@ static DEFINE_PER_CPU(struct percpu_swap_cluster, percpu_swap_cluster) = {
 /* May return NULL on invalid type, caller must check for NULL return */
 static struct swap_info_struct *swap_type_to_info(int type)
 {
-	if (type >= MAX_SWAPFILES)
+	if (type < 0 || type >= MAX_SWAPFILES)
 		return NULL;
 	return READ_ONCE(swap_info[type]); /* rcu_dereference() */
 }
@@ -1972,22 +1972,15 @@ void swap_free_hibernation_slot(swp_entry_t entry)
 	put_swap_device(si);
 }
 
-/*
- * Find the swap type that corresponds to given device (if any).
- *
- * @offset - number of the PAGE_SIZE-sized block of the device, starting
- * from 0, in which the swap header is expected to be located.
- *
- * This is needed for the suspend to disk (aka swsusp).
- */
-int swap_type_of(dev_t device, sector_t offset)
+static int swap_type_of(dev_t device, sector_t offset)
 {
 	int type;
+
+	lockdep_assert_held(&swap_lock);
 
 	if (!device)
 		return -1;
 
-	spin_lock(&swap_lock);
 	for (type = 0; type < nr_swapfiles; type++) {
 		struct swap_info_struct *sis = swap_info[type];
 
@@ -1997,14 +1990,68 @@ int swap_type_of(dev_t device, sector_t offset)
 		if (device == sis->bdev->bd_dev) {
 			struct swap_extent *se = first_se(sis);
 
-			if (se->start_block == offset) {
-				spin_unlock(&swap_lock);
+			if (se->start_block == offset)
 				return type;
-			}
 		}
 	}
-	spin_unlock(&swap_lock);
 	return -ENODEV;
+}
+
+/*
+ * Finds the swap type and safely acquires a reference to the swap device
+ * to prevent race conditions with swapoff.
+ *
+ * This should be used in environments like uswsusp where a race condition
+ * exists between configuring the resume device and allocating a swap slot.
+ * For sysfs hibernation where user-space is frozen (making swapoff
+ * impossible), use find_hibernation_swap_type() instead.
+ *
+ * The caller must drop the reference using put_hibernation_swap_type().
+ */
+int get_hibernation_swap_type(dev_t device, sector_t offset)
+{
+	int type;
+	struct swap_info_struct *sis;
+
+	spin_lock(&swap_lock);
+	type = swap_type_of(device, offset);
+	sis = swap_type_to_info(type);
+	if (!sis || !get_swap_device_info(sis))
+		type = -1;
+
+	spin_unlock(&swap_lock);
+	return type;
+}
+
+/*
+ * Drops the reference to the swap device previously acquired by
+ * get_hibernation_swap_type().
+ */
+void put_hibernation_swap_type(int type)
+{
+	struct swap_info_struct *sis;
+
+	sis = swap_type_to_info(type);
+	if (!sis)
+		return;
+
+	put_swap_device(sis);
+}
+
+/*
+ * Simple lookup without acquiring a reference. Used by the sysfs
+ * hibernation path where user-space is already frozen, making
+ * swapoff impossible.
+ */
+int find_hibernation_swap_type(dev_t device, sector_t offset)
+{
+	int type;
+
+	spin_lock(&swap_lock);
+	type = swap_type_of(device, offset);
+	spin_unlock(&swap_lock);
+
+	return type;
 }
 
 int find_first_swap(dev_t *device)
@@ -2837,10 +2884,23 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	 * spinlock) will be waited too.  This makes it easy to
 	 * prevent folio_test_swapcache() and the following swap cache
 	 * operations from racing with swapoff.
+	 *
+	 * Note: if a hibernation session is actively holding a swap
+	 * device reference, swapoff will block here until the reference
+	 * is released via put_hibernation_swap_type() or the wait is
+	 * interrupted by a signal.
 	 */
 	percpu_ref_kill(&p->users);
 	synchronize_rcu();
-	wait_for_completion(&p->comp);
+	err = wait_for_completion_interruptible(&p->comp);
+	if (err) {
+		percpu_ref_resurrect(&p->users);
+		synchronize_rcu();
+		reinit_completion(&p->comp);
+		reinsert_swap_info(p);
+		goto out_dput;
+	}
+
 
 	flush_work(&p->discard_work);
 	flush_work(&p->reclaim_work);

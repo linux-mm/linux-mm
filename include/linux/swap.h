@@ -452,7 +452,9 @@ static inline long get_nr_swap_pages(void)
 
 extern void si_swapinfo(struct sysinfo *);
 extern int add_swap_count_continuation(swp_entry_t, gfp_t);
-int swap_type_of(dev_t device, sector_t offset);
+int get_hibernation_swap_type(dev_t device, sector_t offset);
+int find_hibernation_swap_type(dev_t device, sector_t offset);
+void put_hibernation_swap_type(int type);
 int find_first_swap(dev_t *device);
 extern unsigned int count_swap_pages(int, int);
 extern sector_t swapdev_block(int, pgoff_t);
