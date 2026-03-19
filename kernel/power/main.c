@@ -36,6 +36,13 @@
 static unsigned int saved_gfp_count;
 static gfp_t saved_gfp_mask;
 
+void pm_restore_gfp_mask_safe(void)
+{
+	if (!saved_gfp_count)
+		return;
+	pm_restore_gfp_mask();
+}
+
 void pm_restore_gfp_mask(void)
 {
 	WARN_ON(!mutex_is_locked(&system_transition_mutex));
