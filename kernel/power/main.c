@@ -36,6 +36,24 @@
 static unsigned int saved_gfp_count;
 static gfp_t saved_gfp_mask;
 
+/**
+ * pm_restore_gfp_mask_safe - Conditionally restore the GFP mask
+ *
+ * Call pm_restore_gfp_mask() only if a GFP restriction is active.
+ *
+ * After GFP mask stacking was introduced, calling
+ * pm_restore_gfp_mask() without a matching restriction triggers a
+ * warning. Some hibernation paths invoke restore defensively, so this
+ * helper avoids spurious warnings when no restriction is in place.
+ */
+void pm_restore_gfp_mask_safe(void)
+{
+	WARN_ON(!mutex_is_locked(&system_transition_mutex));
+	if (!saved_gfp_count)
+		return;
+	pm_restore_gfp_mask();
+}
+
 void pm_restore_gfp_mask(void)
 {
 	WARN_ON(!mutex_is_locked(&system_transition_mutex));
