@@ -51,6 +51,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/anon_inodes.h>
+#include <linux/atomic.h>
 #include <linux/cleanup.h>
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -66,6 +67,7 @@
 #include <linux/rwsem.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
+#include <linux/wait.h>
 #include <uapi/linux/liveupdate.h>
 #include "luo_internal.h"
 
@@ -89,10 +91,13 @@
  */
 struct luo_session_header {
 	long count;
+	atomic_t closing;
 	struct list_head list;
 	struct rw_semaphore rwsem;
+	wait_queue_head_t reboot_waitq;
 	struct luo_session_header_ser *header_ser;
 	struct luo_session_ser *ser;
+	bool rebooting;
 	bool active;
 };
 
@@ -110,12 +115,23 @@ static struct luo_session_global luo_session_global = {
 	.incoming = {
 		.list = LIST_HEAD_INIT(luo_session_global.incoming.list),
 		.rwsem = __RWSEM_INITIALIZER(luo_session_global.incoming.rwsem),
+		.reboot_waitq =
+			__WAIT_QUEUE_HEAD_INITIALIZER(luo_session_global.incoming.reboot_waitq),
 	},
 	.outgoing = {
+		.closing = ATOMIC_INIT(0),
 		.list = LIST_HEAD_INIT(luo_session_global.outgoing.list),
 		.rwsem = __RWSEM_INITIALIZER(luo_session_global.outgoing.rwsem),
+		.reboot_waitq =
+			__WAIT_QUEUE_HEAD_INITIALIZER(luo_session_global.outgoing.reboot_waitq),
 	},
 };
+
+static void luo_session_reboot_done(struct luo_session_header *sh)
+{
+	WRITE_ONCE(sh->rebooting, false);
+	wake_up_all(&sh->reboot_waitq);
+}
 
 static struct luo_session *luo_session_alloc(const char *name)
 {
@@ -128,6 +144,8 @@ static struct luo_session *luo_session_alloc(const char *name)
 	INIT_LIST_HEAD(&session->file_set.files_list);
 	luo_file_set_init(&session->file_set);
 	INIT_LIST_HEAD(&session->list);
+	session->state = LUO_SESSION_OUTGOING;
+	refcount_set(&session->refs, 1);
 	mutex_init(&session->mutex);
 
 	return session;
@@ -138,6 +156,17 @@ static void luo_session_free(struct luo_session *session)
 	luo_file_set_destroy(&session->file_set);
 	mutex_destroy(&session->mutex);
 	kfree(session);
+}
+
+static void luo_session_get(struct luo_session *session)
+{
+	refcount_inc(&session->refs);
+}
+
+static void luo_session_put(struct luo_session *session)
+{
+	if (refcount_dec_and_test(&session->refs))
+		luo_session_free(session);
 }
 
 static int luo_session_insert(struct luo_session_header *sh,
@@ -152,6 +181,9 @@ static int luo_session_insert(struct luo_session_header *sh,
 	 * for new session.
 	 */
 	if (sh == &luo_session_global.outgoing) {
+		if (READ_ONCE(sh->rebooting))
+			return -EBUSY;
+
 		if (sh->count == LUO_SESSION_MAX)
 			return -ENOMEM;
 	}
@@ -172,17 +204,98 @@ static int luo_session_insert(struct luo_session_header *sh,
 	return 0;
 }
 
+static void __luo_session_remove(struct luo_session_header *sh,
+				 struct luo_session *session)
+{
+	list_del(&session->list);
+	sh->count--;
+}
+
 static void luo_session_remove(struct luo_session_header *sh,
 			       struct luo_session *session)
 {
 	guard(rwsem_write)(&sh->rwsem);
-	list_del(&session->list);
-	sh->count--;
+	__luo_session_remove(sh, session);
+}
+
+static int luo_session_outgoing_begin(struct luo_session *session,
+				      struct luo_session_header **shp)
+{
+	struct luo_session_header *sh;
+
+	if (READ_ONCE(session->state) != LUO_SESSION_OUTGOING)
+		return -EINVAL;
+
+	sh = &luo_session_global.outgoing;
+	down_read(&sh->rwsem);
+	if (READ_ONCE(sh->rebooting)) {
+		up_read(&sh->rwsem);
+		return -EBUSY;
+	}
+
+	*shp = sh;
+	return 0;
+}
+
+static void luo_session_outgoing_end(struct luo_session_header *sh)
+{
+	if (sh)
+		up_read(&sh->rwsem);
+}
+
+static void luo_session_wait_reboot(struct luo_session_header *sh)
+{
+	DEFINE_WAIT(wait);
+
+	for (;;) {
+		prepare_to_wait(&sh->reboot_waitq, &wait,
+				TASK_UNINTERRUPTIBLE | TASK_FREEZABLE);
+		if (!READ_ONCE(sh->rebooting))
+			break;
+		schedule();
+	}
+
+	finish_wait(&sh->reboot_waitq, &wait);
+}
+
+static int luo_session_finish_retrieved(struct luo_session *session)
+{
+	int err;
+
+	guard(mutex)(&session->mutex);
+	if (session->state != LUO_SESSION_RETRIEVED)
+		return -EINVAL;
+
+	err = luo_file_finish(&session->file_set);
+	if (err)
+		session->state = LUO_SESSION_INCOMING;
+
+	return err;
+}
+
+static void luo_session_discard_deserialized(struct luo_session_header *sh)
+{
+	struct luo_session *session;
+
+	down_write(&sh->rwsem);
+	while (!list_empty(&sh->list)) {
+		session = list_last_entry(&sh->list, struct luo_session, list);
+		__luo_session_remove(sh, session);
+		session->state = LUO_SESSION_CLOSED;
+		luo_file_abort_deserialized(&session->file_set);
+		luo_session_put(session);
+	}
+	up_write(&sh->rwsem);
+
+	luo_flb_discard_incoming();
 }
 
 static int luo_session_finish_one(struct luo_session *session)
 {
 	guard(mutex)(&session->mutex);
+	if (session->state != LUO_SESSION_RETRIEVED)
+		return -EINVAL;
+
 	return luo_file_finish(&session->file_set);
 }
 
@@ -204,26 +317,67 @@ static int luo_session_release(struct inode *inodep, struct file *filep)
 {
 	struct luo_session *session = filep->private_data;
 	struct luo_session_header *sh;
+	int state = READ_ONCE(session->state);
+	int ret = 0;
+	bool discard_flb = false;
 
-	/* If retrieved is set, it means this session is from incoming list */
-	if (session->retrieved) {
-		int err = luo_session_finish_one(session);
+	if (state == LUO_SESSION_RETRIEVED) {
+		ret = luo_session_finish_retrieved(session);
 
-		if (err) {
+		if (ret) {
 			pr_warn("Unable to finish session [%s] on release\n",
 				session->name);
-			return err;
+			luo_session_put(session);
+			return ret;
 		}
-		sh = &luo_session_global.incoming;
-	} else {
 		scoped_guard(mutex, &session->mutex)
-			luo_file_unpreserve_files(&session->file_set);
-		sh = &luo_session_global.outgoing;
+			session->state = LUO_SESSION_CLOSED;
+		sh = &luo_session_global.incoming;
+		down_write(&sh->rwsem);
+		__luo_session_remove(sh, session);
+		discard_flb = !sh->count;
+		up_write(&sh->rwsem);
+		luo_session_put(session);
+		luo_session_put(session);
+		if (discard_flb)
+			luo_flb_discard_incoming();
+		return 0;
 	}
 
-	luo_session_remove(sh, session);
-	luo_session_free(session);
+	if (state != LUO_SESSION_OUTGOING) {
+		WARN_ON_ONCE(1);
+		luo_session_put(session);
+		return 0;
+	}
 
+	sh = &luo_session_global.outgoing;
+
+	for (;;) {
+		down_write(&sh->rwsem);
+		if (READ_ONCE(sh->rebooting)) {
+			up_write(&sh->rwsem);
+			luo_session_wait_reboot(sh);
+			continue;
+		}
+
+		atomic_inc(&sh->closing);
+		__luo_session_remove(sh, session);
+		up_write(&sh->rwsem);
+		break;
+	}
+
+	scoped_guard(mutex, &session->mutex) {
+		session->state = LUO_SESSION_CLOSED;
+		luo_file_unpreserve_files(&session->file_set);
+	}
+
+	down_write(&sh->rwsem);
+	if (atomic_dec_and_test(&sh->closing))
+		wake_up_all(&sh->reboot_waitq);
+	up_write(&sh->rwsem);
+
+	luo_session_put(session);
+	luo_session_put(session);
 	return 0;
 }
 
@@ -231,10 +385,16 @@ static int luo_session_preserve_fd(struct luo_session *session,
 				   struct luo_ucmd *ucmd)
 {
 	struct liveupdate_session_preserve_fd *argp = ucmd->cmd;
+	struct luo_session_header *sh = NULL;
 	int err;
 
-	guard(mutex)(&session->mutex);
-	err = luo_preserve_file(&session->file_set, argp->token, argp->fd);
+	err = luo_session_outgoing_begin(session, &sh);
+	if (err)
+		return err;
+
+	scoped_guard(mutex, &session->mutex)
+		err = luo_preserve_file(&session->file_set, argp->token, argp->fd);
+	luo_session_outgoing_end(sh);
 	if (err)
 		return err;
 
@@ -251,6 +411,11 @@ static int luo_session_retrieve_fd(struct luo_session *session,
 	struct liveupdate_session_retrieve_fd *argp = ucmd->cmd;
 	struct file *file;
 	int err;
+
+	scoped_guard(mutex, &session->mutex) {
+		if (session->state != LUO_SESSION_RETRIEVED)
+			return -EINVAL;
+	}
 
 	argp->fd = get_unused_fd_flags(O_CLOEXEC);
 	if (argp->fd < 0)
@@ -281,8 +446,9 @@ static int luo_session_finish(struct luo_session *session,
 			      struct luo_ucmd *ucmd)
 {
 	struct liveupdate_session_finish *argp = ucmd->cmd;
-	int err = luo_session_finish_one(session);
+	int err;
 
+	err = luo_session_finish_one(session);
 	if (err)
 		return err;
 
@@ -371,9 +537,12 @@ static int luo_session_getfile(struct luo_session *session, struct file **filep)
 
 	lockdep_assert_held(&session->mutex);
 	snprintf(name_buf, sizeof(name_buf), "[luo_session] %s", session->name);
+	luo_session_get(session);
 	file = anon_inode_getfile(name_buf, &luo_session_fops, session, O_RDWR);
-	if (IS_ERR(file))
+	if (IS_ERR(file)) {
+		luo_session_put(session);
 		return PTR_ERR(file);
+	}
 
 	*filep = file;
 
@@ -403,7 +572,7 @@ int luo_session_create(const char *name, struct file **filep)
 err_remove:
 	luo_session_remove(&luo_session_global.outgoing, session);
 err_free:
-	luo_session_free(session);
+	luo_session_put(session);
 
 	return err;
 }
@@ -418,6 +587,7 @@ int luo_session_retrieve(const char *name, struct file **filep)
 	scoped_guard(rwsem_read, &sh->rwsem) {
 		list_for_each_entry(it, &sh->list, list) {
 			if (!strncmp(it->name, name, sizeof(it->name))) {
+				luo_session_get(it);
 				session = it;
 				break;
 			}
@@ -428,12 +598,14 @@ int luo_session_retrieve(const char *name, struct file **filep)
 		return -ENOENT;
 
 	guard(mutex)(&session->mutex);
-	if (session->retrieved)
-		return -EINVAL;
+	if (session->state != LUO_SESSION_INCOMING)
+		err = -EINVAL;
+	else
+		err = luo_session_getfile(session, filep);
 
-	err = luo_session_getfile(session, filep);
 	if (!err)
-		session->retrieved = true;
+		session->state = LUO_SESSION_RETRIEVED;
+	luo_session_put(session);
 
 	return err;
 }
@@ -548,6 +720,7 @@ int luo_session_deserialize(void)
 				sh->ser[i].name, session);
 			return PTR_ERR(session);
 		}
+		session->state = LUO_SESSION_INCOMING;
 
 		err = luo_session_insert(sh, session);
 		if (err) {
@@ -578,6 +751,17 @@ int luo_session_serialize(void)
 	int err;
 
 	guard(rwsem_write)(&sh->rwsem);
+	if (READ_ONCE(sh->rebooting))
+		return -EBUSY;
+
+	while (atomic_read(&sh->closing)) {
+		up_write(&sh->rwsem);
+		wait_event(sh->reboot_waitq, !atomic_read(&sh->closing));
+		down_write(&sh->rwsem);
+		if (READ_ONCE(sh->rebooting))
+			return -EBUSY;
+	}
+	WRITE_ONCE(sh->rebooting, true);
 	list_for_each_entry(session, &sh->list, list) {
 		err = luo_session_freeze_one(session, &sh->ser[i]);
 		if (err)
@@ -595,8 +779,11 @@ err_undo:
 	list_for_each_entry_continue_reverse(session, &sh->list, list) {
 		i--;
 		luo_session_unfreeze_one(session, &sh->ser[i]);
-		memset(sh->ser[i].name, 0, sizeof(sh->ser[i].name));
+		memset(&sh->ser[i], 0, sizeof(sh->ser[i]));
 	}
+	sh->header_ser->count = 0;
+	/* Reset rebooting flag on serialization failure. */
+	luo_session_reboot_done(sh);
 
 	return err;
 }
@@ -624,7 +811,8 @@ bool luo_session_quiesce(void)
 	down_write(&luo_session_global.outgoing.rwsem);
 
 	if (luo_session_global.incoming.count ||
-	    luo_session_global.outgoing.count) {
+	    luo_session_global.outgoing.count ||
+	    atomic_read(&luo_session_global.outgoing.closing)) {
 		up_write(&luo_session_global.outgoing.rwsem);
 		up_write(&luo_session_global.incoming.rwsem);
 		return false;
