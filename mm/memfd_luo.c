@@ -358,18 +358,10 @@ static void memfd_luo_discard_folios(const struct memfd_luo_folio_ser *folios_se
 	}
 }
 
-static void memfd_luo_finish(struct liveupdate_file_op_args *args)
+static void memfd_luo_abort(struct liveupdate_file_op_args *args)
 {
 	struct memfd_luo_folio_ser *folios_ser;
 	struct memfd_luo_ser *ser;
-
-	/*
-	 * If retrieve was successful, nothing to do. If it failed, retrieve()
-	 * already cleaned up everything it could. So nothing to do there
-	 * either. Only need to clean up when retrieve was not called.
-	 */
-	if (args->retrieve_status)
-		return;
 
 	ser = phys_to_virt(args->serialized_data);
 	if (!ser)
@@ -386,6 +378,19 @@ static void memfd_luo_finish(struct liveupdate_file_op_args *args)
 
 out:
 	kho_restore_free(ser);
+}
+
+static void memfd_luo_finish(struct liveupdate_file_op_args *args)
+{
+	/*
+	 * If retrieve was successful, nothing to do. If it failed, retrieve()
+	 * already cleaned up everything it could. So nothing to do there
+	 * either. Only need to clean up when retrieve was not called.
+	 */
+	if (args->retrieve_status)
+		return;
+
+	memfd_luo_abort(args);
 }
 
 static int memfd_luo_retrieve_folios(struct file *file,
@@ -532,6 +537,7 @@ static bool memfd_luo_can_preserve(struct liveupdate_file_handler *handler,
 static const struct liveupdate_file_ops memfd_luo_file_ops = {
 	.freeze = memfd_luo_freeze,
 	.finish = memfd_luo_finish,
+	.abort = memfd_luo_abort,
 	.retrieve = memfd_luo_retrieve,
 	.preserve = memfd_luo_preserve,
 	.unpreserve = memfd_luo_unpreserve,
