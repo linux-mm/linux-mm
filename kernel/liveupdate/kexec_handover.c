@@ -291,6 +291,19 @@ struct folio *kho_restore_folio(phys_addr_t phys)
 }
 EXPORT_SYMBOL_GPL(kho_restore_folio);
 
+bool kho_is_restorable_phys(phys_addr_t phys)
+{
+	struct page *page = pfn_to_online_page(PHYS_PFN(phys));
+	union kho_page_info info;
+
+	if (!page || !PAGE_ALIGNED(phys))
+		return false;
+
+	info.page_private = READ_ONCE(page->private);
+	return info.magic == KHO_PAGE_MAGIC && info.order <= MAX_PAGE_ORDER;
+}
+EXPORT_SYMBOL_GPL(kho_is_restorable_phys);
+
 /**
  * kho_restore_pages - restore list of contiguous order 0 pages.
  * @phys: physical address of the first page.

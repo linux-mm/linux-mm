@@ -673,6 +673,14 @@ int __init luo_session_setup_incoming(void *fdt_in)
 	}
 
 	header_ser_pa = get_unaligned((u64 *)ptr);
+	if (!header_ser_pa) {
+		pr_err("Session header address is missing\n");
+		return -EINVAL;
+	}
+
+	if (!kho_is_restorable_phys(header_ser_pa))
+		return -EINVAL;
+
 	header_ser = phys_to_virt(header_ser_pa);
 
 	luo_session_global.incoming.header_ser = header_ser;
@@ -697,8 +705,21 @@ int luo_session_deserialize(void)
 	if (!sh->active)
 		return err;
 
+	if (sh->header_ser->count > LUO_SESSION_MAX) {
+		pr_warn("Invalid session count %llu\n", sh->header_ser->count);
+		err = -EINVAL;
+		goto out_free_header;
+	}
+
 	for (int i = 0; i < sh->header_ser->count; i++) {
 		struct luo_session *session;
+
+		if (strnlen(sh->ser[i].name, sizeof(sh->ser[i].name)) ==
+		    sizeof(sh->ser[i].name)) {
+			pr_warn("Session name is not NUL-terminated\n");
+			err = -EINVAL;
+			goto out_discard;
+		}
 
 		session = luo_session_alloc(sh->ser[i].name);
 		if (IS_ERR(session)) {
@@ -728,9 +749,11 @@ int luo_session_deserialize(void)
 	}
 
 out_free_header:
-	kho_restore_free(sh->header_ser);
-	sh->header_ser = NULL;
-	sh->ser = NULL;
+	if (sh->header_ser) {
+		kho_restore_free(sh->header_ser);
+		sh->header_ser = NULL;
+		sh->ser = NULL;
+	}
 
 	return err;
 

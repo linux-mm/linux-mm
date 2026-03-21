@@ -363,6 +363,10 @@ static void memfd_luo_abort(struct liveupdate_file_op_args *args)
 	struct memfd_luo_folio_ser *folios_ser;
 	struct memfd_luo_ser *ser;
 
+	if (!args->serialized_data ||
+	    !kho_is_restorable_phys(args->serialized_data))
+		return;
+
 	ser = phys_to_virt(args->serialized_data);
 	if (!ser)
 		return;
@@ -399,9 +403,15 @@ static int memfd_luo_retrieve_folios(struct file *file,
 {
 	struct inode *inode = file_inode(file);
 	struct address_space *mapping = inode->i_mapping;
+	u64 max_index = i_size_read(inode);
+	u64 prev_index = 0;
 	struct folio *folio;
+	long put_from = 0;
 	int err = -EIO;
 	long i;
+
+	if (max_index)
+		max_index = (max_index - 1) >> PAGE_SHIFT;
 
 	for (i = 0; i < nr_folios; i++) {
 		const struct memfd_luo_folio_ser *pfolio = &folios_ser[i];
@@ -412,6 +422,19 @@ static int memfd_luo_retrieve_folios(struct file *file,
 		if (!pfolio->pfn)
 			continue;
 
+		put_from = i;
+		if (pfolio->flags &
+		    ~(MEMFD_LUO_FOLIO_DIRTY | MEMFD_LUO_FOLIO_UPTODATE)) {
+			err = -EINVAL;
+			goto put_folios;
+		}
+
+		if (pfolio->index > max_index ||
+		    (i && pfolio->index <= prev_index)) {
+			err = -EINVAL;
+			goto put_folios;
+		}
+
 		phys = PFN_PHYS(pfolio->pfn);
 		folio = kho_restore_folio(phys);
 		if (!folio) {
@@ -419,7 +442,9 @@ static int memfd_luo_retrieve_folios(struct file *file,
 			       phys);
 			goto put_folios;
 		}
+		put_from = i + 1;
 		index = pfolio->index;
+		prev_index = index;
 		flags = pfolio->flags;
 
 		/* Set up the folio for insertion. */
@@ -469,10 +494,15 @@ put_folios:
 	 * Note: don't free the folios already added to the file. They will be
 	 * freed when the file is freed. Free the ones not added yet here.
 	 */
-	for (long j = i + 1; j < nr_folios; j++) {
+	for (long j = put_from; j < nr_folios; j++) {
 		const struct memfd_luo_folio_ser *pfolio = &folios_ser[j];
+		phys_addr_t phys;
 
-		folio = kho_restore_folio(pfolio->pfn);
+		if (!pfolio->pfn)
+			continue;
+
+		phys = PFN_PHYS(pfolio->pfn);
+		folio = kho_restore_folio(phys);
 		if (folio)
 			folio_put(folio);
 	}
@@ -487,9 +517,31 @@ static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 	struct file *file;
 	int err;
 
+	if (!kho_is_restorable_phys(args->serialized_data))
+		return -EINVAL;
+
 	ser = phys_to_virt(args->serialized_data);
 	if (!ser)
 		return -EINVAL;
+
+	if (!!ser->nr_folios != !!ser->folios.first.phys) {
+		err = -EINVAL;
+		goto free_ser;
+	}
+
+	if (ser->nr_folios >
+	    (((u64)ser->folios.total_pages << PAGE_SHIFT) /
+	     sizeof(*folios_ser))) {
+		err = -EINVAL;
+		goto free_ser;
+	}
+
+	if (ser->nr_folios &&
+	    (!ser->size ||
+	     ser->nr_folios > ((ser->size - 1) >> PAGE_SHIFT) + 1)) {
+		err = -EINVAL;
+		goto free_ser;
+	}
 
 	file = memfd_alloc_file("", 0);
 	if (IS_ERR(file)) {
