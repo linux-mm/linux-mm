@@ -70,6 +70,8 @@ struct luo_flb_global {
 	long count;
 };
 
+static DEFINE_MUTEX(luo_flb_incoming_lock);
+
 static struct luo_flb_global luo_flb_global = {
 	.list = LIST_HEAD_INIT(luo_flb_global.list),
 };
@@ -128,6 +130,9 @@ static void luo_flb_file_unpreserve_one(struct liveupdate_flb *flb)
 	struct luo_flb_private *private = luo_flb_get_private(flb);
 
 	scoped_guard(mutex, &private->outgoing.lock) {
+		if (WARN_ON_ONCE(!private->outgoing.count))
+			return;
+
 		private->outgoing.count--;
 		if (!private->outgoing.count) {
 			struct liveupdate_flb_op_args args = {0};
@@ -161,22 +166,24 @@ static int luo_flb_retrieve_one(struct liveupdate_flb *flb)
 	if (private->incoming.retrieved)
 		return 0;
 
-	if (!fh->active)
-		return -ENODATA;
+	scoped_guard(mutex, &luo_flb_incoming_lock) {
+		if (!fh->active)
+			return -ENODATA;
 
-	for (int i = 0; i < fh->header_ser->count; i++) {
-		if (strnlen(fh->ser[i].name, sizeof(fh->ser[i].name)) ==
-		    sizeof(fh->ser[i].name))
-			return -EINVAL;
-
-		if (!strcmp(fh->ser[i].name, flb->compatible)) {
-			if (!fh->ser[i].count)
+		for (int i = 0; i < fh->header_ser->count; i++) {
+			if (strnlen(fh->ser[i].name, sizeof(fh->ser[i].name)) ==
+			    sizeof(fh->ser[i].name))
 				return -EINVAL;
 
-			private->incoming.data = fh->ser[i].data;
-			private->incoming.count = fh->ser[i].count;
-			found = true;
-			break;
+			if (!strcmp(fh->ser[i].name, flb->compatible)) {
+				if (!fh->ser[i].count)
+					return -EINVAL;
+
+				private->incoming.data = fh->ser[i].data;
+				private->incoming.count = fh->ser[i].count;
+				found = true;
+				break;
+			}
 		}
 	}
 
@@ -201,8 +208,12 @@ static void luo_flb_file_finish_one(struct liveupdate_flb *flb)
 	struct luo_flb_private *private = luo_flb_get_private(flb);
 	u64 count;
 
-	scoped_guard(mutex, &private->incoming.lock)
+	scoped_guard(mutex, &private->incoming.lock) {
+		if (WARN_ON_ONCE(!private->incoming.count))
+			return;
+
 		count = --private->incoming.count;
+	}
 
 	if (!count) {
 		struct liveupdate_flb_op_args args = {0};
@@ -301,6 +312,17 @@ void luo_flb_file_finish(struct liveupdate_file_handler *fh)
 
 	list_for_each_entry_reverse(iter, flb_list, list)
 		luo_flb_file_finish_one(iter->flb);
+}
+
+void luo_flb_discard_incoming(void)
+{
+	struct luo_flb_header *fh = &luo_flb_global.incoming;
+
+	guard(mutex)(&luo_flb_incoming_lock);
+	kfree(fh->header_ser);
+	fh->header_ser = NULL;
+	fh->ser = NULL;
+	fh->active = false;
 }
 
 /**
@@ -490,7 +512,8 @@ err_resume:
  * @objp: Output parameter; will be populated with the live shared object.
  *
  * Returns a pointer to its shared live object for the incoming (post-reboot)
- * path.
+ * path. The returned pointer remains valid until
+ * liveupdate_flb_put_incoming() is called.
  *
  * If this is the first time the object is requested in the new kernel, this
  * function will trigger the FLB's .retrieve() callback to reconstruct the
@@ -508,17 +531,30 @@ int liveupdate_flb_get_incoming(struct liveupdate_flb *flb, void **objp)
 	if (!liveupdate_enabled())
 		return -EOPNOTSUPP;
 
-	if (!private->incoming.obj) {
+	if (!READ_ONCE(private->incoming.obj)) {
 		int err = luo_flb_retrieve_one(flb);
 
 		if (err)
 			return err;
 	}
 
-	guard(mutex)(&private->incoming.lock);
+	mutex_lock(&private->incoming.lock);
+	if (!private->incoming.obj)
+		goto err_unlock;
 	*objp = private->incoming.obj;
 
 	return 0;
+
+err_unlock:
+	mutex_unlock(&private->incoming.lock);
+	return -ENODATA;
+}
+
+void liveupdate_flb_put_incoming(struct liveupdate_flb *flb)
+{
+	struct luo_flb_private *private = luo_flb_get_private(flb);
+
+	mutex_unlock(&private->incoming.lock);
 }
 
 /**
@@ -640,9 +676,11 @@ int __init luo_flb_setup_incoming(void *fdt_in)
 	if (!header_copy)
 		return -ENOMEM;
 
-	luo_flb_global.incoming.header_ser = header_copy;
-	luo_flb_global.incoming.ser = (void *)(header_copy + 1);
-	luo_flb_global.incoming.active = true;
+	scoped_guard(mutex, &luo_flb_incoming_lock) {
+		luo_flb_global.incoming.header_ser = header_copy;
+		luo_flb_global.incoming.ser = (void *)(header_copy + 1);
+		luo_flb_global.incoming.active = true;
+	}
 
 	return 0;
 }
