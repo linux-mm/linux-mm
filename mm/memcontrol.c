@@ -4100,8 +4100,9 @@ static int mem_cgroup_css_online(struct cgroup_subsys_state *css)
 
 	for_each_node(nid) {
 		objcg = obj_cgroup_alloc();
-		if (!objcg)
+		if (!objcg) {
 			goto free_objcg;
+		}
 
 		if (unlikely(mem_cgroup_is_root(memcg)))
 			objcg->is_root = true;
@@ -4137,6 +4138,9 @@ static int mem_cgroup_css_online(struct cgroup_subsys_state *css)
 free_objcg:
 	for_each_node(nid) {
 		struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
+		objcg = rcu_replace_pointer(pn->objcg, NULL, true);
+		if (objcg)
+			percpu_ref_kill(&objcg->refcnt);
 
 		if (pn && pn->orig_objcg) {
 			obj_cgroup_put(pn->orig_objcg);
