@@ -4685,6 +4685,36 @@ check_retry_cpuset(int cpuset_mems_cookie, struct alloc_context *ac)
 	return false;
 }
 
+static unsigned long max_alloc_stall_warn_msecs = 10 * 1000L;
+
+static void check_alloc_stall_warn(gfp_t gfp_mask, nodemask_t *nodemask,
+				   unsigned int order, unsigned long alloc_start_time)
+{
+	static DEFINE_SPINLOCK(max_alloc_stall_lock);
+	unsigned long stall_msecs = jiffies_to_msecs(jiffies - alloc_start_time);
+	unsigned long flags;
+
+	if (likely(stall_msecs <= READ_ONCE(max_alloc_stall_warn_msecs)))
+		return;
+	if (gfp_mask & __GFP_NOWARN)
+		return;
+
+	spin_lock_irqsave(&max_alloc_stall_lock, flags);
+	if (stall_msecs > max_alloc_stall_warn_msecs) {
+		pr_warn("%s: page allocation stall for %lu secs: order:%d, mode:%#x(%pGg) nodemask=%*pbl",
+			current->comm, stall_msecs / MSEC_PER_SEC, order, gfp_mask, &gfp_mask,
+			nodemask_pr_args(nodemask));
+		cpuset_print_current_mems_allowed();
+		pr_cont("\n");
+		dump_stack();
+		warn_alloc_show_mem(gfp_mask, nodemask);
+
+		/* Only print future stalls that are more than a second longer */
+		WRITE_ONCE(max_alloc_stall_warn_msecs, stall_msecs + MSEC_PER_SEC);
+	}
+	spin_unlock_irqrestore(&max_alloc_stall_lock, flags);
+}
+
 static inline struct page *
 __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 						struct alloc_context *ac)
@@ -4705,6 +4735,7 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
 	int reserve_flags;
 	bool compact_first = false;
 	bool can_retry_reserves = true;
+	unsigned long alloc_start_time = jiffies;
 
 	if (unlikely(nofail)) {
 		/*
@@ -4969,6 +5000,7 @@ fail:
 	warn_alloc(gfp_mask, ac->nodemask,
 			"page allocation failure: order:%u", order);
 got_pg:
+	check_alloc_stall_warn(gfp_mask, ac->nodemask, order, alloc_start_time);
 	return page;
 }
 
