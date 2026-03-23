@@ -26,7 +26,7 @@
  * incrementing the version number in the VFIO_PCI_LUO_FH_COMPATIBLE string.
  */
 
-#define VFIO_PCI_LUO_FH_COMPATIBLE "vfio-pci-v1"
+#define VFIO_PCI_LUO_FH_COMPATIBLE "vfio-pci-v2"
 
 /**
  * struct vfio_pci_core_device_ser - Serialized state of a single VFIO PCI
@@ -34,10 +34,12 @@
  *
  * @domain: The device's PCI domain number (segment).
  * @bdf: The device's PCI bus, device, and function number.
+ * @reset_works: Non-zero if the device supports function resets.
  */
 struct vfio_pci_core_device_ser {
 	u32 domain;
 	u16 bdf;
+	u8 reset_works;
 } __packed;
 
 #endif /* _LINUX_LIVEUPDATE_ABI_VFIO_PCI_H */

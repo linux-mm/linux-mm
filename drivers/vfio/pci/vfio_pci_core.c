@@ -16,6 +16,7 @@
 #include <linux/file.h>
 #include <linux/interrupt.h>
 #include <linux/iommu.h>
+#include <linux/kho/abi/vfio_pci.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/notifier.h>
@@ -494,6 +495,30 @@ static const struct dev_pm_ops vfio_pci_core_pm_ops = {
 			   NULL)
 };
 
+static int vfio_pci_core_probe_reset(struct vfio_pci_core_device *vdev)
+{
+	int ret;
+
+	/*
+	 * This device was preserved by the previous kernel across a Live
+	 * Update, so it does not need to be reset and reset_works can be
+	 * inherited from the previous kernel.
+	 */
+	if (vdev->liveupdate_incoming_state) {
+		vdev->reset_works = vdev->liveupdate_incoming_state->reset_works;
+		return 0;
+	}
+
+	ret = pci_try_reset_function(vdev->pdev);
+
+	/* Bail if the device lock cannot be acquired. */
+	if (ret == -EAGAIN)
+		return ret;
+
+	vdev->reset_works = !ret;
+	return 0;
+}
+
 int vfio_pci_core_enable(struct vfio_pci_core_device *vdev)
 {
 	struct pci_dev *pdev = vdev->pdev;
@@ -514,12 +539,10 @@ int vfio_pci_core_enable(struct vfio_pci_core_device *vdev)
 	if (ret)
 		goto out_power;
 
-	/* If reset fails because of the device lock, fail this path entirely */
-	ret = pci_try_reset_function(pdev);
-	if (ret == -EAGAIN)
+	ret = vfio_pci_core_probe_reset(vdev);
+	if (ret)
 		goto out_disable_device;
 
-	vdev->reset_works = !ret;
 	pci_save_state(pdev);
 	vdev->pci_saved_state = pci_store_saved_state(pdev);
 	if (!vdev->pci_saved_state)

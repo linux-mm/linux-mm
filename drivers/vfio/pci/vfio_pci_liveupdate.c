@@ -91,6 +91,9 @@
  *    kernel guarantees the these will not change across a kexec when a device
  *    is preserved.
  *
+ *  * Whether or not the device supports function resets. This is necessary to
+ *    avoid resetting the device after kexec to probe for reset support.
+ *
  * Since the kernel is not yet prepared to preserve all parts of the device and
  * its dependencies (such as DMA mappings), VFIO currently resets and restores
  * preserved devices back into an idle state during kexec, before handing off
@@ -162,6 +165,7 @@ static int vfio_pci_liveupdate_preserve(struct liveupdate_file_op_args *args)
 
 	ser->bdf = pci_dev_id(pdev);
 	ser->domain = pci_domain_nr(pdev->bus);
+	ser->reset_works = vdev->reset_works;
 
 	args->serialized_data = virt_to_phys(ser);
 	return 0;
