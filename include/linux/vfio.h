@@ -81,6 +81,8 @@ struct vfio_device {
 #endif
 };
 
+struct vfio_device *vfio_device_from_file(struct file *file);
+
 /**
  * struct vfio_device_ops - VFIO bus driver device callbacks
  *
