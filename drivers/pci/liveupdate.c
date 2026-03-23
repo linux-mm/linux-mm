@@ -84,7 +84,10 @@
  * Update:
  *
  *  * The PCI Segment, Bus, Device, and Function numbers assigned to the device
- *    are guaranteed to remain the same across Live Update.
+ *    are guaranteed to remain the same across Live Update. Note that this is
+ *    true even if pci=assign-busses is set on the command line. The kernel will
+ *    always inherit bus numbers assigned by the previous kernel during a Live
+ *    Update.
  *
  * This list will be extended in the future as new support is added.
  *
