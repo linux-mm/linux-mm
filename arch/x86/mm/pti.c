@@ -440,6 +440,18 @@ static void __init pti_clone_p4d(unsigned long addr)
 	*user_p4d = *kernel_p4d;
 }
 
+static void __init pti_clone_percpu(unsigned long va)
+{
+		phys_addr_t pa = per_cpu_ptr_to_phys((void *)va);
+		pte_t *target_pte;
+
+		target_pte = pti_user_pagetable_walk_pte(va, false);
+		if (WARN_ON(!target_pte))
+			return;
+
+		*target_pte = pfn_pte(pa >> PAGE_SHIFT, PAGE_KERNEL);
+}
+
 /*
  * Clone the CPU_ENTRY_AREA and associated data into the user space visible
  * page table.
@@ -450,25 +462,25 @@ static void __init pti_clone_user_shared(void)
 
 	pti_clone_p4d(CPU_ENTRY_AREA_BASE);
 
+	/*
+	 * This is done for all possible CPUs during boot to ensure that it's
+	 * propagated to all mms.
+	 */
 	for_each_possible_cpu(cpu) {
 		/*
 		 * The SYSCALL64 entry code needs one word of scratch space
 		 * in which to spill a register.  It lives in the sp2 slot
 		 * of the CPU's TSS.
-		 *
-		 * This is done for all possible CPUs during boot to ensure
-		 * that it's propagated to all mms.
 		 */
+		pti_clone_percpu((unsigned long)&per_cpu(cpu_tss_rw, cpu));
 
-		unsigned long va = (unsigned long)&per_cpu(cpu_tss_rw, cpu);
-		phys_addr_t pa = per_cpu_ptr_to_phys((void *)va);
-		pte_t *target_pte;
-
-		target_pte = pti_user_pagetable_walk_pte(va, false);
-		if (WARN_ON(!target_pte))
-			return;
-
-		*target_pte = pfn_pte(pa >> PAGE_SHIFT, PAGE_KERNEL);
+#ifdef CONFIG_TRACK_CR3
+		/*
+		 * The entry code needs access to the @kernel_cr3_loaded percpu
+		 * variable before the kernel CR3 is loaded.
+		 */
+		pti_clone_percpu((unsigned long)&per_cpu(kernel_cr3_loaded, cpu));
+#endif
 	}
 }
 

@@ -2201,6 +2201,20 @@ config ADDRESS_MASKING
 	  The capability can be used for efficient address sanitizers (ASAN)
 	  implementation and for optimizations in JITs.
 
+config TRACK_CR3
+       def_bool n
+       prompt "Track which CR3 is in use"
+       depends on X86_64 && MITIGATION_PAGE_TABLE_ISOLATION && NO_HZ_FULL
+       help
+	 This option adds a software signal that allows checking remotely
+	 whether a CPU is using the user or the kernel page table.
+
+	 This allows further optimizations for NOHZ_FULL CPUs.
+
+	 This obviously makes the user<->kernel transition overhead even worse.
+
+	 If unsure, say N.
+
 config HOTPLUG_CPU
 	def_bool y
 	depends on SMP

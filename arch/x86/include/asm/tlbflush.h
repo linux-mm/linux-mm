@@ -17,6 +17,9 @@
 #include <asm/pgtable.h>
 
 DECLARE_PER_CPU(u64, tlbstate_untag_mask);
+#ifdef CONFIG_TRACK_CR3
+DECLARE_PER_CPU_PAGE_ALIGNED(bool, kernel_cr3_loaded);
+#endif
 
 void __flush_tlb_all(void);
 
