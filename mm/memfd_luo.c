@@ -77,9 +77,13 @@
 #include <linux/kho/abi/memfd.h>
 #include <linux/liveupdate.h>
 #include <linux/shmem_fs.h>
+#include <linux/string.h>
 #include <linux/vmalloc.h>
 #include <linux/memfd.h>
 #include "internal.h"
+
+bool luo_file_abort_known_serialized(const char *compatible,
+				     u64 serialized_data);
 
 static int memfd_luo_preserve_folios(struct file *file,
 				     struct kho_vmalloc *kho_vmalloc,
@@ -358,30 +362,88 @@ static void memfd_luo_discard_folios(const struct memfd_luo_folio_ser *folios_se
 	}
 }
 
-static void memfd_luo_abort(struct liveupdate_file_op_args *args)
+static u64 memfd_luo_folios_capacity(const struct memfd_luo_ser *ser)
+{
+	return ((u64)ser->folios.total_pages << PAGE_SHIFT) /
+	       sizeof(struct memfd_luo_folio_ser);
+}
+
+static bool memfd_luo_folio_desc_valid(const struct memfd_luo_ser *ser)
+{
+	if (!!ser->nr_folios != !!ser->folios.first.phys)
+		return false;
+
+	if (!ser->nr_folios)
+		return true;
+
+	return ser->nr_folios <= memfd_luo_folios_capacity(ser);
+}
+
+static bool memfd_luo_serialized_valid(const struct memfd_luo_ser *ser)
+{
+	if (ser->size > MAX_LFS_FILESIZE)
+		return false;
+
+	if (!memfd_luo_folio_desc_valid(ser))
+		return false;
+
+	/*
+	 * Invariant: memfd without serialized folios must have size == 0.
+	 * Preserve serializes page-backed content for every page in a non-empty
+	 * memfd, including holes.
+	 */
+	if (!ser->nr_folios)
+		return !ser->size;
+
+	return ser->nr_folios <= ((ser->size - 1) >> PAGE_SHIFT) + 1;
+}
+
+static void memfd_luo_discard_serialized(struct memfd_luo_ser *ser)
 {
 	struct memfd_luo_folio_ser *folios_ser;
-	struct memfd_luo_ser *ser;
 
-	if (!args->serialized_data ||
-	    !kho_is_restorable_phys(args->serialized_data))
-		return;
-
-	ser = phys_to_virt(args->serialized_data);
-	if (!ser)
-		return;
-
-	if (ser->nr_folios) {
+	if (memfd_luo_folio_desc_valid(ser) && ser->folios.first.phys) {
 		folios_ser = kho_restore_vmalloc(&ser->folios);
-		if (!folios_ser)
-			goto out;
-
-		memfd_luo_discard_folios(folios_ser, ser->nr_folios);
-		vfree(folios_ser);
+		if (folios_ser) {
+			memfd_luo_discard_folios(folios_ser, ser->nr_folios);
+			vfree(folios_ser);
+		}
 	}
 
-out:
 	kho_restore_free(ser);
+}
+
+static bool memfd_luo_abort_serialized_data(u64 serialized_data)
+{
+	struct memfd_luo_ser *ser;
+	size_t bytes;
+
+	if (!serialized_data || !kho_is_restorable_phys(serialized_data))
+		return false;
+
+	bytes = kho_restorable_size(serialized_data);
+	ser = phys_to_virt(serialized_data);
+	if (bytes < sizeof(*ser)) {
+		kho_restore_free(ser);
+		return true;
+	}
+
+	memfd_luo_discard_serialized(ser);
+	return true;
+}
+
+bool luo_file_abort_known_serialized(const char *compatible, u64 serialized_data)
+{
+	if (strcmp(compatible, MEMFD_LUO_FH_COMPATIBLE))
+		return false;
+
+	return memfd_luo_abort_serialized_data(serialized_data);
+}
+
+static void memfd_luo_abort(struct liveupdate_file_op_args *args)
+{
+	if (!memfd_luo_abort_serialized_data(args->serialized_data))
+		return;
 }
 
 static void memfd_luo_finish(struct liveupdate_file_op_args *args)
@@ -521,33 +583,21 @@ static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 		return -EINVAL;
 
 	ser = phys_to_virt(args->serialized_data);
-	if (!ser)
+	if (kho_restorable_size(args->serialized_data) < sizeof(*ser)) {
+		kho_restore_free(ser);
 		return -EINVAL;
-
-	if (!!ser->nr_folios != !!ser->folios.first.phys) {
-		err = -EINVAL;
-		goto free_ser;
 	}
 
-	if (ser->nr_folios >
-	    (((u64)ser->folios.total_pages << PAGE_SHIFT) /
-	     sizeof(*folios_ser))) {
+	if (!memfd_luo_serialized_valid(ser)) {
 		err = -EINVAL;
-		goto free_ser;
-	}
-
-	if (ser->nr_folios &&
-	    (!ser->size ||
-	     ser->nr_folios > ((ser->size - 1) >> PAGE_SHIFT) + 1)) {
-		err = -EINVAL;
-		goto free_ser;
+		goto discard_ser;
 	}
 
 	file = memfd_alloc_file("", 0);
 	if (IS_ERR(file)) {
 		pr_err("failed to setup file: %pe\n", file);
 		err = PTR_ERR(file);
-		goto free_ser;
+		goto discard_ser;
 	}
 
 	vfs_setpos(file, ser->pos, MAX_LFS_FILESIZE);
@@ -557,13 +607,13 @@ static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 		folios_ser = kho_restore_vmalloc(&ser->folios);
 		if (!folios_ser) {
 			err = -EINVAL;
-			goto put_file;
+			goto put_file_discard;
 		}
 
 		err = memfd_luo_retrieve_folios(file, folios_ser, ser->nr_folios);
 		vfree(folios_ser);
 		if (err)
-			goto put_file;
+			goto put_file_discard;
 	}
 
 	args->file = file;
@@ -571,10 +621,12 @@ static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 
 	return 0;
 
-put_file:
+discard_ser:
+	memfd_luo_discard_serialized(ser);
+	return err;
+put_file_discard:
 	fput(file);
-free_ser:
-	kho_restore_free(ser);
+	memfd_luo_discard_serialized(ser);
 	return err;
 }
 

@@ -451,6 +451,11 @@ static struct luo_device_state luo_dev = {
 	.in_use = ATOMIC_INIT(0),
 };
 
+bool luo_device_busy(void)
+{
+	return atomic_read(&luo_dev.in_use);
+}
+
 static int __init liveupdate_ioctl_init(void)
 {
 	if (!liveupdate_enabled())

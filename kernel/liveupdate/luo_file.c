@@ -112,6 +112,17 @@
 #include <linux/string.h>
 #include "luo_internal.h"
 
+#if IS_ENABLED(CONFIG_LIVEUPDATE_MEMFD)
+extern bool luo_file_abort_known_serialized(const char *compatible,
+					    u64 serialized_data);
+#else
+static inline bool luo_file_abort_known_serialized(const char *compatible,
+						   u64 serialized_data)
+{
+	return false;
+}
+#endif
+
 static LIST_HEAD(luo_file_handler_list);
 
 /* 2 4K pages, give space for 128 files per file_set */
@@ -169,6 +180,19 @@ struct luo_file {
 	struct list_head list;
 	u64 token;
 };
+
+static struct liveupdate_file_handler *
+luo_file_find_handler(const char *compatible)
+{
+	struct liveupdate_file_handler *fh;
+
+	list_private_for_each_entry(fh, &luo_file_handler_list, list) {
+		if (!strcmp(fh->compatible, compatible))
+			return fh;
+	}
+
+	return NULL;
+}
 
 static int luo_alloc_files_mem(struct luo_file_set *file_set)
 {
@@ -660,6 +684,60 @@ static void luo_file_abort_one(struct luo_file *luo_file)
 	args.retrieve_status = luo_file->retrieve_status;
 
 	luo_file->fh->ops->abort(&args);
+	luo_flb_file_finish(luo_file->fh);
+}
+
+static void luo_file_abort_serialized_one(struct liveupdate_file_handler *fh,
+					  const struct luo_file_ser *file_ser)
+{
+	struct liveupdate_file_op_args args = {0};
+
+	args.handler = fh;
+	args.serialized_data = file_ser->data;
+	fh->ops->abort(&args);
+	luo_flb_file_finish(fh);
+}
+
+static void luo_file_abort_unhandled_serialized(const struct luo_file_ser *file_ser)
+{
+	/*
+	 * serialized_data is opaque outside the owning handler. Only use a
+	 * handler-specific fallback when the serialized entry still carries a
+	 * known type tag.
+	 */
+	if (luo_file_abort_known_serialized(file_ser->compatible,
+					    file_ser->data))
+		return;
+
+	pr_warn("Leaving serialized file payload for unhandled type '%s'\n",
+		file_ser->compatible);
+}
+
+static void luo_file_abort_serialized_range(struct luo_file_ser *file_ser,
+					    u64 start, u64 count)
+{
+	u64 i;
+
+	for (i = start; i < count; i++) {
+		struct liveupdate_file_handler *fh;
+
+		if (strnlen(file_ser[i].compatible,
+			    sizeof(file_ser[i].compatible)) ==
+		    sizeof(file_ser[i].compatible)) {
+			pr_warn("Skipping unterminated serialized file handler name during abort\n");
+			continue;
+		}
+
+		fh = luo_file_find_handler(file_ser[i].compatible);
+		if (!fh) {
+			pr_warn("Skipping serialized file with missing handler '%s' during abort\n",
+				file_ser[i].compatible);
+			luo_file_abort_unhandled_serialized(&file_ser[i]);
+			continue;
+		}
+
+		luo_file_abort_serialized_one(fh, &file_ser[i]);
+	}
 }
 
 /**
@@ -753,6 +831,46 @@ void luo_file_abort_deserialized(struct luo_file_set *file_set)
 	file_set->files = NULL;
 }
 
+void luo_file_abort_serialized(const struct luo_file_set_ser *file_set_ser)
+{
+	struct luo_file_ser *file_ser;
+	size_t bytes;
+	u64 count;
+
+	if (!file_set_ser->count) {
+		if (file_set_ser->files)
+			pr_warn("Ignoring serialized file pointer in empty file set\n");
+		/*
+		 * The pointer is malformed relative to count, so ownership is
+		 * unclear here. Leave it untouched rather than risk freeing a
+		 * block which is still owned elsewhere.
+		 */
+		return;
+	}
+
+	if (!file_set_ser->files || !kho_is_restorable_phys(file_set_ser->files)) {
+		pr_warn("Skipping invalid serialized file set pointer during abort\n");
+		return;
+	}
+
+	bytes = kho_restorable_size(file_set_ser->files);
+	file_ser = phys_to_virt(file_set_ser->files);
+	if (bytes < sizeof(*file_ser)) {
+		pr_warn("Serialized file set block is too small for cleanup\n");
+		kho_restore_free(file_ser);
+		return;
+	}
+
+	count = min_t(u64, file_set_ser->count, LUO_FILE_MAX);
+	count = min_t(u64, count, bytes / sizeof(*file_ser));
+	if (count != file_set_ser->count)
+		pr_warn("Clamping serialized file abort from %llu to %llu entries\n",
+			file_set_ser->count, count);
+
+	luo_file_abort_serialized_range(file_ser, 0, count);
+	kho_restore_free(file_ser);
+}
+
 /**
  * luo_file_deserialize - Reconstructs the list of preserved files in the new kernel.
  * @file_set:     The incoming file_set to fill with deserialized data.
@@ -782,6 +900,8 @@ int luo_file_deserialize(struct luo_file_set *file_set,
 			 struct luo_file_set_ser *file_set_ser)
 {
 	struct luo_file_ser *file_ser;
+	size_t bytes;
+	u64 count;
 	u64 i;
 	int err;
 
@@ -797,13 +917,22 @@ int luo_file_deserialize(struct luo_file_set *file_set,
 	if (!kho_is_restorable_phys(file_set_ser->files))
 		return -EINVAL;
 
-	file_set->count = file_set_ser->count;
+	bytes = kho_restorable_size(file_set_ser->files);
+	if (file_set_ser->count > bytes / sizeof(*file_ser))
+		return -EINVAL;
+
+	count = file_set_ser->count;
+	file_set->count = 0;
+	/*
+	 * file_set owns the top-level serialized array from this point on. The
+	 * success path frees it via luo_file_finish(), and any deserialize
+	 * failure frees it via luo_file_abort_deserialized().
+	 */
 	file_set->files = phys_to_virt(file_set_ser->files);
 
 	file_ser = file_set->files;
-	for (i = 0; i < file_set->count; i++) {
+	for (i = 0; i < count; i++) {
 		struct liveupdate_file_handler *fh;
-		bool handler_found = false;
 		struct luo_file *luo_file;
 
 		if (strnlen(file_ser[i].compatible,
@@ -813,14 +942,8 @@ int luo_file_deserialize(struct luo_file_set *file_set,
 			goto err_discard;
 		}
 
-		list_private_for_each_entry(fh, &luo_file_handler_list, list) {
-			if (!strcmp(fh->compatible, file_ser[i].compatible)) {
-				handler_found = true;
-				break;
-			}
-		}
-
-		if (!handler_found) {
+		fh = luo_file_find_handler(file_ser[i].compatible);
+		if (!fh) {
 			pr_warn("No registered handler for compatible '%s'\n",
 				file_ser[i].compatible);
 			err = -ENOENT;
@@ -839,11 +962,20 @@ int luo_file_deserialize(struct luo_file_set *file_set,
 		luo_file->token = file_ser[i].token;
 		mutex_init(&luo_file->mutex);
 		list_add_tail(&luo_file->list, &file_set->files_list);
+		file_set->count++;
 	}
 
 	return 0;
-
 err_discard:
+	/*
+	 * Entries already materialized into file_set are owned by the
+	 * deserialized objects. Abort only the raw tail here and then let
+	 * deserialized cleanup drop the constructed prefix and free the
+	 * top-level serialized array owned by file_set.
+	 */
+	luo_file_abort_serialized_range(file_ser, file_set->count, count);
+	file_set_ser->files = 0;
+	file_set_ser->count = 0;
 	luo_file_abort_deserialized(file_set);
 	return err;
 }

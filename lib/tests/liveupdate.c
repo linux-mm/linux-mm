@@ -104,6 +104,8 @@ static void liveupdate_test_init(void)
 		if (err && err != -ENODATA && err != -ENOENT) {
 			pr_err("liveupdate_flb_get_incoming for %s failed: %pe\n",
 			       flb->compatible, ERR_PTR(err));
+		} else if (!err) {
+			liveupdate_flb_put_incoming(flb);
 		}
 	}
 	initialized = true;

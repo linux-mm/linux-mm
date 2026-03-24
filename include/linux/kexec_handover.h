@@ -2,6 +2,7 @@
 #ifndef LINUX_KEXEC_HANDOVER_H
 #define LINUX_KEXEC_HANDOVER_H
 
+#include <linux/bug.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -30,6 +31,7 @@ void *kho_alloc_preserve(size_t size);
 void kho_unpreserve_free(void *mem);
 void kho_restore_free(void *mem);
 bool kho_is_restorable_phys(phys_addr_t phys);
+size_t kho_restorable_size(phys_addr_t phys);
 struct folio *kho_restore_folio(phys_addr_t phys);
 struct page *kho_restore_pages(phys_addr_t phys, unsigned long nr_pages);
 void *kho_restore_vmalloc(const struct kho_vmalloc *preservation);
@@ -84,6 +86,12 @@ static inline void kho_restore_free(void *mem) { }
 static inline bool kho_is_restorable_phys(phys_addr_t phys)
 {
 	return false;
+}
+static inline size_t kho_restorable_size(phys_addr_t phys)
+{
+	if (phys)
+		WARN_ON_ONCE(!IS_ENABLED(CONFIG_KEXEC_HANDOVER));
+	return 0;
 }
 
 static inline struct folio *kho_restore_folio(phys_addr_t phys)

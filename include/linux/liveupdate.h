@@ -239,7 +239,10 @@ int liveupdate_register_flb(struct liveupdate_file_handler *fh,
 int liveupdate_unregister_flb(struct liveupdate_file_handler *fh,
 			      struct liveupdate_flb *flb);
 
-int liveupdate_flb_get_incoming(struct liveupdate_flb *flb, void **objp);
+int liveupdate_flb_get_incoming(struct liveupdate_flb *flb, void **objp)
+	__acquires(&ACCESS_PRIVATE(flb, private).incoming.lock);
+void liveupdate_flb_put_incoming(struct liveupdate_flb *flb)
+	__releases(&ACCESS_PRIVATE(flb, private).incoming.lock);
 int liveupdate_flb_get_outgoing(struct liveupdate_flb *flb, void **objp);
 
 #else /* CONFIG_LIVEUPDATE */
@@ -284,6 +287,10 @@ static inline int liveupdate_flb_get_incoming(struct liveupdate_flb *flb,
 					      void **objp)
 {
 	return -EOPNOTSUPP;
+}
+
+static inline void liveupdate_flb_put_incoming(struct liveupdate_flb *flb)
+{
 }
 
 static inline int liveupdate_flb_get_outgoing(struct liveupdate_flb *flb,

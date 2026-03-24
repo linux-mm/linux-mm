@@ -128,6 +128,9 @@ static void luo_flb_file_unpreserve_one(struct liveupdate_flb *flb)
 	struct luo_flb_private *private = luo_flb_get_private(flb);
 
 	scoped_guard(mutex, &private->outgoing.lock) {
+		if (WARN_ON_ONCE(!private->outgoing.count))
+			return;
+
 		private->outgoing.count--;
 		if (!private->outgoing.count) {
 			struct liveupdate_flb_op_args args = {0};
@@ -191,7 +194,7 @@ static int luo_flb_retrieve_one(struct liveupdate_flb *flb)
 		return err;
 
 	private->incoming.obj = args.obj;
-	private->incoming.retrieved = true;
+	WRITE_ONCE(private->incoming.retrieved, true);
 
 	return 0;
 }
@@ -199,30 +202,38 @@ static int luo_flb_retrieve_one(struct liveupdate_flb *flb)
 static void luo_flb_file_finish_one(struct liveupdate_flb *flb)
 {
 	struct luo_flb_private *private = luo_flb_get_private(flb);
-	u64 count;
-
-	scoped_guard(mutex, &private->incoming.lock)
-		count = --private->incoming.count;
-
-	if (!count) {
+	for (;;) {
 		struct liveupdate_flb_op_args args = {0};
-
-		if (!private->incoming.retrieved) {
-			int err = luo_flb_retrieve_one(flb);
-
-			if (WARN_ON(err))
-				return;
-		}
+		bool need_retrieve = false;
+		u64 count;
 
 		scoped_guard(mutex, &private->incoming.lock) {
-			args.flb = flb;
-			args.obj = private->incoming.obj;
-			flb->ops->finish(&args);
+			if (READ_ONCE(private->incoming.finished))
+				return;
 
-			private->incoming.data = 0;
-			private->incoming.obj = NULL;
-			private->incoming.finished = true;
+			if (!private->incoming.count) {
+				need_retrieve = !READ_ONCE(private->incoming.retrieved);
+				count = 1;
+			} else {
+				count = --private->incoming.count;
+				if (!count) {
+					args.flb = flb;
+					args.obj = private->incoming.obj;
+					flb->ops->finish(&args);
+
+					private->incoming.data = 0;
+					private->incoming.obj = NULL;
+					WRITE_ONCE(private->incoming.retrieved, false);
+					WRITE_ONCE(private->incoming.finished, true);
+				}
+			}
 		}
+
+		if (!need_retrieve)
+			return;
+
+		if (WARN_ON(luo_flb_retrieve_one(flb)))
+			return;
 	}
 }
 
@@ -301,6 +312,16 @@ void luo_flb_file_finish(struct liveupdate_file_handler *fh)
 
 	list_for_each_entry_reverse(iter, flb_list, list)
 		luo_flb_file_finish_one(iter->flb);
+}
+
+void luo_flb_discard_incoming(void)
+{
+	struct luo_flb_header *fh = &luo_flb_global.incoming;
+
+	kfree(fh->header_ser);
+	fh->header_ser = NULL;
+	fh->ser = NULL;
+	fh->active = false;
 }
 
 /**
@@ -502,23 +523,36 @@ err_resume:
  * data, and -EOPNOTSUPP when live update is disabled or not configured.
  */
 int liveupdate_flb_get_incoming(struct liveupdate_flb *flb, void **objp)
+	__acquires(&ACCESS_PRIVATE(flb, private).incoming.lock)
 {
 	struct luo_flb_private *private = luo_flb_get_private(flb);
 
 	if (!liveupdate_enabled())
 		return -EOPNOTSUPP;
 
-	if (!private->incoming.obj) {
+	if (!READ_ONCE(private->incoming.obj)) {
 		int err = luo_flb_retrieve_one(flb);
 
 		if (err)
 			return err;
 	}
 
-	guard(mutex)(&private->incoming.lock);
+	mutex_lock(&private->incoming.lock);
+	if (!private->incoming.obj) {
+		mutex_unlock(&private->incoming.lock);
+		return -ENODATA;
+	}
 	*objp = private->incoming.obj;
 
 	return 0;
+}
+
+void liveupdate_flb_put_incoming(struct liveupdate_flb *flb)
+	__releases(&ACCESS_PRIVATE(flb, private).incoming.lock)
+{
+	struct luo_flb_private *private = luo_flb_get_private(flb);
+
+	mutex_unlock(&private->incoming.lock);
 }
 
 /**
@@ -631,10 +665,17 @@ int __init luo_flb_setup_incoming(void *fdt_in)
 		return -EINVAL;
 	}
 
+	if (kho_restorable_size(header_ser_pa) < sizeof(*header_ser) ||
+	    sizeof(*header_ser) +
+	    header_ser->count * sizeof(*luo_flb_global.incoming.ser) >
+	    kho_restorable_size(header_ser_pa)) {
+		kho_restore_free(header_ser);
+		return -EINVAL;
+	}
+
 	header_copy = kmemdup(header_ser,
 			      sizeof(*header_copy) +
-			      header_ser->count *
-			      sizeof(*luo_flb_global.incoming.ser),
+			      header_ser->count * sizeof(*luo_flb_global.incoming.ser),
 			      GFP_KERNEL);
 	kho_restore_free(header_ser);
 	if (!header_copy)

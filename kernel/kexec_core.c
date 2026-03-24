@@ -1232,7 +1232,7 @@ int kernel_kexec(void)
 	}
 #endif
 
-Unlock:
+ Unlock:
 	if (liveupdate_prepared)
 		liveupdate_reboot_abort();
 	kexec_unlock();
