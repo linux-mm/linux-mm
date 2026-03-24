@@ -456,6 +456,18 @@ the objtool maintainers.
     these special names and does not use module_init() / module_exit()
     macros to create them.
 
+vmlinux.o: warning: objtool: entry_SYSCALL_64+0x108: housekeeping_overridden: non-RO static key usage in entry code
+
+13. file.o: warning: func()+0x2a: key: non-RO static key usage in entry code
+
+  This means that .entry.text function func() uses a static key named 'key'
+  which can be modified at runtime. This is discouraged because the jump
+  location may be accessed before a serializating operation has been
+  executed.
+
+  Check whether the static key/call in question is only modified
+  during init.  If so, define it as read-only-after-init with
+  DEFINE_STATIC_KEY_*_RO().
 
 If the error doesn't seem to make sense, it could be a bug in objtool.
 Feel free to ask objtool maintainers for help.
