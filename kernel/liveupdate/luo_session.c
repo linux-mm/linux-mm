@@ -301,6 +301,20 @@ static void luo_session_unfreeze_one(struct luo_session *session,
 	luo_file_unfreeze(&session->file_set, &ser->file_set_ser);
 }
 
+static void luo_session_discard_deserialized(struct luo_session_header *sh)
+{
+	struct luo_session *session;
+
+	down_write(&sh->rwsem);
+	while (!list_empty(&sh->list)) {
+		session = list_last_entry(&sh->list, struct luo_session, list);
+		__luo_session_remove(sh, session);
+		luo_file_abort_deserialized(&session->file_set);
+		luo_session_put(session);
+	}
+	up_write(&sh->rwsem);
+}
+
 static int luo_session_release(struct inode *inodep, struct file *filep)
 {
 	struct luo_session *session = filep->private_data;
@@ -694,24 +708,10 @@ int luo_session_deserialize(void)
 		return err;
 
 	is_deserialized = true;
+	err = 0;
 	if (!sh->active)
-		return 0;
+		return err;
 
-	/*
-	 * Note on error handling:
-	 *
-	 * If deserialization fails (e.g., allocation failure or corrupt data),
-	 * we intentionally skip cleanup of sessions that were already restored.
-	 *
-	 * A partial failure leaves the preserved state inconsistent.
-	 * Implementing a safe "undo" to unwind complex dependencies (sessions,
-	 * files, hardware state) is error-prone and provides little value, as
-	 * the system is effectively in a broken state.
-	 *
-	 * We treat these resources as leaked. The expected recovery path is for
-	 * userspace to detect the failure and trigger a reboot, which will
-	 * reliably reset devices and reclaim memory.
-	 */
 	for (int i = 0; i < sh->header_ser->count; i++) {
 		struct luo_session *session;
 
@@ -719,7 +719,8 @@ int luo_session_deserialize(void)
 		if (IS_ERR(session)) {
 			pr_warn("Failed to allocate session [%s] during deserialization %pe\n",
 				sh->ser[i].name, session);
-			return PTR_ERR(session);
+			err = PTR_ERR(session);
+			goto out_discard;
 		}
 		session->incoming = true;
 
@@ -727,21 +728,30 @@ int luo_session_deserialize(void)
 		if (err) {
 			pr_warn("Failed to insert session [%s] %pe\n",
 				session->name, ERR_PTR(err));
-			luo_session_free(session);
-			return err;
+			luo_session_put(session);
+			goto out_discard;
 		}
 
-		scoped_guard(mutex, &session->mutex) {
-			luo_file_deserialize(&session->file_set,
-					     &sh->ser[i].file_set_ser);
+		scoped_guard(mutex, &session->mutex)
+			err = luo_file_deserialize(&session->file_set,
+						   &sh->ser[i].file_set_ser);
+		if (err) {
+			pr_warn("Failed to deserialize session [%s] files %pe\n",
+				session->name, ERR_PTR(err));
+			goto out_discard;
 		}
 	}
 
+out_free_header:
 	kho_restore_free(sh->header_ser);
 	sh->header_ser = NULL;
 	sh->ser = NULL;
 
-	return 0;
+	return err;
+
+out_discard:
+	luo_session_discard_deserialized(sh);
+	goto out_free_header;
 }
 
 int luo_session_serialize(void)
