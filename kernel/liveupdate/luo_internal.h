@@ -9,6 +9,7 @@
 #define _LINUX_LUO_INTERNAL_H
 
 #include <linux/liveupdate.h>
+#include <linux/refcount.h>
 #include <linux/uaccess.h>
 
 struct luo_ucmd {
@@ -63,8 +64,10 @@ struct luo_file_set {
  * @list:       A list_head member used to link this session into a global list
  *              of either outgoing (to be preserved) or incoming (restored from
  *              previous kernel) sessions.
- * @retrieved:  A boolean flag indicating whether this session has been
- *              retrieved by a consumer in the new kernel.
+ * @incoming:   True for sessions restored from the previous kernel. This is
+ *              immutable after publication and distinguishes incoming sessions
+ *              from outgoing ones.
+ * @retrieved:  True while an incoming session is checked out by userspace.
  * @file_set:   A set of files that belong to this session.
  * @mutex:      protects fields in the luo_session.
  */
@@ -72,8 +75,10 @@ struct luo_session {
 	char name[LIVEUPDATE_SESSION_NAME_LENGTH];
 	struct luo_session_ser *ser;
 	struct list_head list;
+	bool incoming;
 	bool retrieved;
 	struct luo_file_set file_set;
+	refcount_t refs;
 	struct mutex mutex;
 };
 

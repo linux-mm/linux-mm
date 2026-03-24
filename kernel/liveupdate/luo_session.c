@@ -66,6 +66,7 @@
 #include <linux/rwsem.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
+#include <linux/wait.h>
 #include <uapi/linux/liveupdate.h>
 #include "luo_internal.h"
 
@@ -81,9 +82,12 @@
  * @list:       The head of the linked list of `struct luo_session` instances.
  * @rwsem:      A read-write semaphore providing synchronized access to the
  *              session list and other fields in this structure.
+ * @reboot_waitq: Wait queue used by close() and serialize() to wait for
+ *              rebooting transitions.
  * @header_ser: The header data of serialization array.
  * @ser:        The serialized session data (an array of
  *              `struct luo_session_ser`).
+ * @rebooting:  True while outgoing sessions are frozen for kexec handover.
  * @active:     Set to true when first initialized. If previous kernel did not
  *              send session data, active stays false for incoming.
  */
@@ -91,8 +95,10 @@ struct luo_session_header {
 	long count;
 	struct list_head list;
 	struct rw_semaphore rwsem;
+	wait_queue_head_t reboot_waitq;
 	struct luo_session_header_ser *header_ser;
 	struct luo_session_ser *ser;
+	bool rebooting;
 	bool active;
 };
 
@@ -110,12 +116,22 @@ static struct luo_session_global luo_session_global = {
 	.incoming = {
 		.list = LIST_HEAD_INIT(luo_session_global.incoming.list),
 		.rwsem = __RWSEM_INITIALIZER(luo_session_global.incoming.rwsem),
+		.reboot_waitq =
+			__WAIT_QUEUE_HEAD_INITIALIZER(luo_session_global.incoming.reboot_waitq),
 	},
 	.outgoing = {
 		.list = LIST_HEAD_INIT(luo_session_global.outgoing.list),
 		.rwsem = __RWSEM_INITIALIZER(luo_session_global.outgoing.rwsem),
+		.reboot_waitq =
+			__WAIT_QUEUE_HEAD_INITIALIZER(luo_session_global.outgoing.reboot_waitq),
 	},
 };
+
+static void luo_session_reboot_done(struct luo_session_header *sh)
+{
+	WRITE_ONCE(sh->rebooting, false);
+	wake_up_all(&sh->reboot_waitq);
+}
 
 static struct luo_session *luo_session_alloc(const char *name)
 {
@@ -128,6 +144,7 @@ static struct luo_session *luo_session_alloc(const char *name)
 	INIT_LIST_HEAD(&session->file_set.files_list);
 	luo_file_set_init(&session->file_set);
 	INIT_LIST_HEAD(&session->list);
+	refcount_set(&session->refs, 1);
 	mutex_init(&session->mutex);
 
 	return session;
@@ -138,6 +155,17 @@ static void luo_session_free(struct luo_session *session)
 	luo_file_set_destroy(&session->file_set);
 	mutex_destroy(&session->mutex);
 	kfree(session);
+}
+
+static void luo_session_get(struct luo_session *session)
+{
+	refcount_inc(&session->refs);
+}
+
+static void luo_session_put(struct luo_session *session)
+{
+	if (refcount_dec_and_test(&session->refs))
+		luo_session_free(session);
 }
 
 static int luo_session_insert(struct luo_session_header *sh,
@@ -152,6 +180,9 @@ static int luo_session_insert(struct luo_session_header *sh,
 	 * for new session.
 	 */
 	if (sh == &luo_session_global.outgoing) {
+		if (READ_ONCE(sh->rebooting))
+			return -EBUSY;
+
 		if (sh->count == LUO_SESSION_MAX)
 			return -ENOMEM;
 	}
@@ -172,58 +203,157 @@ static int luo_session_insert(struct luo_session_header *sh,
 	return 0;
 }
 
+static void __luo_session_remove(struct luo_session_header *sh,
+				 struct luo_session *session)
+{
+	list_del_init(&session->list);
+	sh->count--;
+}
+
 static void luo_session_remove(struct luo_session_header *sh,
 			       struct luo_session *session)
 {
 	guard(rwsem_write)(&sh->rwsem);
-	list_del(&session->list);
-	sh->count--;
+	__luo_session_remove(sh, session);
 }
 
-static int luo_session_finish_one(struct luo_session *session)
+static int luo_session_outgoing_begin(struct luo_session *session,
+				      struct luo_session_header **shp)
 {
-	guard(mutex)(&session->mutex);
+	struct luo_session_header *sh;
+
+	if (session->incoming)
+		return -EINVAL;
+
+	sh = &luo_session_global.outgoing;
+	down_read(&sh->rwsem);
+	if (READ_ONCE(sh->rebooting)) {
+		up_read(&sh->rwsem);
+		return -EBUSY;
+	}
+
+	*shp = sh;
+	return 0;
+}
+
+static void luo_session_outgoing_end(struct luo_session_header *sh)
+{
+	if (sh)
+		up_read(&sh->rwsem);
+}
+
+static int luo_session_get_all_outgoing(struct luo_session **sessions)
+{
+	struct luo_session_header *sh = &luo_session_global.outgoing;
+	struct luo_session *session;
+	u64 nr = 0;
+
+	down_write(&sh->rwsem);
+	if (READ_ONCE(sh->rebooting)) {
+		up_write(&sh->rwsem);
+		return -EBUSY;
+	}
+
+	WRITE_ONCE(sh->rebooting, true);
+	list_for_each_entry(session, &sh->list, list) {
+		luo_session_get(session);
+		sessions[nr++] = session;
+	}
+	up_write(&sh->rwsem);
+
+	return nr;
+}
+
+static void luo_session_put_all(struct luo_session **sessions, u64 nr)
+{
+	while (nr)
+		luo_session_put(sessions[--nr]);
+}
+
+static void luo_session_wait_reboot(struct luo_session_header *sh)
+{
+	DEFINE_WAIT(wait);
+
+	for (;;) {
+		prepare_to_wait(&sh->reboot_waitq, &wait,
+				TASK_UNINTERRUPTIBLE | TASK_FREEZABLE);
+		if (!READ_ONCE(sh->rebooting))
+			break;
+		schedule();
+	}
+
+	finish_wait(&sh->reboot_waitq, &wait);
+}
+
+static int luo_session_finish_retrieved(struct luo_session *session)
+{
+	lockdep_assert_held(&session->mutex);
+	if (!session->retrieved)
+		return -EINVAL;
+
 	return luo_file_finish(&session->file_set);
-}
-
-static void luo_session_unfreeze_one(struct luo_session *session,
-				     struct luo_session_ser *ser)
-{
-	guard(mutex)(&session->mutex);
-	luo_file_unfreeze(&session->file_set, &ser->file_set_ser);
-}
-
-static int luo_session_freeze_one(struct luo_session *session,
-				  struct luo_session_ser *ser)
-{
-	guard(mutex)(&session->mutex);
-	return luo_file_freeze(&session->file_set, &ser->file_set_ser);
 }
 
 static int luo_session_release(struct inode *inodep, struct file *filep)
 {
 	struct luo_session *session = filep->private_data;
-	struct luo_session_header *sh;
+	struct luo_session_header *sh = &luo_session_global.incoming;
+	int ret = 0;
+	bool removed = false;
 
-	/* If retrieved is set, it means this session is from incoming list */
-	if (session->retrieved) {
-		int err = luo_session_finish_one(session);
+	if (session->incoming) {
+		scoped_guard(mutex, &session->mutex) {
+			if (session->retrieved) {
+				ret = luo_session_finish_retrieved(session);
+				if (!ret) {
+					down_write(&sh->rwsem);
+					if (!list_empty(&session->list)) {
+						__luo_session_remove(sh, session);
+						removed = true;
+					}
+					up_write(&sh->rwsem);
+				}
+				WRITE_ONCE(session->retrieved, false);
+			}
+		}
 
-		if (err) {
+		if (ret) {
 			pr_warn("Unable to finish session [%s] on release\n",
 				session->name);
-			return err;
+			luo_session_put(session);
+			return ret;
 		}
-		sh = &luo_session_global.incoming;
-	} else {
-		scoped_guard(mutex, &session->mutex)
-			luo_file_unpreserve_files(&session->file_set);
-		sh = &luo_session_global.outgoing;
+
+		if (removed)
+			luo_session_put(session);
+		luo_session_put(session);
+		return 0;
 	}
 
-	luo_session_remove(sh, session);
-	luo_session_free(session);
+	sh = &luo_session_global.outgoing;
 
+	for (;;) {
+		down_read(&sh->rwsem);
+		if (READ_ONCE(sh->rebooting)) {
+			up_read(&sh->rwsem);
+			luo_session_wait_reboot(sh);
+			continue;
+		}
+
+		mutex_lock(&session->mutex);
+		up_read(&sh->rwsem);
+		break;
+	}
+
+	luo_file_unpreserve_files(&session->file_set);
+
+	down_write(&sh->rwsem);
+	__luo_session_remove(sh, session);
+	up_write(&sh->rwsem);
+	mutex_unlock(&session->mutex);
+
+	luo_session_put(session);
+	luo_session_put(session);
 	return 0;
 }
 
@@ -231,10 +361,16 @@ static int luo_session_preserve_fd(struct luo_session *session,
 				   struct luo_ucmd *ucmd)
 {
 	struct liveupdate_session_preserve_fd *argp = ucmd->cmd;
+	struct luo_session_header *sh = NULL;
 	int err;
 
-	guard(mutex)(&session->mutex);
-	err = luo_preserve_file(&session->file_set, argp->token, argp->fd);
+	err = luo_session_outgoing_begin(session, &sh);
+	if (err)
+		return err;
+
+	scoped_guard(mutex, &session->mutex)
+		err = luo_preserve_file(&session->file_set, argp->token, argp->fd);
+	luo_session_outgoing_end(sh);
 	if (err)
 		return err;
 
@@ -256,8 +392,13 @@ static int luo_session_retrieve_fd(struct luo_session *session,
 	if (argp->fd < 0)
 		return argp->fd;
 
-	guard(mutex)(&session->mutex);
-	err = luo_retrieve_file(&session->file_set, argp->token, &file);
+	scoped_guard(mutex, &session->mutex) {
+		if (!session->retrieved)
+			err = -EINVAL;
+		else
+			err = luo_retrieve_file(&session->file_set,
+						argp->token, &file);
+	}
 	if (err < 0)
 		goto  err_put_fd;
 
@@ -281,10 +422,27 @@ static int luo_session_finish(struct luo_session *session,
 			      struct luo_ucmd *ucmd)
 {
 	struct liveupdate_session_finish *argp = ucmd->cmd;
-	int err = luo_session_finish_one(session);
+	struct luo_session_header *sh = &luo_session_global.incoming;
+	bool removed = false;
+	int err;
 
+	scoped_guard(mutex, &session->mutex) {
+		err = luo_session_finish_retrieved(session);
+		if (!err) {
+			down_write(&sh->rwsem);
+			if (!list_empty(&session->list)) {
+				__luo_session_remove(sh, session);
+				removed = true;
+			}
+			up_write(&sh->rwsem);
+			WRITE_ONCE(session->retrieved, false);
+		}
+	}
 	if (err)
 		return err;
+
+	if (removed)
+		luo_session_put(session);
 
 	return luo_ucmd_respond(ucmd, sizeof(*argp));
 }
@@ -371,9 +529,12 @@ static int luo_session_getfile(struct luo_session *session, struct file **filep)
 
 	lockdep_assert_held(&session->mutex);
 	snprintf(name_buf, sizeof(name_buf), "[luo_session] %s", session->name);
+	luo_session_get(session);
 	file = anon_inode_getfile(name_buf, &luo_session_fops, session, O_RDWR);
-	if (IS_ERR(file))
+	if (IS_ERR(file)) {
+		luo_session_put(session);
 		return PTR_ERR(file);
+	}
 
 	*filep = file;
 
@@ -401,9 +562,10 @@ int luo_session_create(const char *name, struct file **filep)
 	return 0;
 
 err_remove:
-	luo_session_remove(&luo_session_global.outgoing, session);
+	scoped_guard(mutex, &session->mutex)
+		luo_session_remove(&luo_session_global.outgoing, session);
 err_free:
-	luo_session_free(session);
+	luo_session_put(session);
 
 	return err;
 }
@@ -418,6 +580,8 @@ int luo_session_retrieve(const char *name, struct file **filep)
 	scoped_guard(rwsem_read, &sh->rwsem) {
 		list_for_each_entry(it, &sh->list, list) {
 			if (!strncmp(it->name, name, sizeof(it->name))) {
+				/* Keep the session alive after dropping rwsem. */
+				luo_session_get(it);
 				session = it;
 				break;
 			}
@@ -428,12 +592,14 @@ int luo_session_retrieve(const char *name, struct file **filep)
 		return -ENOENT;
 
 	guard(mutex)(&session->mutex);
-	if (session->retrieved)
-		return -EINVAL;
+	if (session->retrieved || list_empty(&session->list))
+		err = -EINVAL;
+	else
+		err = luo_session_getfile(session, filep);
 
-	err = luo_session_getfile(session, filep);
 	if (!err)
-		session->retrieved = true;
+		WRITE_ONCE(session->retrieved, true);
+	luo_session_put(session);
 
 	return err;
 }
@@ -548,6 +714,7 @@ int luo_session_deserialize(void)
 				sh->ser[i].name, session);
 			return PTR_ERR(session);
 		}
+		session->incoming = true;
 
 		err = luo_session_insert(sh, session);
 		if (err) {
@@ -573,32 +740,61 @@ int luo_session_deserialize(void)
 int luo_session_serialize(void)
 {
 	struct luo_session_header *sh = &luo_session_global.outgoing;
-	struct luo_session *session;
-	int i = 0;
+	struct luo_session **sessions;
+	u64 nr;
+	u64 i;
+	u64 frozen_nr = 0;
 	int err;
 
-	guard(rwsem_write)(&sh->rwsem);
-	list_for_each_entry(session, &sh->list, list) {
-		err = luo_session_freeze_one(session, &sh->ser[i]);
-		if (err)
-			goto err_undo;
+	sessions = kcalloc(LUO_SESSION_MAX, sizeof(*sessions), GFP_KERNEL);
+	if (!sessions)
+		return -ENOMEM;
 
-		strscpy(sh->ser[i].name, session->name,
-			sizeof(sh->ser[i].name));
-		i++;
+	err = luo_session_get_all_outgoing(sessions);
+	if (err < 0)
+		goto out_free_sessions;
+
+	nr = err;
+	for (i = 0; i < nr; i++) {
+		struct luo_session *session = sessions[i];
+
+		scoped_guard(mutex, &session->mutex) {
+			if (list_empty(&session->list))
+				continue;
+
+			err = luo_file_freeze(&session->file_set,
+					      &sh->ser[frozen_nr].file_set_ser);
+			if (err)
+				goto err_undo;
+
+			strscpy(sh->ser[frozen_nr].name, session->name,
+				sizeof(sh->ser[frozen_nr].name));
+			swap(sessions[frozen_nr], sessions[i]);
+			frozen_nr++;
+		}
 	}
-	sh->header_ser->count = sh->count;
+	sh->header_ser->count = frozen_nr;
+	err = 0;
 
-	return 0;
+out_put_sessions:
+	luo_session_put_all(sessions, nr);
+out_free_sessions:
+	kfree(sessions);
+	return err;
 
 err_undo:
-	list_for_each_entry_continue_reverse(session, &sh->list, list) {
-		i--;
-		luo_session_unfreeze_one(session, &sh->ser[i]);
-		memset(sh->ser[i].name, 0, sizeof(sh->ser[i].name));
-	}
+	while (frozen_nr) {
+		struct luo_session *session = sessions[--frozen_nr];
 
-	return err;
+		scoped_guard(mutex, &session->mutex) {
+			luo_file_unfreeze(&session->file_set,
+					  &sh->ser[frozen_nr].file_set_ser);
+			memset(&sh->ser[frozen_nr], 0, sizeof(sh->ser[frozen_nr]));
+		}
+	}
+	sh->header_ser->count = 0;
+	luo_session_reboot_done(sh);
+	goto out_put_sessions;
 }
 
 /**
