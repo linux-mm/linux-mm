@@ -33,6 +33,11 @@ extern void text_poke_apply_relocation(u8 *buf, const u8 * const instr, size_t i
  */
 extern void *text_poke(void *addr, const void *opcode, size_t len);
 extern void smp_text_poke_sync_each_cpu(void);
+#ifdef CONFIG_TRACK_CR3
+extern void smp_text_poke_sync_each_cpu_deferrable(void);
+#else
+#define smp_text_poke_sync_each_cpu_deferrable smp_text_poke_sync_each_cpu
+#endif
 extern void *text_poke_kgdb(void *addr, const void *opcode, size_t len);
 extern void *text_poke_copy(void *addr, const void *opcode, size_t len);
 #define text_poke_copy text_poke_copy
