@@ -4118,13 +4118,8 @@ static int validate_unwind_hints(struct objtool_file *file, struct section *sec)
 
 	init_insn_state(file, &state, sec);
 
-	if (sec) {
-		sec_for_each_insn(file, sec, insn)
-			warnings += validate_unwind_hint(file, insn, &state);
-	} else {
-		for_each_insn(file, insn)
-			warnings += validate_unwind_hint(file, insn, &state);
-	}
+	sec_for_each_insn(file, sec, insn)
+		warnings += validate_unwind_hint(file, insn, &state);
 
 	return warnings;
 }
@@ -4621,6 +4616,21 @@ static int validate_functions(struct objtool_file *file)
 	return warnings;
 }
 
+static int validate_file_unwind_hints(struct objtool_file *file)
+{
+	struct section *sec;
+	int warnings = 0;
+
+	for_each_sec(file->elf, sec) {
+		if (!is_text_sec(sec))
+			continue;
+
+		warnings += validate_unwind_hints(file, sec);
+	}
+
+	return warnings;
+}
+
 static void mark_endbr_used(struct instruction *insn)
 {
 	if (!list_empty(&insn->call_node))
@@ -5030,7 +5040,8 @@ int check(struct objtool_file *file)
 		int w = 0;
 
 		w += validate_functions(file);
-		w += validate_unwind_hints(file, NULL);
+		w += validate_file_unwind_hints(file);
+
 		if (!w)
 			w += validate_reachable_instructions(file);
 
