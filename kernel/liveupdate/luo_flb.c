@@ -165,7 +165,14 @@ static int luo_flb_retrieve_one(struct liveupdate_flb *flb)
 		return -ENODATA;
 
 	for (int i = 0; i < fh->header_ser->count; i++) {
+		if (strnlen(fh->ser[i].name, sizeof(fh->ser[i].name)) ==
+		    sizeof(fh->ser[i].name))
+			return -EINVAL;
+
 		if (!strcmp(fh->ser[i].name, flb->compatible)) {
+			if (!fh->ser[i].count)
+				return -EINVAL;
+
 			private->incoming.data = fh->ser[i].data;
 			private->incoming.count = fh->ser[i].count;
 			found = true;
@@ -578,6 +585,7 @@ err_unpreserve:
 
 int __init luo_flb_setup_incoming(void *fdt_in)
 {
+	struct luo_flb_header_ser *header_copy;
 	struct luo_flb_header_ser *header_ser;
 	int err, header_size, offset;
 	const void *ptr;
@@ -609,10 +617,31 @@ int __init luo_flb_setup_incoming(void *fdt_in)
 	}
 
 	header_ser_pa = get_unaligned((u64 *)ptr);
-	header_ser = phys_to_virt(header_ser_pa);
+	if (!header_ser_pa) {
+		pr_err("FLB header address is missing\n");
+		return -EINVAL;
+	}
 
-	luo_flb_global.incoming.header_ser = header_ser;
-	luo_flb_global.incoming.ser = (void *)(header_ser + 1);
+	if (!kho_is_restorable_phys(header_ser_pa))
+		return -EINVAL;
+
+	header_ser = phys_to_virt(header_ser_pa);
+	if (header_ser->pgcnt != LUO_FLB_PGCNT || header_ser->count > LUO_FLB_MAX) {
+		kho_restore_free(header_ser);
+		return -EINVAL;
+	}
+
+	header_copy = kmemdup(header_ser,
+			      sizeof(*header_copy) +
+			      header_ser->count *
+			      sizeof(*luo_flb_global.incoming.ser),
+			      GFP_KERNEL);
+	kho_restore_free(header_ser);
+	if (!header_copy)
+		return -ENOMEM;
+
+	luo_flb_global.incoming.header_ser = header_copy;
+	luo_flb_global.incoming.ser = (void *)(header_copy + 1);
 	luo_flb_global.incoming.active = true;
 
 	return 0;

@@ -29,6 +29,7 @@ void kho_unpreserve_vmalloc(struct kho_vmalloc *preservation);
 void *kho_alloc_preserve(size_t size);
 void kho_unpreserve_free(void *mem);
 void kho_restore_free(void *mem);
+bool kho_is_restorable_phys(phys_addr_t phys);
 struct folio *kho_restore_folio(phys_addr_t phys);
 struct page *kho_restore_pages(phys_addr_t phys, unsigned long nr_pages);
 void *kho_restore_vmalloc(const struct kho_vmalloc *preservation);
@@ -80,6 +81,10 @@ static inline void *kho_alloc_preserve(size_t size)
 
 static inline void kho_unpreserve_free(void *mem) { }
 static inline void kho_restore_free(void *mem) { }
+static inline bool kho_is_restorable_phys(phys_addr_t phys)
+{
+	return false;
+}
 
 static inline struct folio *kho_restore_folio(phys_addr_t phys)
 {
