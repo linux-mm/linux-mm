@@ -22,6 +22,7 @@ DECLARE_PER_CPU_PAGE_ALIGNED(bool, kernel_cr3_loaded);
 #endif
 
 void __flush_tlb_all(void);
+void flush_tlb_kernel_range_deferrable(unsigned long start, unsigned long end);
 
 #define TLB_FLUSH_ALL	-1UL
 #define TLB_GENERATION_INVALID	0
