@@ -516,6 +516,15 @@ static void __filemap_fdatawait_range(struct address_space *mapping,
 	struct folio_batch fbatch;
 	unsigned nr_folios;
 
+	/*
+	 * If the process is exiting (PF_EXITING), skip the writeback wait.
+	 * During do_exit(), nfs4_file_flush() re-enters this function, but
+	 * wants_signal() rejects signals for PF_EXITING tasks so a second
+	 * SIGKILL cannot wake us from the TASK_KILLABLE wait below.
+	 */
+	if (current->flags & PF_EXITING)
+		return;
+
 	folio_batch_init(&fbatch);
 
 	while (index <= end) {
@@ -530,7 +539,10 @@ static void __filemap_fdatawait_range(struct address_space *mapping,
 		for (i = 0; i < nr_folios; i++) {
 			struct folio *folio = fbatch.folios[i];
 
-			folio_wait_writeback(folio);
+			if (folio_wait_writeback_killable(folio)) {
+				folio_batch_release(&fbatch);
+				return;
+			}
 		}
 		folio_batch_release(&fbatch);
 		cond_resched();
