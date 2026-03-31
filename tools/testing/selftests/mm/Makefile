@@ -10,6 +10,11 @@ LOCAL_HDRS += $(selfdir)/mm/mseal_helpers.h
 
 include local_config.mk
 
+PKG_CONFIG ?= pkg-config
+ifeq ($(IOURING_EXTRA_LIBS),)
+IOURING_EXTRA_LIBS := $(shell $(PKG_CONFIG) --libs liburing 2>/dev/null)
+endif
+
 ifeq ($(ARCH),)
 
 ifeq ($(CROSS_COMPILE),)
@@ -55,10 +60,12 @@ else
 PAGE_FRAG_WARNING = "missing Module.symvers, please have the kernel built first"
 endif
 
-TEST_GEN_FILES = cow
-TEST_GEN_FILES += compaction_test
-TEST_GEN_FILES += gup_longterm
+TEST_GEN_FILES = compaction_test
 TEST_GEN_FILES += gup_test
+ifneq ($(IOURING_EXTRA_LIBS),)
+TEST_GEN_FILES += cow
+TEST_GEN_FILES += gup_longterm
+endif
 TEST_GEN_FILES += hmm-tests
 TEST_GEN_FILES += hugetlb-madvise
 TEST_GEN_FILES += hugetlb-read-hwpoison
