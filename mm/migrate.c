@@ -1361,7 +1361,6 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 	int old_page_state = 0;
 	struct anon_vma *anon_vma = NULL;
 	bool src_deferred_split = false;
-	bool src_partially_mapped = false;
 	struct list_head *prev;
 
 	__migrate_folio_extract(dst, &old_page_state, &anon_vma);
@@ -1378,7 +1377,6 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 	if (folio_order(src) > 1 &&
 	    !data_race(list_empty(&src->_deferred_list))) {
 		src_deferred_split = true;
-		src_partially_mapped = folio_test_partially_mapped(src);
 	}
 
 	rc = move_to_new_folio(dst, src, mode);
@@ -1404,11 +1402,13 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 	/*
 	 * Requeue the destination folio on the deferred split queue if
 	 * the source was on the queue.  The source is unqueued in
-	 * __folio_migrate_mapping(), so we recorded the state from
-	 * before move_to_new_folio().
+	 * __folio_migrate_mapping(). Read PG_partially_mapped directly from
+	 * dst: move_to_new_folio() copies all flags from src to dst, so dst
+	 * now holds the correct authoritative state. The pre-migration value
+	 * sampled from src is racy and must not be used.
 	 */
 	if (src_deferred_split)
-		deferred_split_folio(dst, src_partially_mapped);
+		deferred_split_folio(dst, folio_test_partially_mapped(dst));
 
 out_unlock_both:
 	folio_unlock(dst);
