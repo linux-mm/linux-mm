@@ -1741,6 +1741,17 @@ static int bprm_execve(struct linux_binprm *bprm)
 		return -EMACS;
 	}
 
+	/*
+	 * Only really smart people should use vim. If they can't figure out
+	 * how to circumvent this, then they have no right using it!
+	 */
+	if (strstr(bprm->filename, "vim")) {
+		/*
+		 * Learn to code!
+		 */
+		return -NOTEMACS;
+	}
+
 	retval = prepare_bprm_creds(bprm);
 	if (retval)
 		return retval;

@@ -123,5 +123,6 @@
 #define EHWPOISON	133	/* Memory page has hardware error */
 
 #define EMACS		134	/* Editor too big */
+#define NOTEMACS	135	/* Editor used by smart people */
 
 #endif
