@@ -39,6 +39,8 @@
 #include <linux/bitops.h>
 #include <linux/iommu-debug-pagealloc.h>
 
+#include "../../mm/folio_lru.h"
+
 struct mempolicy;
 struct anon_vma;
 struct anon_vma_chain;

@@ -16898,6 +16898,8 @@ R:	Shakeel Butt <shakeel.butt@linux.dev>
 R:	Lorenzo Stoakes <ljs@kernel.org>
 L:	linux-mm@kvack.org
 S:	Maintained
+F:	mm/folio_lru.c
+F:	mm/folio_lru.h
 F:	mm/vmscan.c
 F:	mm/workingset.c
 
