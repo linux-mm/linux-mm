@@ -2466,6 +2466,20 @@ void wakeup_flusher_threads_bdi(struct backing_dev_info *bdi,
 	rcu_read_unlock();
 }
 
+/**
+ * filemap_dontcache_kick_writeback - kick flusher for IOCB_DONTCACHE writes
+ * @mapping:	address_space that was just written to
+ *
+ * Wake the BDI flusher thread to start writeback of dirty pages in the
+ * background.
+ */
+void filemap_dontcache_kick_writeback(struct address_space *mapping)
+{
+	wakeup_flusher_threads_bdi(inode_to_bdi(mapping->host),
+				   WB_REASON_DONTCACHE);
+}
+EXPORT_SYMBOL(filemap_dontcache_kick_writeback);
+
 /*
  * Wakeup the flusher threads to start writeback of all currently dirty pages
  */
