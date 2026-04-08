@@ -17,6 +17,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/string_choices.h>
+#include <linux/freezer.h>
 
 /* for damon_get_folio() used by node eligible memory metrics */
 #include "ops-common.h"
@@ -3189,6 +3190,7 @@ static int kdamond_fn(void *data)
 	mutex_unlock(&ctx->walk_control_lock);
 	complete(&ctx->kdamond_started);
 	kdamond_init_ctx(ctx);
+	set_freezable();
 
 	if (ctx->ops.init)
 		ctx->ops.init(ctx);
@@ -3209,6 +3211,8 @@ static int kdamond_fn(void *data)
 		unsigned long next_aggregation_sis = ctx->next_aggregation_sis;
 		unsigned long next_ops_update_sis = ctx->next_ops_update_sis;
 		unsigned long sample_interval = ctx->attrs.sample_interval;
+
+		try_to_freeze();
 
 		if (kdamond_wait_activation(ctx))
 			break;
