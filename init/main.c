@@ -1053,6 +1053,7 @@ void start_kernel(void)
 	print_kernel_cmdline(saved_command_line);
 	/* parameters may set static keys */
 	parse_early_param();
+	init_arch_has_pmd_leaves();
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
 				  __stop___param - __start___param,
