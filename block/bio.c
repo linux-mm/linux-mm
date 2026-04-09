@@ -1754,7 +1754,7 @@ static void bio_complete_work_fn(struct work_struct *w)
 	} while (1);
 }
 
-static void bio_queue_completion(struct bio *bio)
+void __bio_complete_in_task(struct bio *bio)
 {
 	struct bio_complete_batch *batch = this_cpu_ptr(&bio_complete_batch);
 
@@ -1762,6 +1762,7 @@ static void bio_queue_completion(struct bio *bio)
 		mod_delayed_work_on(batch->cpu, bio_complete_wq,
 				    &batch->work, 1);
 }
+EXPORT_SYMBOL_GPL(__bio_complete_in_task);
 
 static inline bool bio_remaining_done(struct bio *bio)
 {
@@ -1837,9 +1838,7 @@ again:
 	}
 #endif
 
-	if (!in_task() && bio_flagged(bio, BIO_COMPLETE_IN_TASK))
-		bio_queue_completion(bio);
-	else if (bio->bi_end_io)
+	if (bio->bi_end_io)
 		bio->bi_end_io(bio);
 }
 EXPORT_SYMBOL(bio_endio);

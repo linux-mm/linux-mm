@@ -35,6 +35,7 @@ enum bh_state_bits {
 	BH_Prio,	/* Buffer should be submitted with REQ_PRIO */
 	BH_Defer_Completion, /* Defer AIO completion to workqueue */
 	BH_Migrate,     /* Buffer is being migrated (norefs) */
+	BH_Dropbehind,	/* drop pages on IO completion */
 
 	BH_PrivateStart,/* not a state bit, but the first bit available
 			 * for private allocation by other entities
@@ -136,6 +137,7 @@ BUFFER_FNS(Unwritten, unwritten)
 BUFFER_FNS(Meta, meta)
 BUFFER_FNS(Prio, prio)
 BUFFER_FNS(Defer_Completion, defer_completion)
+BUFFER_FNS(Dropbehind, dropbehind)
 
 static __always_inline void set_buffer_uptodate(struct buffer_head *bh)
 {

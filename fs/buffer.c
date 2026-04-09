@@ -2680,6 +2680,9 @@ static void end_bio_bh_io_sync(struct bio *bio)
 {
 	struct buffer_head *bh = bio->bi_private;
 
+	if (buffer_dropbehind(bh) && bio_complete_in_task(bio))
+		return;
+
 	if (unlikely(bio_flagged(bio, BIO_QUIET)))
 		set_bit(BH_Quiet, &bh->b_state);
 
@@ -2732,7 +2735,7 @@ static void submit_bh_wbc(blk_opf_t opf, struct buffer_head *bh,
 		buffer_set_crypto_ctx(bio, bh, GFP_NOIO);
 
 	if (folio_test_dropbehind(bh->b_folio))
-		bio_set_flag(bio, BIO_COMPLETE_IN_TASK);
+		set_buffer_dropbehind(bh);
 
 	bio->bi_iter.bi_sector = bh->b_blocknr * (bh->b_size >> 9);
 	bio->bi_write_hint = write_hint;
