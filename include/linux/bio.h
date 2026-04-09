@@ -369,6 +369,16 @@ static inline struct bio *bio_alloc(struct block_device *bdev,
 
 void submit_bio(struct bio *bio);
 
+/* Offload from atomic contexts to minimize scheduling overhead */
+static inline bool bio_in_atomic(void)
+{
+	if (IS_ENABLED(CONFIG_PREEMPTION) && rcu_preempt_depth())
+		return true;
+	if (!IS_ENABLED(CONFIG_PREEMPT_COUNT))
+		return true;
+	return !preemptible();
+}
+
 void __bio_complete_in_task(struct bio *bio);
 
 /**
@@ -380,10 +390,11 @@ void __bio_complete_in_task(struct bio *bio);
  */
 static inline bool bio_complete_in_task(struct bio *bio)
 {
-	if (in_task())
-		return false;
-	__bio_complete_in_task(bio);
-	return true;
+	if (bio_in_atomic()) {
+		__bio_complete_in_task(bio);
+		return true;
+	}
+	return false;
 }
 
 extern void bio_endio(struct bio *);
