@@ -72,15 +72,6 @@ extern unsigned int tsc_khz;
 
 extern void disable_TSC(void);
 
-static inline cycles_t get_cycles(void)
-{
-	if (!IS_ENABLED(CONFIG_X86_TSC) &&
-	    !cpu_feature_enabled(X86_FEATURE_TSC))
-		return 0;
-	return rdtsc();
-}
-#define get_cycles get_cycles
-
 extern void tsc_early_init(void);
 extern void tsc_init(void);
 extern void mark_tsc_unstable(char *reason);
