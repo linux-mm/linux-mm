@@ -29,8 +29,6 @@
  * We know that all SMP capable CPUs have cycle counters.
  */
 
-typedef unsigned int cycles_t;
-
 /*
  * On R4000/R4400 an erratum exists such that if the cycle counter is
  * read in the exact moment that it is matching the compare register,

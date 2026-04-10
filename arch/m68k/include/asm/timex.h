@@ -7,8 +7,6 @@
 #ifndef _ASMm68K_TIMEX_H
 #define _ASMm68K_TIMEX_H
 
-typedef unsigned long cycles_t;
-
 static inline cycles_t get_cycles(void)
 {
 	return 0;

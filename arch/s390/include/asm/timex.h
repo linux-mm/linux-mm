@@ -177,8 +177,6 @@ static inline void local_tick_enable(unsigned long comp)
 	set_clock_comparator(get_lowcore()->clock_comparator);
 }
 
-typedef unsigned long cycles_t;
-
 static __always_inline unsigned long get_tod_clock(void)
 {
 	union tod_clock clk;

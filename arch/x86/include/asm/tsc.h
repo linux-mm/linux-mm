@@ -67,8 +67,6 @@ static __always_inline u64 rdtsc_ordered(void)
 /*
  * Standard way to access the cycle counter.
  */
-typedef unsigned long long cycles_t;
-
 extern unsigned int cpu_khz;
 extern unsigned int tsc_khz;
 

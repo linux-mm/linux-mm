@@ -15,9 +15,6 @@
  * But this only means we'll force a reschedule every 8 seconds or so,
  * which isn't an evil thing.
  */
-
-typedef unsigned int cycles_t;
-
 static inline cycles_t get_cycles (void)
 {
 	cycles_t ret;

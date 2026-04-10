@@ -9,7 +9,6 @@
 #ifndef _ASMARM_TIMEX_H
 #define _ASMARM_TIMEX_H
 
-typedef unsigned long cycles_t;
 // Temporary workaround
 bool delay_read_timer(unsigned long *t);
 

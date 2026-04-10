@@ -10,7 +10,6 @@
 #include <asm/timer.h>
 
 /* Getting on the cycle counter on sparc64. */
-typedef unsigned long cycles_t;
 #define get_cycles()	tick_ops->get_tick()
 
 #endif

@@ -11,9 +11,7 @@
 #include <asm/cputable.h>
 #include <asm/vdso/timebase.h>
 
-typedef unsigned long cycles_t;
-
-static inline cycles_t get_cycles(void)
+ostatic inline cycles_t get_cycles(void)
 {
 	return mftb();
 }

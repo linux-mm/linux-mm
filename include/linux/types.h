@@ -270,5 +270,11 @@ struct rcuwait {
 	struct task_struct __rcu *task;
 };
 
+#ifdef CONFIG_ARCH_HAS_CYCLES_T_64
+typedef unsigned long long	cycles_t;
+#else
+typedef unsigned long		cycles_t;
+#endif
+
 #endif /*  __ASSEMBLY__ */
 #endif /* _LINUX_TYPES_H */

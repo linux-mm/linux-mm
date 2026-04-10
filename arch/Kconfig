@@ -360,6 +360,10 @@ config ARCH_HAS_DMA_SET_UNCACHED
 config ARCH_HAS_DMA_CLEAR_UNCACHED
 	bool
 
+# cycles_t is always 64bit wide
+config ARCH_HAS_CYCLES_T_64
+	bool
+
 config ARCH_HAS_CPU_FINALIZE_INIT
 	bool
 

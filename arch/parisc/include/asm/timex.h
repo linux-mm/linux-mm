@@ -9,8 +9,6 @@
 
 #include <asm/special_insns.h>
 
-typedef unsigned long cycles_t;
-
 static inline cycles_t get_cycles(void)
 {
 	return mfctl(16);

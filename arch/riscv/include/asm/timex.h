@@ -8,8 +8,6 @@
 
 #include <asm/csr.h>
 
-typedef unsigned long cycles_t;
-
 #ifdef CONFIG_RISCV_M_MODE
 
 #include <asm/clint.h>
