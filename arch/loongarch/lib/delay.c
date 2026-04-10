@@ -5,9 +5,9 @@
 #include <linux/delay.h>
 #include <linux/export.h>
 #include <linux/smp.h>
-#include <linux/timex.h>
 
 #include <asm/processor.h>
+#include <asm/timex.h>
 
 void __delay(unsigned long cycles)
 {
