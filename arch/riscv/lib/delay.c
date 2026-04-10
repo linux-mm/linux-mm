@@ -10,6 +10,7 @@
 #include <linux/export.h>
 
 #include <asm/processor.h>
+#include <asm/timex.h>
 
 /*
  * This is copies from arch/arm/include/asm/delay.h

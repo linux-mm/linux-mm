@@ -12,6 +12,7 @@
 #include <linux/types.h>
 #include <asm/cpufeature.h>
 #include <asm/hwprobe.h>
+#include <asm/timex.h>
 #include <asm/vector.h>
 
 #include "copy-unaligned.h"
