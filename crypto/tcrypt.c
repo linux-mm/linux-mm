@@ -202,7 +202,7 @@ out:
 static int test_mb_aead_cycles(struct test_mb_aead_data *data, int enc,
 			       int blen, u32 num_mb)
 {
-	unsigned long cycles = 0;
+	unsigned long nsecs = 0;
 	int ret = 0;
 	int i;
 	int *rc;
@@ -220,20 +220,20 @@ static int test_mb_aead_cycles(struct test_mb_aead_data *data, int enc,
 
 	/* The real thing. */
 	for (i = 0; i < 8; i++) {
-		cycles_t start, end;
+		ktime_t start, end;
 
-		start = get_cycles();
+		start = ktime_get();
 		ret = do_mult_aead_op(data, enc, num_mb, rc);
-		end = get_cycles();
+		end = ktime_get();
 
 		if (ret)
 			goto out;
 
-		cycles += end - start;
+		nsecs += (unsigned long)(end - start);
 	}
 
-	pr_cont("1 operation in %lu cycles (%d bytes)\n",
-		(cycles + 4) / (8 * num_mb), blen);
+	pr_cont("1 operation in %lu nsecs (%d bytes)\n",
+		nsecs / (8 * num_mb), blen);
 
 out:
 	kfree(rc);
@@ -475,7 +475,7 @@ static int test_aead_jiffies(struct aead_request *req, int enc,
 
 static int test_aead_cycles(struct aead_request *req, int enc, int blen)
 {
-	unsigned long cycles = 0;
+	unsigned long nsecs = 0;
 	int ret = 0;
 	int i;
 
@@ -492,25 +492,24 @@ static int test_aead_cycles(struct aead_request *req, int enc, int blen)
 
 	/* The real thing. */
 	for (i = 0; i < 8; i++) {
-		cycles_t start, end;
+		ktime_t start, end;
 
-		start = get_cycles();
+		start = ktime_get();
 		if (enc)
 			ret = do_one_aead_op(req, crypto_aead_encrypt(req));
 		else
 			ret = do_one_aead_op(req, crypto_aead_decrypt(req));
-		end = get_cycles();
+		end = ktime_get();
 
 		if (ret)
 			goto out;
 
-		cycles += end - start;
+		nsecs += (unsigned long)(end - start);
 	}
 
 out:
 	if (ret == 0)
-		pr_cont("1 operation in %lu cycles (%d bytes)\n",
-			(cycles + 4) / 8, blen);
+		pr_cont("1 operation in %lu nsecs (%d bytes)\n", nsecs / 8, blen);
 
 	return ret;
 }
@@ -771,7 +770,7 @@ static int test_ahash_jiffies(struct ahash_request *req, int blen,
 static int test_ahash_cycles_digest(struct ahash_request *req, int blen,
 				    char *out)
 {
-	unsigned long cycles = 0;
+	unsigned long nsecs = 0;
 	int ret, i;
 
 	/* Warm-up run. */
@@ -783,25 +782,25 @@ static int test_ahash_cycles_digest(struct ahash_request *req, int blen,
 
 	/* The real thing. */
 	for (i = 0; i < 8; i++) {
-		cycles_t start, end;
+		ktime_t start, end;
 
-		start = get_cycles();
+		start = ktime_get();
 
 		ret = do_one_ahash_op(req, crypto_ahash_digest(req));
 		if (ret)
 			goto out;
 
-		end = get_cycles();
+		end = ktime_get();
 
-		cycles += end - start;
+		nsecs += (unsigned long)(end - start);
 	}
 
 out:
 	if (ret)
 		return ret;
 
-	pr_cont("%6lu cycles/operation, %4lu cycles/byte\n",
-		cycles / 8, cycles / (8 * blen));
+	pr_cont("%6lu nsecs/operation, %4lu nsecs/byte\n",
+		nsecs / 8, nsecs / (8 * blen));
 
 	return 0;
 }
@@ -809,7 +808,7 @@ out:
 static int test_ahash_cycles(struct ahash_request *req, int blen,
 			     int plen, char *out)
 {
-	unsigned long cycles = 0;
+	unsigned long nsecs = 0;
 	int i, pcount, ret;
 
 	if (plen == blen)
@@ -832,9 +831,9 @@ static int test_ahash_cycles(struct ahash_request *req, int blen,
 
 	/* The real thing. */
 	for (i = 0; i < 8; i++) {
-		cycles_t start, end;
+		ktime_t start, end;
 
-		start = get_cycles();
+		start = ktime_get();
 
 		ret = do_one_ahash_op(req, crypto_ahash_init(req));
 		if (ret)
@@ -848,17 +847,17 @@ static int test_ahash_cycles(struct ahash_request *req, int blen,
 		if (ret)
 			goto out;
 
-		end = get_cycles();
+		end = ktime_get();
 
-		cycles += end - start;
+		nsecs += (unsigned long)(end - start);
 	}
 
 out:
 	if (ret)
 		return ret;
 
-	pr_cont("%6lu cycles/operation, %4lu cycles/byte\n",
-		cycles / 8, cycles / (8 * blen));
+	pr_cont("%6lu nsecs/operation, %4lu nsecs/byte\n",
+		nsecs / 8, nsecs / (8 * blen));
 
 	return 0;
 }
@@ -1019,7 +1018,7 @@ out:
 static int test_mb_acipher_cycles(struct test_mb_skcipher_data *data, int enc,
 			       int blen, u32 num_mb)
 {
-	unsigned long cycles = 0;
+	unsigned long nsecs = 0;
 	int ret = 0;
 	int i;
 	int *rc;
@@ -1037,20 +1036,20 @@ static int test_mb_acipher_cycles(struct test_mb_skcipher_data *data, int enc,
 
 	/* The real thing. */
 	for (i = 0; i < 8; i++) {
-		cycles_t start, end;
+		ktime_t start, end;
 
-		start = get_cycles();
+		start = ktime_get();
 		ret = do_mult_acipher_op(data, enc, num_mb, rc);
-		end = get_cycles();
+		end = ktime_get();
 
 		if (ret)
 			goto out;
 
-		cycles += end - start;
+		nsecs += (unsigned long)(end - start);
 	}
 
-	pr_cont("1 operation in %lu cycles (%d bytes)\n",
-		(cycles + 4) / (8 * num_mb), blen);
+	pr_cont("1 operation in %lu nsecs (%d bytes)\n",
+		nsecs / (8 * num_mb), blen);
 
 out:
 	kfree(rc);
@@ -1246,7 +1245,7 @@ static int test_acipher_jiffies(struct skcipher_request *req, int enc,
 static int test_acipher_cycles(struct skcipher_request *req, int enc,
 			       int blen)
 {
-	unsigned long cycles = 0;
+	unsigned long nsecs = 0;
 	int ret = 0;
 	int i;
 
@@ -1265,27 +1264,28 @@ static int test_acipher_cycles(struct skcipher_request *req, int enc,
 
 	/* The real thing. */
 	for (i = 0; i < 8; i++) {
-		cycles_t start, end;
+		ktime_t start, end;
 
-		start = get_cycles();
+		start = ktime_get();
+
 		if (enc)
 			ret = do_one_acipher_op(req,
 						crypto_skcipher_encrypt(req));
 		else
 			ret = do_one_acipher_op(req,
 						crypto_skcipher_decrypt(req));
-		end = get_cycles();
+		end = ktime_get();
 
 		if (ret)
 			goto out;
 
-		cycles += end - start;
+		nsecs += (unsigned long)(end - start);
 	}
 
 out:
 	if (ret == 0)
-		pr_cont("1 operation in %lu cycles (%d bytes)\n",
-			(cycles + 4) / 8, blen);
+		pr_cont("1 operation in %lu nsecs (%d bytes)\n",
+			nsecs / 8, blen);
 
 	return ret;
 }
