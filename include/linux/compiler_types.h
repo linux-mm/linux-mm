@@ -41,6 +41,7 @@
 # define BTF_TYPE_TAG(value) /* nothing */
 #endif
 
+#include <asm/percpu_types.h>
 #include <linux/compiler-context-analysis.h>
 
 /* sparse defines __CHECKER__; see Documentation/dev-tools/sparse.rst */
