@@ -454,8 +454,8 @@ static struct test_driver {
 	struct task_struct *task;
 	struct test_case_data data[ARRAY_SIZE(test_case_array)];
 
-	unsigned long start;
-	unsigned long stop;
+	ktime_t start;
+	ktime_t stop;
 } *tdriver;
 
 static void shuffle_array(int *arr, int n)
@@ -490,7 +490,7 @@ static int test_func(void *private)
 	 */
 	synchronize_srcu(&prepare_for_test_srcu);
 
-	t->start = get_cycles();
+	t->start = ktime_get();
 	for (i = 0; i < ARRAY_SIZE(test_case_array); i++) {
 		index = random_array[i];
 
@@ -519,7 +519,7 @@ static int test_func(void *private)
 
 		t->data[index].time = delta;
 	}
-	t->stop = get_cycles();
+	t->stop = ktime_get();
 	test_report_one_done();
 
 	/*
@@ -619,7 +619,7 @@ static void do_concurrent_test(void)
 				t->data[j].time);
 		}
 
-		pr_info("All test took worker%d=%lu cycles\n",
+		pr_info("All test took worker%d=%lld nsecs\n",
 			i, t->stop - t->start);
 	}
 
