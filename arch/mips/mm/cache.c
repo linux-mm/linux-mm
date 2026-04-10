@@ -22,6 +22,7 @@
 #include <asm/processor.h>
 #include <asm/cpu.h>
 #include <asm/cpu-features.h>
+#include <asm/cpu-type.h>
 #include <asm/setup.h>
 #include <asm/pgtable.h>
 

@@ -8,6 +8,7 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 
+#include <asm/cpu-type.h>
 #include <asm/hazards.h>
 #include <asm/mipsregs.h>
 #include <asm/mmu_context.h>

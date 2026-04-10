@@ -13,7 +13,6 @@
 #include <asm/fw/fw.h>
 #include <asm/sections.h>
 #include <asm/setup.h>
-#include <asm/timex.h>
 #include <linux/elf.h>
 #include <linux/kernel.h>
 #include <linux/libfdt.h>
