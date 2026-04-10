@@ -29,6 +29,7 @@
 
 #include <clocksource/arm_arch_timer.h>
 
+#include <asm/arch_timer.h>
 #include <asm/thread_info.h>
 #include <asm/paravirt.h>
 
@@ -51,6 +52,11 @@ unsigned long profile_pc(struct pt_regs *regs)
 	return prof_pc;
 }
 EXPORT_SYMBOL(profile_pc);
+
+static unsigned long random_get_entropy(void)
+{
+	return arch_timer_read_counter();
+}
 
 void __init time_init(void)
 {
