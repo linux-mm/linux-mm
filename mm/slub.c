@@ -3302,6 +3302,25 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
 	return slab;
 }
 
+#if defined(CONFIG_SLAB_FREELIST_RANDOM) || defined(CONFIG_NUMA)
+static DEFINE_PER_CPU(struct rnd_state, slab_rnd_state);
+
+static unsigned int slab_get_prandom_state(unsigned int limit)
+{
+	struct rnd_state *state;
+	unsigned int res;
+
+	/*
+	 * An interrupt or NMI handler might interrupt and change
+	 * the state in the middle, but that's safe.
+	 */
+	state = &get_cpu_var(slab_rnd_state);
+	res = prandom_u32_state(state) % limit;
+	put_cpu_var(slab_rnd_state);
+	return res;
+}
+#endif
+
 #ifdef CONFIG_SLAB_FREELIST_RANDOM
 /* Pre-initialize the random sequence cache */
 static int init_cache_random_seq(struct kmem_cache *s)
@@ -3365,8 +3384,6 @@ static void *next_freelist_entry(struct kmem_cache *s,
 	return (char *)start + idx;
 }
 
-static DEFINE_PER_CPU(struct rnd_state, slab_rnd_state);
-
 /* Shuffle the single linked freelist based on a random pre-computed sequence */
 static bool shuffle_freelist(struct kmem_cache *s, struct slab *slab,
 			     bool allow_spin)
@@ -3383,15 +3400,7 @@ static bool shuffle_freelist(struct kmem_cache *s, struct slab *slab,
 	if (allow_spin) {
 		pos = get_random_u32_below(freelist_count);
 	} else {
-		struct rnd_state *state;
-
-		/*
-		 * An interrupt or NMI handler might interrupt and change
-		 * the state in the middle, but that's safe.
-		 */
-		state = &get_cpu_var(slab_rnd_state);
-		pos = prandom_u32_state(state) % freelist_count;
-		put_cpu_var(slab_rnd_state);
+		pos = slab_get_prandom_state(freelist_count);
 	}
 
 	page_limit = slab->objects * s->size;
@@ -3882,7 +3891,7 @@ static void *get_from_any_partial(struct kmem_cache *s, struct partial_context *
 	 * with available objects.
 	 */
 	if (!s->remote_node_defrag_ratio ||
-			get_cycles() % 1024 > s->remote_node_defrag_ratio)
+	    slab_get_prandom_state(1024) > s->remote_node_defrag_ratio)
 		return NULL;
 
 	do {
@@ -7102,7 +7111,7 @@ __refill_objects_any(struct kmem_cache *s, void **p, gfp_t gfp, unsigned int min
 
 	/* see get_from_any_partial() for the defrag ratio description */
 	if (!s->remote_node_defrag_ratio ||
-			get_cycles() % 1024 > s->remote_node_defrag_ratio)
+	    slab_get_prandom_state(1024) > s->remote_node_defrag_ratio)
 		return 0;
 
 	do {
@@ -8421,7 +8430,7 @@ void __init kmem_cache_init_late(void)
 	flushwq = alloc_workqueue("slub_flushwq", WQ_MEM_RECLAIM | WQ_PERCPU,
 				  0);
 	WARN_ON(!flushwq);
-#ifdef CONFIG_SLAB_FREELIST_RANDOM
+#if defined(CONFIG_SLAB_FREELIST_RANDOM) || defined(CONFIG_NUMA)
 	prandom_init_once(&slab_rnd_state);
 #endif
 }
