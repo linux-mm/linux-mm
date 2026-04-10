@@ -66,6 +66,7 @@ unsigned long random_get_entropy_fallback(void);
 
 #include <asm/timex.h>
 
+#ifndef CONFIG_ARCH_HAS_RANDOM_ENTROPY
 #ifndef random_get_entropy
 /*
  * The random_get_entropy() function is used by the /dev/random driver
@@ -83,6 +84,7 @@ unsigned long random_get_entropy_fallback(void);
 #define random_get_entropy()	((unsigned long)get_cycles())
 #else
 #define random_get_entropy()	random_get_entropy_fallback()
+#endif
 #endif
 #endif
 
