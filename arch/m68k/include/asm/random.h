@@ -1,16 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/*
- * linux/include/asm-m68k/timex.h
- *
- * m68k architecture timex specifications
- */
-#ifndef _ASMm68K_TIMEX_H
-#define _ASMm68K_TIMEX_H
-
-static inline cycles_t get_cycles(void)
-{
-	return 0;
-}
+#ifndef _ASMm68K_RANDOM_H
+#define _ASMm68K_RANDOM_H
 
 extern unsigned long (*mach_random_get_entropy)(void);
 
@@ -20,6 +10,5 @@ static inline unsigned long random_get_entropy(void)
 		return mach_random_get_entropy();
 	return random_get_entropy_fallback();
 }
-#define random_get_entropy	random_get_entropy
 
 #endif
