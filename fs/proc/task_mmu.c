@@ -968,11 +968,6 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 		exclusive = !folio_maybe_mapped_shared(folio);
 	}
 
-	/*
-	 * We obtain a snapshot of the mapcount. Without holding the folio lock
-	 * this snapshot can be slightly wrong as we cannot always read the
-	 * mapcount atomically.
-	 */
 	for (i = 0; i < nr; i++, page++) {
 		unsigned long pss = PAGE_SIZE << PSS_SHIFT;
 
