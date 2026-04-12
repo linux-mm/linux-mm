@@ -377,7 +377,7 @@ typedef unsigned short mm_id_t;
  * @_last_cpupid: IDs of last CPU and last process that accessed the folio.
  * @_entire_mapcount: Do not use directly, call folio_entire_mapcount().
  * @_large_mapcount: Do not use directly, call folio_mapcount().
- * @_nr_pages_mapped: Do not use outside of rmap and debug code.
+ * @_unused_1: Temporary placeholder.
  * @_pincount: Do not use directly, call folio_maybe_dma_pinned().
  * @_nr_pages: Do not use directly, call folio_nr_pages().
  * @_mm_id: Do not use outside of rmap code.
@@ -452,7 +452,7 @@ struct folio {
 				struct {
 	/* public: */
 					atomic_t _large_mapcount;
-					atomic_t _nr_pages_mapped;
+					unsigned int _unused_1;
 #ifdef CONFIG_64BIT
 					atomic_t _entire_mapcount;
 					atomic_t _pincount;

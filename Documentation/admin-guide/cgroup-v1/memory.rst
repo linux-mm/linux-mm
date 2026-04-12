@@ -609,9 +609,9 @@ memory.stat file includes following statistics:
 
 	'rss + mapped_file" will give you resident set size of cgroup.
 
-	Note that some kernel configurations might account complete larger
-	allocations (e.g., THP) towards 'rss' and 'mapped_file', even if
-	only some, but not all that memory is mapped.
+	Note that the kernel accounts entire larger allocations (e.g., THP)
+	towards 'rss' and 'mapped_file' if any part of such an allocation
+	is mapped.
 
 	(Note: file and shmem may be shared among other cgroups. In that case,
 	mapped_file is accounted only when the memory cgroup is owner of page

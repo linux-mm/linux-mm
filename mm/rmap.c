@@ -1353,9 +1353,8 @@ static __always_inline void __folio_add_rmap(struct folio *folio,
 		struct page *page, int nr_pages, struct vm_area_struct *vma,
 		enum pgtable_level level)
 {
-	atomic_t *mapped = &folio->_nr_pages_mapped;
+	int nr = 0, nr_pmdmapped = 0, mapcount;
 	const int orig_nr_pages = nr_pages;
-	int first = 0, nr = 0, nr_pmdmapped = 0;
 
 	__folio_rmap_sanity_checks(folio, page, nr_pages, level);
 
@@ -1366,61 +1365,25 @@ static __always_inline void __folio_add_rmap(struct folio *folio,
 			break;
 		}
 
-		if (IS_ENABLED(CONFIG_NO_PAGE_MAPCOUNT)) {
-			nr = folio_add_return_large_mapcount(folio, orig_nr_pages, vma);
-			if (nr == orig_nr_pages)
-				/* Was completely unmapped. */
-				nr = folio_large_nr_pages(folio);
-			else
-				nr = 0;
-			break;
+		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT)) {
+			do {
+				atomic_inc(&page->_mapcount);
+			} while (page++, --nr_pages > 0);
 		}
 
-		do {
-			first += atomic_inc_and_test(&page->_mapcount);
-		} while (page++, --nr_pages > 0);
-
-		if (first &&
-		    atomic_add_return_relaxed(first, mapped) < ENTIRELY_MAPPED)
-			nr = first;
-
-		folio_add_large_mapcount(folio, orig_nr_pages, vma);
+		mapcount = folio_add_return_large_mapcount(folio, orig_nr_pages, vma);
+		if (mapcount == orig_nr_pages)
+			nr = folio_large_nr_pages(folio);
 		break;
 	case PGTABLE_LEVEL_PMD:
 	case PGTABLE_LEVEL_PUD:
-		first = atomic_inc_and_test(&folio->_entire_mapcount);
-		if (IS_ENABLED(CONFIG_NO_PAGE_MAPCOUNT)) {
-			if (level == PGTABLE_LEVEL_PMD && first)
-				nr_pmdmapped = folio_large_nr_pages(folio);
-			nr = folio_inc_return_large_mapcount(folio, vma);
-			if (nr == 1)
-				/* Was completely unmapped. */
-				nr = folio_large_nr_pages(folio);
-			else
-				nr = 0;
-			break;
-		}
+		if (atomic_inc_and_test(&folio->_entire_mapcount) &&
+		    level == PGTABLE_LEVEL_PMD)
+			nr_pmdmapped = HPAGE_PMD_NR;
 
-		if (first) {
-			nr = atomic_add_return_relaxed(ENTIRELY_MAPPED, mapped);
-			if (likely(nr < ENTIRELY_MAPPED + ENTIRELY_MAPPED)) {
-				nr_pages = folio_large_nr_pages(folio);
-				/*
-				 * We only track PMD mappings of PMD-sized
-				 * folios separately.
-				 */
-				if (level == PGTABLE_LEVEL_PMD)
-					nr_pmdmapped = nr_pages;
-				nr = nr_pages - (nr & FOLIO_PAGES_MAPPED);
-				/* Raced ahead of a remove and another add? */
-				if (unlikely(nr < 0))
-					nr = 0;
-			} else {
-				/* Raced ahead of a remove of ENTIRELY_MAPPED */
-				nr = 0;
-			}
-		}
-		folio_inc_large_mapcount(folio, vma);
+		mapcount = folio_inc_return_large_mapcount(folio, vma);
+		if (mapcount == 1)
+			nr = folio_large_nr_pages(folio);
 		break;
 	default:
 		BUILD_BUG();
@@ -1676,15 +1639,11 @@ void folio_add_new_anon_rmap(struct folio *folio, struct vm_area_struct *vma,
 		}
 
 		folio_set_large_mapcount(folio, nr, vma);
-		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT))
-			atomic_set(&folio->_nr_pages_mapped, nr);
 	} else {
 		nr = folio_large_nr_pages(folio);
 		/* increment count (starts at -1) */
 		atomic_set(&folio->_entire_mapcount, 0);
 		folio_set_large_mapcount(folio, 1, vma);
-		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT))
-			atomic_set(&folio->_nr_pages_mapped, ENTIRELY_MAPPED);
 		if (exclusive)
 			SetPageAnonExclusive(&folio->page);
 		nr_pmdmapped = nr;
@@ -1773,12 +1732,28 @@ void folio_add_file_rmap_pud(struct folio *folio, struct page *page,
 #endif
 }
 
+static bool __folio_certainly_partially_mapped(struct folio *folio, int mapcount)
+{
+	/*
+	 * This is a best-effort check only: if the average per-page
+	 * mapcount in the folio is smaller than 1, at least one page is not
+	 * mapped -> partially mapped. This is always reliable for exclusive
+	 * folios.
+	 *
+	 * We will not detect partial mappings in all scenarios:
+	 * when a folio becomes partially mapped while shared and the
+	 * average per-page mapcount is >= 1. However, we will detect the
+	 * partial mapping once it becomes exclusively mapped again.
+	 */
+	return mapcount && !folio_entire_mapcount(folio) &&
+	       mapcount < folio_large_nr_pages(folio);
+}
+
 static __always_inline void __folio_remove_rmap(struct folio *folio,
 		struct page *page, int nr_pages, struct vm_area_struct *vma,
 		enum pgtable_level level)
 {
-	atomic_t *mapped = &folio->_nr_pages_mapped;
-	int last = 0, nr = 0, nr_pmdmapped = 0;
+	int nr = 0, nr_pmdmapped = 0, mapcount;
 	bool partially_mapped = false;
 
 	__folio_rmap_sanity_checks(folio, page, nr_pages, level);
@@ -1790,67 +1765,29 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 			break;
 		}
 
-		if (IS_ENABLED(CONFIG_NO_PAGE_MAPCOUNT)) {
-			nr = folio_sub_return_large_mapcount(folio, nr_pages, vma);
-			if (!nr) {
-				/* Now completely unmapped. */
-				nr = folio_large_nr_pages(folio);
-			} else {
-				partially_mapped = nr < folio_large_nr_pages(folio) &&
-						   !folio_entire_mapcount(folio);
-				nr = 0;
-			}
-			break;
+		mapcount = folio_sub_return_large_mapcount(folio, nr_pages, vma);
+		if (!mapcount)
+			nr = folio_large_nr_pages(folio);
+
+		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT)) {
+			do {
+				atomic_dec(&page->_mapcount);
+			} while (page++, --nr_pages > 0);
 		}
 
-		folio_sub_large_mapcount(folio, nr_pages, vma);
-		do {
-			last += atomic_add_negative(-1, &page->_mapcount);
-		} while (page++, --nr_pages > 0);
-
-		if (last &&
-		    atomic_sub_return_relaxed(last, mapped) < ENTIRELY_MAPPED)
-			nr = last;
-
-		partially_mapped = nr && atomic_read(mapped);
+		partially_mapped = __folio_certainly_partially_mapped(folio, mapcount);
 		break;
 	case PGTABLE_LEVEL_PMD:
 	case PGTABLE_LEVEL_PUD:
-		if (IS_ENABLED(CONFIG_NO_PAGE_MAPCOUNT)) {
-			last = atomic_add_negative(-1, &folio->_entire_mapcount);
-			if (level == PGTABLE_LEVEL_PMD && last)
-				nr_pmdmapped = folio_large_nr_pages(folio);
-			nr = folio_dec_return_large_mapcount(folio, vma);
-			if (!nr) {
-				/* Now completely unmapped. */
-				nr = folio_large_nr_pages(folio);
-			} else {
-				partially_mapped = last &&
-						   nr < folio_large_nr_pages(folio);
-				nr = 0;
-			}
-			break;
-		}
+		mapcount = folio_dec_return_large_mapcount(folio, vma);
+		if (!mapcount)
+			nr = folio_large_nr_pages(folio);
 
-		folio_dec_large_mapcount(folio, vma);
-		last = atomic_add_negative(-1, &folio->_entire_mapcount);
-		if (last) {
-			nr = atomic_sub_return_relaxed(ENTIRELY_MAPPED, mapped);
-			if (likely(nr < ENTIRELY_MAPPED)) {
-				nr_pages = folio_large_nr_pages(folio);
-				if (level == PGTABLE_LEVEL_PMD)
-					nr_pmdmapped = nr_pages;
-				nr = nr_pages - nr;
-				/* Raced ahead of another remove and an add? */
-				if (unlikely(nr < 0))
-					nr = 0;
-			} else {
-				/* An add of ENTIRELY_MAPPED raced ahead */
-				nr = 0;
-			}
-		}
+		if (atomic_add_negative(-1, &folio->_entire_mapcount) &&
+		    level == PGTABLE_LEVEL_PMD)
+			nr_pmdmapped = HPAGE_PMD_NR;
 
-		partially_mapped = nr && nr < nr_pmdmapped;
+		partially_mapped = __folio_certainly_partially_mapped(folio, mapcount);
 		break;
 	default:
 		BUILD_BUG();

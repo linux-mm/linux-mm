@@ -104,32 +104,10 @@ struct pagetable_move_control {
 void page_writeback_init(void);
 
 /*
- * If a 16GB hugetlb folio were mapped by PTEs of all of its 4kB pages,
- * its nr_pages_mapped would be 0x400000: choose the ENTIRELY_MAPPED bit
- * above that range, instead of 2*(PMD_SIZE/PAGE_SIZE).  Hugetlb currently
- * leaves nr_pages_mapped at 0, but avoid surprise if it participates later.
- */
-#define ENTIRELY_MAPPED		0x800000
-#define FOLIO_PAGES_MAPPED	(ENTIRELY_MAPPED - 1)
-
-/*
  * Flags passed to __show_mem() and show_free_areas() to suppress output in
  * various contexts.
  */
 #define SHOW_MEM_FILTER_NODES		(0x0001u)	/* disallowed nodes */
-
-/*
- * How many individual pages have an elevated _mapcount.  Excludes
- * the folio's entire_mapcount.
- *
- * Don't use this function outside of debugging code.
- */
-static inline int folio_nr_pages_mapped(const struct folio *folio)
-{
-	if (IS_ENABLED(CONFIG_NO_PAGE_MAPCOUNT))
-		return -1;
-	return atomic_read(&folio->_nr_pages_mapped) & FOLIO_PAGES_MAPPED;
-}
 
 /*
  * Retrieve the first entry of a folio based on a provided entry within the
@@ -884,8 +862,6 @@ static inline void prep_compound_head(struct page *page, unsigned int order)
 
 	folio_set_order(folio, order);
 	atomic_set(&folio->_large_mapcount, -1);
-	if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT))
-		atomic_set(&folio->_nr_pages_mapped, 0);
 	if (IS_ENABLED(CONFIG_MM_ID)) {
 		folio->_mm_ids = 0;
 		folio->_mm_id_mapcount[0] = -1;

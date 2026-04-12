@@ -291,7 +291,7 @@ static inline void folio_add_large_mapcount(struct folio *folio,
 static inline int folio_add_return_large_mapcount(struct folio *folio,
 		int diff, struct vm_area_struct *vma)
 {
-	BUILD_BUG();
+	return atomic_add_return(diff, &folio->_large_mapcount) + 1;
 }
 
 static inline void folio_sub_large_mapcount(struct folio *folio,
@@ -303,7 +303,7 @@ static inline void folio_sub_large_mapcount(struct folio *folio,
 static inline int folio_sub_return_large_mapcount(struct folio *folio,
 		int diff, struct vm_area_struct *vma)
 {
-	BUILD_BUG();
+	return atomic_sub_return(diff, &folio->_large_mapcount) + 1;
 }
 #endif /* CONFIG_MM_ID */
 

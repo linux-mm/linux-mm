@@ -86,11 +86,10 @@ static void __dump_folio(const struct folio *folio, const struct page *page,
 		if (folio_has_pincount(folio))
 			pincount = atomic_read(&folio->_pincount);
 
-		pr_warn("head: order:%u mapcount:%d entire_mapcount:%d nr_pages_mapped:%d pincount:%d\n",
+		pr_warn("head: order:%u mapcount:%d entire_mapcount:%d pincount:%d\n",
 				folio_order(folio),
 				folio_mapcount(folio),
 				folio_entire_mapcount(folio),
-				folio_nr_pages_mapped(folio),
 				pincount);
 	}
 
