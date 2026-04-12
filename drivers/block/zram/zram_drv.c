@@ -1958,6 +1958,23 @@ static ssize_t debug_stat_show(struct device *dev,
 	return ret;
 }
 
+static void gc_slots_free(struct zram *zram)
+{
+	size_t num_pages = zram->disksize >> PAGE_SHIFT;
+	unsigned long index;
+
+	index = find_next_bit(zram->gc_map, num_pages, 0);
+	while (index < num_pages) {
+		if (slot_trylock(zram, index)) {
+			if (test_bit(index, zram->gc_map))
+				slot_free(zram, index);
+			slot_unlock(zram, index);
+			cond_resched();
+		}
+		index = find_next_bit(zram->gc_map, num_pages, index + 1);
+	}
+}
+
 static void zram_meta_free(struct zram *zram, u64 disksize)
 {
 	size_t num_pages = disksize >> PAGE_SHIFT;
@@ -1966,6 +1983,9 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
 	if (!zram->table)
 		return;
 
+	flush_work(&zram->gc_work);
+	gc_slots_free(zram);
+
 	/* Free all pages that are still in this zram device */
 	for (index = 0; index < num_pages; index++)
 		slot_free(zram, index);
@@ -1973,6 +1993,14 @@ static void zram_meta_free(struct zram *zram, u64 disksize)
 	zs_destroy_pool(zram->mem_pool);
 	vfree(zram->table);
 	zram->table = NULL;
+	bitmap_free(zram->gc_map);
+}
+
+static void zram_gc_work(struct work_struct *work)
+{
+	struct zram *zram = container_of(work, struct zram, gc_work);
+
+	gc_slots_free(zram);
 }
 
 static bool zram_meta_alloc(struct zram *zram, u64 disksize)
@@ -1991,11 +2019,21 @@ static bool zram_meta_alloc(struct zram *zram, u64 disksize)
 		return false;
 	}
 
+	zram->gc_map = bitmap_zalloc(num_pages, GFP_KERNEL);
+	if (!zram->gc_map) {
+		zs_destroy_pool(zram->mem_pool);
+		vfree(zram->table);
+		zram->table = NULL;
+		return false;
+	}
+
 	if (!huge_class_size)
 		huge_class_size = zs_huge_class_size(zram->mem_pool);
 
 	for (index = 0; index < num_pages; index++)
 		slot_lock_init(zram, index);
+
+	INIT_WORK(&zram->gc_work, zram_gc_work);
 
 	return true;
 }
@@ -2008,6 +2046,8 @@ static void slot_free(struct zram *zram, u32 index)
 	zram->table[index].attr.ac_time = 0;
 #endif
 
+	if (test_and_clear_bit(index, zram->gc_map))
+		atomic64_dec(&zram->stats.gc_slots);
 	clear_slot_flag(zram, index, ZRAM_IDLE);
 	clear_slot_flag(zram, index, ZRAM_INCOMPRESSIBLE);
 	clear_slot_flag(zram, index, ZRAM_PP_SLOT);
@@ -2784,6 +2824,19 @@ static void zram_submit_bio(struct bio *bio)
 	}
 }
 
+static bool try_slot_lazy_free(struct zram *zram, unsigned long index)
+{
+	/* too many lazy-free slots, perform direct free */
+	if (atomic64_read(&zram->stats.gc_slots) > 30000)
+		return false;
+	if (test_and_set_bit(index, zram->gc_map))
+		return false;
+	/* accumulated lazy-free slots, wake up GC worker */
+	if (atomic64_inc_return(&zram->stats.gc_slots) > 200)
+		queue_work(system_dfl_wq, &zram->gc_work);
+	return true;
+}
+
 static void zram_slot_free_notify(struct block_device *bdev,
 				unsigned long index)
 {
@@ -2797,7 +2850,8 @@ static void zram_slot_free_notify(struct block_device *bdev,
 		return;
 	}
 
-	slot_free(zram, index);
+	if (!try_slot_lazy_free(zram, index))
+		slot_free(zram, index);
 	slot_unlock(zram, index);
 }
 
