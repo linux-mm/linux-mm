@@ -918,10 +918,9 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 		bool present)
 {
 	struct folio *folio = page_folio(page);
-	int i, nr = compound ? compound_nr(page) : 1;
-	unsigned long size = nr * PAGE_SIZE;
-	bool exclusive;
-	int mapcount;
+	const unsigned long size = compound ? folio_size(folio) : PAGE_SIZE;
+	unsigned long pss = size << PSS_SHIFT;
+	bool private = false;
 
 	/*
 	 * First accumulate quantities that depend only on |size| and the type
@@ -943,13 +942,6 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 		mss->referenced += size;
 
 	/*
-	 * Then accumulate quantities that may depend on sharing, or that may
-	 * differ page-by-page.
-	 *
-	 * refcount == 1 for present entries guarantees that the folio is mapped
-	 * exactly once. For large folios this implies that exactly one
-	 * PTE/PMD/... maps (a part of) this folio.
-	 *
 	 * Treat all non-present entries (where relying on the mapcount and
 	 * refcount doesn't make sense) as "maybe shared, but not sure how
 	 * often". We treat device private entries as being fake-present.
@@ -957,30 +949,17 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 	 * Note that it would not be safe to read the mapcount especially for
 	 * pages referenced by migration entries, even with the PTL held.
 	 */
-	if (folio_ref_count(folio) == 1 || !present) {
-		smaps_page_accumulate(mss, folio, size, size << PSS_SHIFT,
-				      dirty, locked, present);
-		return;
-	}
-
-	if (IS_ENABLED(CONFIG_NO_PAGE_MAPCOUNT)) {
-		mapcount = folio_average_page_mapcount(folio);
-		exclusive = !folio_maybe_mapped_shared(folio);
-	}
-
-	for (i = 0; i < nr; i++, page++) {
-		unsigned long pss = PAGE_SIZE << PSS_SHIFT;
-
-		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT)) {
-			mapcount = folio_precise_page_mapcount(folio, page);
-			exclusive = mapcount < 2;
-		}
+	if (present && folio_ref_count(folio) == 1) {
+		/* Single mapping, no need to mess with mapcounts. */
+		private = true;
+	} else if (present) {
+		const int mapcount = folio_average_page_mapcount(folio);
 
 		if (mapcount >= 2)
 			pss /= mapcount;
-		smaps_page_accumulate(mss, folio, PAGE_SIZE, pss,
-				dirty, locked, exclusive);
+		private = !folio_maybe_mapped_shared(folio);
 	}
+	smaps_page_accumulate(mss, folio, size, pss, dirty, locked, private);
 }
 
 #ifdef CONFIG_SHMEM

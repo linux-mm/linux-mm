@@ -161,45 +161,6 @@ unsigned name_to_int(const struct qstr *qstr);
 /* Worst case buffer size needed for holding an integer. */
 #define PROC_NUMBUF 13
 
-#ifdef CONFIG_PAGE_MAPCOUNT
-/**
- * folio_precise_page_mapcount() - Number of mappings of this folio page.
- * @folio: The folio.
- * @page: The page.
- *
- * The number of present user page table entries that reference this page
- * as tracked via the RMAP: either referenced directly (PTE) or as part of
- * a larger area that covers this page (e.g., PMD).
- *
- * Use this function only for the calculation of existing statistics
- * (USS, PSS, mapcount_max) and for debugging purposes (/proc/kpagecount).
- *
- * Do not add new users.
- *
- * Returns: The number of mappings of this folio page. 0 for
- * folios that are not mapped to user space or are not tracked via the RMAP
- * (e.g., shared zeropage).
- */
-static inline int folio_precise_page_mapcount(struct folio *folio,
-		struct page *page)
-{
-	int mapcount = atomic_read(&page->_mapcount) + 1;
-
-	if (page_mapcount_is_type(mapcount))
-		mapcount = 0;
-	if (folio_test_large(folio))
-		mapcount += folio_entire_mapcount(folio);
-
-	return mapcount;
-}
-#else /* !CONFIG_PAGE_MAPCOUNT */
-static inline int folio_precise_page_mapcount(struct folio *folio,
-		struct page *page)
-{
-	BUILD_BUG();
-}
-#endif /* CONFIG_PAGE_MAPCOUNT */
-
 /**
  * folio_average_page_mapcount() - Average number of mappings per page in this
  *				   folio

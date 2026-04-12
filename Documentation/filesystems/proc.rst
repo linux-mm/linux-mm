@@ -501,27 +501,18 @@ in memory, where each page is divided by the number of processes sharing it.
 So if a process has 1000 pages all to itself, and 1000 shared with one other
 process, its PSS will be 1500.  "Pss_Dirty" is the portion of PSS which
 consists of dirty pages.  ("Pss_Clean" is not included, but it can be
-calculated by subtracting "Pss_Dirty" from "Pss".)
+calculated by subtracting "Pss_Dirty" from "Pss".)  In some scenarios where
+larger allocations (e.g., THP) are used, the PSS can be sightly imprecise,
+as precise information about how many processes share a page is not available
+for individual pages in such allocations.
 
-Traditionally, a page is accounted as "private" if it is mapped exactly once,
-and a page is accounted as "shared" when mapped multiple times, even when
-mapped in the same process multiple times. Note that this accounting is
-independent of MAP_SHARED.
-
-In some kernel configurations, the semantics of pages part of a larger
-allocation (e.g., THP) can differ: a page is accounted as "private" if all
-pages part of the corresponding large allocation are *certainly* mapped in the
-same process, even if the page is mapped multiple times in that process. A
-page is accounted as "shared" if any page page of the larger allocation
-is *maybe* mapped in a different process. In some cases, a large allocation
-might be treated as "maybe mapped by multiple processes" even though this
-is no longer the case.
-
-Some kernel configurations do not track the precise number of times a page part
-of a larger allocation is mapped. In this case, when calculating the PSS, the
-average number of mappings per page in this larger allocation might be used
-as an approximation for the number of mappings of a page. The PSS calculation
-will be imprecise in this case.
+A page is accounted as "private" if it is currently *certainly* exclusively
+mapped in this process, and as "shared" if the page *might be* mapped into
+multiple processes.  Note that this accounting is independent of MAP_SHARED.
+In the past, pages that were mapped exactly once were accounted as "private",
+and pages with multiple mappings, even if in the same process, as "shared".
+As this precise information is not available for pages that are part of large
+allocations (e.g., THP), the semantics have been slightly adjusted.
 
 "Referenced" indicates the amount of memory currently marked as referenced or
 accessed.
