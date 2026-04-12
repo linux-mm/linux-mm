@@ -45,17 +45,9 @@ static inline unsigned long get_max_dump_pfn(void)
 static u64 get_kpage_count(const struct page *page)
 {
 	struct page_snapshot ps;
-	u64 ret;
 
 	snapshot_page(&ps, page);
-
-	if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT))
-		ret = folio_precise_page_mapcount(&ps.folio_snapshot,
-						  &ps.page_snapshot);
-	else
-		ret = folio_average_page_mapcount(&ps.folio_snapshot);
-
-	return ret;
+	return folio_average_page_mapcount(&ps.folio_snapshot);
 }
 
 static ssize_t kpage_read(struct file *file, char __user *buf,

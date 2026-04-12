@@ -53,13 +53,12 @@ There are four components to pagemap:
    determine which areas of memory are actually mapped and llseek to
    skip over unmapped regions.
 
- * ``/proc/kpagecount``.  This file contains a 64-bit count of the number of
-   times each page is mapped, indexed by PFN. Some kernel configurations do
-   not track the precise number of times a page part of a larger allocation
-   (e.g., THP) is mapped. In these configurations, the average number of
-   mappings per page in this larger allocation is returned instead. However,
-   if any page of the large allocation is mapped, the returned value will
-   be at least 1.
+ * ``/proc/kpagecount``.  This file contains a 64-bit value for each page,
+   indexed by PFN, representing its mapcount, i.e., the number of times it
+   is mapped into page tables.  For pages that are part of larger allocations
+   (e.g., THP), the average mapcount per page in the allocation is used, since
+   precise per-page mapcounts are not available.  If any page in such an
+   allocation is mapped, the returned value will be at least 1.
 
 The page-types tool in the tools/mm directory can be used to query the
 number of times a page is mapped.
