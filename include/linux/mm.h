@@ -2593,9 +2593,7 @@ static inline pud_t folio_mk_pud(const struct folio *folio, pgprot_t pgprot)
 
 static inline bool folio_has_pincount(const struct folio *folio)
 {
-	if (IS_ENABLED(CONFIG_64BIT))
-		return folio_test_large(folio);
-	return folio_order(folio) > 1;
+	return folio_test_large(folio);
 }
 
 /**

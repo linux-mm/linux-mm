@@ -868,8 +868,7 @@ static inline void prep_compound_head(struct page *page, unsigned int order)
 		folio->_mm_id_mapcount[1] = -1;
 	}
 	atomic_set(&folio->_entire_mapcount, -1);
-	if (IS_ENABLED(CONFIG_64BIT) || order > 1)
-		atomic_set(&folio->_pincount, 0);
+	atomic_set(&folio->_pincount, 0);
 	if (order > 1)
 		INIT_LIST_HEAD(&folio->_deferred_list);
 }
