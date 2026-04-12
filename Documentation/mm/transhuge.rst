@@ -129,9 +129,6 @@ pages:
     corresponding mapcount), and the current status ("maybe mapped shared" vs.
     "mapped exclusively").
 
-    With CONFIG_PAGE_MAPCOUNT, we also increment/decrement
-    page->_mapcount.
-
 split_huge_page internally has to distribute the refcounts in the head
 page to the tail pages before clearing all PG_head/tail bits from the page
 structures. It can be done easily for refcounts taken by page table

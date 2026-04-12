@@ -493,8 +493,6 @@ static __always_inline void __folio_dup_file_rmap(struct folio *folio,
 		struct page *page, int nr_pages, struct vm_area_struct *dst_vma,
 		enum pgtable_level level)
 {
-	const int orig_nr_pages = nr_pages;
-
 	__folio_rmap_sanity_checks(folio, page, nr_pages, level);
 
 	switch (level) {
@@ -504,12 +502,7 @@ static __always_inline void __folio_dup_file_rmap(struct folio *folio,
 			break;
 		}
 
-		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT)) {
-			do {
-				atomic_inc(&page->_mapcount);
-			} while (page++, --nr_pages > 0);
-		}
-		folio_add_large_mapcount(folio, orig_nr_pages, dst_vma);
+		folio_add_large_mapcount(folio, nr_pages, dst_vma);
 		break;
 	case PGTABLE_LEVEL_PMD:
 	case PGTABLE_LEVEL_PUD:
@@ -608,8 +601,6 @@ static __always_inline int __folio_try_dup_anon_rmap(struct folio *folio,
 		do {
 			if (PageAnonExclusive(page))
 				ClearPageAnonExclusive(page);
-			if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT))
-				atomic_inc(&page->_mapcount);
 		} while (page++, --nr_pages > 0);
 		folio_add_large_mapcount(folio, orig_nr_pages, dst_vma);
 		break;

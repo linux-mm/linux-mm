@@ -1354,7 +1354,6 @@ static __always_inline void __folio_add_rmap(struct folio *folio,
 		enum pgtable_level level)
 {
 	int nr = 0, nr_pmdmapped = 0, mapcount;
-	const int orig_nr_pages = nr_pages;
 
 	__folio_rmap_sanity_checks(folio, page, nr_pages, level);
 
@@ -1365,14 +1364,8 @@ static __always_inline void __folio_add_rmap(struct folio *folio,
 			break;
 		}
 
-		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT)) {
-			do {
-				atomic_inc(&page->_mapcount);
-			} while (page++, --nr_pages > 0);
-		}
-
-		mapcount = folio_add_return_large_mapcount(folio, orig_nr_pages, vma);
-		if (mapcount == orig_nr_pages)
+		mapcount = folio_add_return_large_mapcount(folio, nr_pages, vma);
+		if (mapcount == nr_pages)
 			nr = folio_large_nr_pages(folio);
 		break;
 	case PGTABLE_LEVEL_PMD:
@@ -1518,15 +1511,6 @@ static __always_inline void __folio_add_anon_rmap(struct folio *folio,
 		VM_WARN_ON_FOLIO(folio_test_large(folio) &&
 				 folio_entire_mapcount(folio) > 1 &&
 				 PageAnonExclusive(cur_page), folio);
-		if (IS_ENABLED(CONFIG_NO_PAGE_MAPCOUNT))
-			continue;
-
-		/*
-		 * While PTE-mapping a THP we have a PMD and a PTE
-		 * mapping.
-		 */
-		VM_WARN_ON_FOLIO(atomic_read(&cur_page->_mapcount) > 0 &&
-				 PageAnonExclusive(cur_page), folio);
 	}
 
 	/*
@@ -1628,14 +1612,12 @@ void folio_add_new_anon_rmap(struct folio *folio, struct vm_area_struct *vma,
 		int i;
 
 		nr = folio_large_nr_pages(folio);
-		for (i = 0; i < nr; i++) {
-			struct page *page = folio_page(folio, i);
+		if (exclusive) {
+			for (i = 0; i < nr; i++) {
+				struct page *page = folio_page(folio, i);
 
-			if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT))
-				/* increment count (starts at -1) */
-				atomic_set(&page->_mapcount, 0);
-			if (exclusive)
 				SetPageAnonExclusive(page);
+			}
 		}
 
 		folio_set_large_mapcount(folio, nr, vma);
@@ -1768,12 +1750,6 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 		mapcount = folio_sub_return_large_mapcount(folio, nr_pages, vma);
 		if (!mapcount)
 			nr = folio_large_nr_pages(folio);
-
-		if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT)) {
-			do {
-				atomic_dec(&page->_mapcount);
-			} while (page++, --nr_pages > 0);
-		}
 
 		partially_mapped = __folio_certainly_partially_mapped(folio, mapcount);
 		break;
