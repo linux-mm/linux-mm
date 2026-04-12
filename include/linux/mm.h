@@ -1829,6 +1829,8 @@ static inline int is_vmalloc_or_module_addr(const void *x)
  * How many times the entire folio is mapped as a single unit (eg by a
  * PMD or PUD entry).  This is probably not what you want, except for
  * debugging purposes or implementation of other core folio_*() primitives.
+ *
+ * Always 0 for hugetlb folios.
  */
 static inline int folio_entire_mapcount(const struct folio *folio)
 {

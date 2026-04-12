@@ -3042,11 +3042,10 @@ void hugetlb_add_anon_rmap(struct folio *folio, struct vm_area_struct *vma,
 	VM_WARN_ON_FOLIO(!folio_test_hugetlb(folio), folio);
 	VM_WARN_ON_FOLIO(!folio_test_anon(folio), folio);
 
-	atomic_inc(&folio->_entire_mapcount);
 	atomic_inc(&folio->_large_mapcount);
 	if (flags & RMAP_EXCLUSIVE)
 		SetPageAnonExclusive(&folio->page);
-	VM_WARN_ON_FOLIO(folio_entire_mapcount(folio) > 1 &&
+	VM_WARN_ON_FOLIO(folio_large_mapcount(folio) > 1 &&
 			 PageAnonExclusive(&folio->page), folio);
 }
 
@@ -3057,7 +3056,6 @@ void hugetlb_add_new_anon_rmap(struct folio *folio,
 
 	BUG_ON(address < vma->vm_start || address >= vma->vm_end);
 	/* increment count (starts at -1) */
-	atomic_set(&folio->_entire_mapcount, 0);
 	atomic_set(&folio->_large_mapcount, 0);
 	folio_clear_hugetlb_restore_reserve(folio);
 	__folio_set_anon(folio, vma, address, true);

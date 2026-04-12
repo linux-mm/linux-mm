@@ -186,6 +186,9 @@ static inline int folio_average_page_mapcount(struct folio *folio)
 	mapcount = folio_large_mapcount(folio);
 	if (unlikely(mapcount <= 0))
 		return 0;
+	if (folio_test_hugetlb(folio))
+		return mapcount;
+
 	entire_mapcount = folio_entire_mapcount(folio);
 	if (mapcount <= entire_mapcount)
 		return entire_mapcount;

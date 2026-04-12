@@ -443,7 +443,6 @@ static inline int hugetlb_try_dup_anon_rmap(struct folio *folio,
 			return -EBUSY;
 		ClearPageAnonExclusive(&folio->page);
 	}
-	atomic_inc(&folio->_entire_mapcount);
 	atomic_inc(&folio->_large_mapcount);
 	return 0;
 }
@@ -477,7 +476,6 @@ static inline void hugetlb_add_file_rmap(struct folio *folio)
 	VM_WARN_ON_FOLIO(!folio_test_hugetlb(folio), folio);
 	VM_WARN_ON_FOLIO(folio_test_anon(folio), folio);
 
-	atomic_inc(&folio->_entire_mapcount);
 	atomic_inc(&folio->_large_mapcount);
 }
 
@@ -485,7 +483,6 @@ static inline void hugetlb_remove_rmap(struct folio *folio)
 {
 	VM_WARN_ON_FOLIO(!folio_test_hugetlb(folio), folio);
 
-	atomic_dec(&folio->_entire_mapcount);
 	atomic_dec(&folio->_large_mapcount);
 }
 
