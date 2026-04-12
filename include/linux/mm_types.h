@@ -452,9 +452,9 @@ struct folio {
 				struct {
 	/* public: */
 					atomic_t _large_mapcount;
-					unsigned int _unused_1;
-#ifdef CONFIG_64BIT
 					atomic_t _entire_mapcount;
+#ifdef CONFIG_64BIT
+					unsigned int _unused_1;
 					atomic_t _pincount;
 #endif /* CONFIG_64BIT */
 					mm_id_mapcount_t _mm_id_mapcount[2];
@@ -483,7 +483,6 @@ struct folio {
 	/* public: */
 			struct list_head _deferred_list;
 #ifndef CONFIG_64BIT
-			atomic_t _entire_mapcount;
 			atomic_t _pincount;
 #endif /* !CONFIG_64BIT */
 	/* private: the union with struct page is transitional */

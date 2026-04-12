@@ -1114,11 +1114,11 @@ static int free_tail_page_prepare(struct page *head_page, struct page *page)
 				goto out;
 			}
 		}
+		if (folio_entire_mapcount(folio)) {
+			bad_page(page, "nonzero entire_mapcount");
+			goto out;
+		}
 		if (IS_ENABLED(CONFIG_64BIT)) {
-			if (unlikely(atomic_read(&folio->_entire_mapcount) + 1)) {
-				bad_page(page, "nonzero entire_mapcount");
-				goto out;
-			}
 			if (unlikely(atomic_read(&folio->_pincount))) {
 				bad_page(page, "nonzero pincount");
 				goto out;
@@ -1132,10 +1132,6 @@ static int free_tail_page_prepare(struct page *head_page, struct page *page)
 			goto out;
 		}
 		if (!IS_ENABLED(CONFIG_64BIT)) {
-			if (unlikely(atomic_read(&folio->_entire_mapcount) + 1)) {
-				bad_page(page, "nonzero entire_mapcount");
-				goto out;
-			}
 			if (unlikely(atomic_read(&folio->_pincount))) {
 				bad_page(page, "nonzero pincount");
 				goto out;

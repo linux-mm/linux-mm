@@ -1832,9 +1832,7 @@ static inline int is_vmalloc_or_module_addr(const void *x)
  */
 static inline int folio_entire_mapcount(const struct folio *folio)
 {
-	VM_BUG_ON_FOLIO(!folio_test_large(folio), folio);
-	if (!IS_ENABLED(CONFIG_64BIT) && unlikely(folio_large_order(folio) == 1))
-		return 0;
+	VM_WARN_ON_FOLIO(!folio_test_large(folio), folio);
 	return atomic_read(&folio->_entire_mapcount) + 1;
 }
 
