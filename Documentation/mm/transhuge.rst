@@ -116,14 +116,15 @@ pages:
     succeeds on tail pages.
 
   - map/unmap of a PMD entry for the whole THP increment/decrement
-    folio->_entire_mapcount and folio->_large_mapcount.
+    folio->_large_mapcount and add/remove HPAGE_PMD_NR to
+    folio->_total_mapped_pages.
 
     We also maintain the two slots for tracking MM owners (MM ID and
     corresponding mapcount), and the current status ("maybe mapped shared" vs.
     "mapped exclusively").
 
   - map/unmap of individual pages with PTE entry increment/decrement
-    folio->_large_mapcount.
+    folio->_total_mapped_pages and folio->_large_mapcount.
 
     We also maintain the two slots for tracking MM owners (MM ID and
     corresponding mapcount), and the current status ("maybe mapped shared" vs.

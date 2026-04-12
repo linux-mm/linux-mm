@@ -83,10 +83,10 @@ static void __dump_folio(const struct folio *folio, const struct page *page,
 	if (folio_test_large(folio)) {
 		int pincount = atomic_read(&folio->_pincount);
 
-		pr_warn("head: order:%u mapcount:%d entire_mapcount:%d pincount:%d\n",
+		pr_warn("head: order:%u mapcount:%d total_mapped_pages:%lu pincount:%d\n",
 				folio_order(folio),
 				folio_mapcount(folio),
-				folio_entire_mapcount(folio);
+				folio_total_mapped_pages(folio),
 				pincount);
 	}
 

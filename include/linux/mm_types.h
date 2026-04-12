@@ -374,10 +374,9 @@ typedef unsigned short mm_id_t;
  * @pgmap: Metadata for ZONE_DEVICE mappings
  * @virtual: Virtual address in the kernel direct map.
  * @_last_cpupid: IDs of last CPU and last process that accessed the folio.
- * @_entire_mapcount: Do not use directly, call folio_entire_mapcount().
+ * @_total_mapped_pages: Do not use directly, call folio_total_mapped_pages().
  * @_large_mapcount: Do not use directly, call folio_mapcount().
  * @_unused_1: Temporary placeholder.
- * @_unused_2: Temporary placeholder.
  * @_pincount: Do not use directly, call folio_maybe_dma_pinned().
  * @_nr_pages: Do not use directly, call folio_nr_pages().
  * @_mm_id: Do not use outside of rmap code.
@@ -452,11 +451,10 @@ struct folio {
 				struct {
 	/* public: */
 					atomic_t _pincount;
-					atomic_t _entire_mapcount;
 #ifdef CONFIG_64BIT
 					unsigned int _unused_1;
-					unsigned int _unused_2;
 #endif /* CONFIG_64BIT */
+					atomic_long_t _total_mapped_pages;
 					mm_id_mapcount_t _mm_id_mapcount[2];
 					union {
 						mm_id_t _mm_id[2];

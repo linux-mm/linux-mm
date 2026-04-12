@@ -7,6 +7,8 @@
 
 #define PMD_ORDER	(PMD_SHIFT - PAGE_SHIFT)
 #define PUD_ORDER	(PUD_SHIFT - PAGE_SHIFT)
+#define P4D_ORDER	(P4D_SHIFT - PAGE_SHIFT)
+#define PGDIR_ORDER	(PGDIR_SHIFT - PAGE_SHIFT)
 
 #ifndef __ASSEMBLY__
 #ifdef CONFIG_MMU
@@ -2242,6 +2244,26 @@ static inline const char *pgtable_level_to_str(enum pgtable_level level)
 		return "unknown";
 	}
 }
+
+#ifdef CONFIG_MMU
+static __always_inline unsigned int pgtable_level_to_order(enum pgtable_level level)
+{
+	switch (level) {
+	case PGTABLE_LEVEL_PTE:
+		return 0;
+	case PGTABLE_LEVEL_PMD:
+		return PMD_ORDER;
+	case PGTABLE_LEVEL_PUD:
+		return PUD_ORDER;
+	case PGTABLE_LEVEL_P4D:
+		return P4D_ORDER;
+	case PGTABLE_LEVEL_PGD:
+		return PGDIR_ORDER;
+	default:
+		BUILD_BUG();
+	}
+}
+#endif /* CONFIG_MMU */
 
 #endif /* !__ASSEMBLY__ */
 

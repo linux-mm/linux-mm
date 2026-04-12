@@ -133,10 +133,10 @@ static inline void folio_set_mm_id(struct folio *folio, int idx, mm_id_t id)
 }
 
 static inline void __folio_large_mapcount_sanity_checks(const struct folio *folio,
-		unsigned int nr_mappings, mm_id_t mm_id)
+		unsigned int nr_mappings, unsigned int nr_pages, mm_id_t mm_id)
 {
 	VM_WARN_ON_ONCE(!folio_test_large(folio) || folio_test_hugetlb(folio));
-	VM_WARN_ON_ONCE(nr_mappings == 0);
+	VM_WARN_ON_ONCE(nr_mappings == 0 || nr_pages == 0 || nr_mappings > nr_pages);
 	VM_WARN_ON_ONCE(mm_id < MM_ID_MIN || mm_id > MM_ID_MAX);
 
 	/*
@@ -145,7 +145,7 @@ static inline void __folio_large_mapcount_sanity_checks(const struct folio *foli
 	 * a check on 32bit, where we currently reduce the size of the per-MM
 	 * mapcount to a short.
 	 */
-	VM_WARN_ON_ONCE(nr_mappings > folio_large_nr_pages(folio));
+	VM_WARN_ON_ONCE(nr_pages > folio_large_nr_pages(folio));
 	VM_WARN_ON_ONCE(folio_large_nr_pages(folio) - 1 > MM_ID_MAPCOUNT_MAX);
 
 	VM_WARN_ON_ONCE(folio_mm_id(folio, 0) == MM_ID_DUMMY &&
@@ -161,30 +161,37 @@ static inline void __folio_large_mapcount_sanity_checks(const struct folio *foli
 }
 
 static __always_inline void folio_set_large_mapcount(struct folio *folio,
-		unsigned int nr_mappings, struct vm_area_struct *vma)
+		unsigned int nr_mappings, int nr_pages, struct vm_area_struct *vma)
 {
-	__folio_large_mapcount_sanity_checks(folio, nr_mappings, vma->vm_mm->mm_id);
+	__folio_large_mapcount_sanity_checks(folio, nr_mappings, nr_pages,
+					     vma->vm_mm->mm_id);
 
 	VM_WARN_ON_ONCE(folio_mm_id(folio, 0) != MM_ID_DUMMY);
 	VM_WARN_ON_ONCE(folio_mm_id(folio, 1) != MM_ID_DUMMY);
 
 	/* Note: mapcounts start at -1. */
 	atomic_set(&folio->_large_mapcount, nr_mappings - 1);
+	atomic_long_set(&folio->_total_mapped_pages, nr_pages);
 	folio->_mm_id_mapcount[0] = nr_mappings - 1;
 	folio_set_mm_id(folio, 0, vma->vm_mm->mm_id);
 }
 
 static __always_inline int folio_add_return_large_mapcount(struct folio *folio,
-		unsigned int nr_mappings, struct vm_area_struct *vma)
+		unsigned int nr_mappings, unsigned int nr_pages,
+		struct vm_area_struct *vma, unsigned long *nr_mapped_pages)
 {
 	const mm_id_t mm_id = vma->vm_mm->mm_id;
+	unsigned long new_mapped_pages;
 	int new_mapcount_val;
 
 	folio_lock_large_mapcount(folio);
-	__folio_large_mapcount_sanity_checks(folio, nr_mappings, mm_id);
+	__folio_large_mapcount_sanity_checks(folio, nr_mappings, nr_pages, mm_id);
 
 	new_mapcount_val = atomic_read(&folio->_large_mapcount) + nr_mappings;
 	atomic_set(&folio->_large_mapcount, new_mapcount_val);
+
+	new_mapped_pages = atomic_long_read(&folio->_total_mapped_pages) + nr_pages;
+	atomic_long_set(&folio->_total_mapped_pages, new_mapped_pages);
 
 	/*
 	 * If a folio is mapped more than once into an MM on 32bit, we
@@ -220,21 +227,37 @@ static __always_inline int folio_add_return_large_mapcount(struct folio *folio,
 		folio->_mm_ids |= FOLIO_MM_IDS_SHARED_BIT;
 	}
 	folio_unlock_large_mapcount(folio);
+
+	*nr_mapped_pages = new_mapped_pages;
 	return new_mapcount_val + 1;
 }
-#define folio_add_large_mapcount folio_add_return_large_mapcount
+
+static __always_inline void folio_add_large_mapcount(struct folio *folio,
+		unsigned int nr_mappings, unsigned int nr_pages,
+		struct vm_area_struct *vma)
+{
+	unsigned long nr_mapped_pages;
+
+	folio_add_return_large_mapcount(folio, nr_mappings, nr_pages, vma,
+					&nr_mapped_pages);
+}
 
 static __always_inline int folio_sub_return_large_mapcount(struct folio *folio,
-		unsigned int nr_mappings, struct vm_area_struct *vma)
+		unsigned int nr_mappings, unsigned int nr_pages,
+		struct vm_area_struct *vma, unsigned long *nr_mapped_pages)
 {
 	const mm_id_t mm_id = vma->vm_mm->mm_id;
+	unsigned long new_mapped_pages;
 	int new_mapcount_val;
 
 	folio_lock_large_mapcount(folio);
-	__folio_large_mapcount_sanity_checks(folio, nr_mappings, mm_id);
+	__folio_large_mapcount_sanity_checks(folio, nr_mappings, nr_pages, mm_id);
 
 	new_mapcount_val = atomic_read(&folio->_large_mapcount) - nr_mappings;
 	atomic_set(&folio->_large_mapcount, new_mapcount_val);
+
+	new_mapped_pages = atomic_long_read(&folio->_total_mapped_pages) - nr_pages;
+	atomic_long_set(&folio->_total_mapped_pages, new_mapped_pages);
 
 	/*
 	 * There are valid corner cases where we might underflow a per-MM
@@ -267,55 +290,58 @@ static __always_inline int folio_sub_return_large_mapcount(struct folio *folio,
 		folio->_mm_ids &= ~FOLIO_MM_IDS_SHARED_BIT;
 out:
 	folio_unlock_large_mapcount(folio);
+
+	*nr_mapped_pages = new_mapped_pages;
 	return new_mapcount_val + 1;
 }
-#define folio_sub_large_mapcount folio_sub_return_large_mapcount
 #else /* !CONFIG_MM_ID */
 /*
  * See __folio_rmap_sanity_checks(), we might map large folios even without
  * CONFIG_TRANSPARENT_HUGEPAGE. We'll keep that working for now.
  */
 static inline void folio_set_large_mapcount(struct folio *folio,
-		unsigned int nr_mappings,
+		unsigned int nr_mappings, unsigned int nr_pages,
 		struct vm_area_struct *vma)
 {
+	/* No support for large mappings. */
+	VM_WARN_ON_ONCE(nr_mappings != nr_pages);
 	/* Note: mapcounts start at -1. */
 	atomic_set(&folio->_large_mapcount, nr_mappings - 1);
 }
 
 static inline void folio_add_large_mapcount(struct folio *folio,
-		unsigned int nr_mappings, struct vm_area_struct *vma)
+		unsigned int nr_mappings, unsigned int nr_pages,
+		struct vm_area_struct *vma)
 {
+	/* No support for large mappings. */
+	VM_WARN_ON_ONCE(nr_mappings != nr_pages);
 	atomic_add(nr_mappings, &folio->_large_mapcount);
 }
 
 static inline int folio_add_return_large_mapcount(struct folio *folio,
-		unsigned int nr_mappings, struct vm_area_struct *vma)
+		unsigned int nr_mappings, unsigned int nr_pages,
+		struct vm_area_struct *vma, unsigned long *nr_mapped_pages)
 {
-	return atomic_add_return(nr_mappings, &folio->_large_mapcount) + 1;
-}
+	int new_mapcount = atomic_add_return(nr_mappings, &folio->_large_mapcount) + 1;
 
-static inline void folio_sub_large_mapcount(struct folio *folio,
-		unsigned int nr_mappings, struct vm_area_struct *vma)
-{
-	atomic_sub(nr_mappings, &folio->_large_mapcount);
+	/* No support for large mappings. */
+	VM_WARN_ON_ONCE(nr_mappings != nr_pages);
+	*nr_mapped_pages = new_mapcount;
+	return new_mapcount;
 }
 
 static inline int folio_sub_return_large_mapcount(struct folio *folio,
-		unsigned int nr_mappings, struct vm_area_struct *vma)
+		unsigned int nr_mappings, unsigned int nr_pages,
+		struct vm_area_struct *vma, unsigned long *nr_mapped_pages)
 {
-	return atomic_sub_return(nr_mappings, &folio->_large_mapcount) + 1;
+	int new_mapcount = atomic_sub_return(nr_mappings, &folio->_large_mapcount) + 1;
+
+	/* No support for large mappings. */
+	VM_WARN_ON_ONCE(nr_mappings != nr_pages);
+	*nr_mapped_pages = new_mapcount;
+	return new_mapcount;
 }
 #endif /* CONFIG_MM_ID */
-
-#define folio_inc_large_mapcount(folio, vma) \
-	folio_add_large_mapcount(folio, 1, vma)
-#define folio_inc_return_large_mapcount(folio, vma) \
-	folio_add_return_large_mapcount(folio, 1, vma)
-#define folio_dec_large_mapcount(folio, vma) \
-	folio_sub_large_mapcount(folio, 1, vma)
-#define folio_dec_return_large_mapcount(folio, vma) \
-	folio_sub_return_large_mapcount(folio, 1, vma)
 
 /* RMAP flags, currently only relevant for some anon rmap operations. */
 typedef int __bitwise rmap_t;
@@ -332,6 +358,8 @@ typedef int __bitwise rmap_t;
 static __always_inline void __folio_rmap_sanity_checks(const struct folio *folio,
 		const struct page *page, int nr_pages, enum pgtable_level level)
 {
+	const unsigned int mapping_order = pgtable_level_to_order(level);
+
 	/* hugetlb folios are handled separately. */
 	VM_WARN_ON_FOLIO(folio_test_hugetlb(folio), folio);
 
@@ -351,29 +379,8 @@ static __always_inline void __folio_rmap_sanity_checks(const struct folio *folio
 	VM_WARN_ON_FOLIO(page_folio(page) != folio, folio);
 	VM_WARN_ON_FOLIO(page_folio(page + nr_pages - 1) != folio, folio);
 
-	switch (level) {
-	case PGTABLE_LEVEL_PTE:
-		break;
-	case PGTABLE_LEVEL_PMD:
-		/*
-		 * We don't support folios larger than a single PMD yet. So
-		 * when PGTABLE_LEVEL_PMD is set, we assume that we are creating
-		 * a single "entire" mapping of the folio.
-		 */
-		VM_WARN_ON_FOLIO(folio_nr_pages(folio) != HPAGE_PMD_NR, folio);
-		VM_WARN_ON_FOLIO(nr_pages != HPAGE_PMD_NR, folio);
-		break;
-	case PGTABLE_LEVEL_PUD:
-		/*
-		 * Assume that we are creating a single "entire" mapping of the
-		 * folio.
-		 */
-		VM_WARN_ON_FOLIO(folio_nr_pages(folio) != HPAGE_PUD_NR, folio);
-		VM_WARN_ON_FOLIO(nr_pages != HPAGE_PUD_NR, folio);
-		break;
-	default:
-		BUILD_BUG();
-	}
+	VM_WARN_ON_FOLIO(!IS_ALIGNED(nr_pages, 1u << mapping_order), folio);
+	VM_WARN_ON_FOLIO(!IS_ALIGNED(folio_page_idx(folio, page), 1u << mapping_order), folio);
 
 	/*
 	 * Anon folios must have an associated live anon_vma as long as they're
@@ -491,25 +498,14 @@ static __always_inline void __folio_dup_file_rmap(struct folio *folio,
 		struct page *page, int nr_pages, struct vm_area_struct *dst_vma,
 		enum pgtable_level level)
 {
+	const unsigned int nr_mappings = nr_pages >> pgtable_level_to_order(level);
+
 	__folio_rmap_sanity_checks(folio, page, nr_pages, level);
 
-	switch (level) {
-	case PGTABLE_LEVEL_PTE:
-		if (!folio_test_large(folio)) {
-			atomic_inc(&folio->_mapcount);
-			break;
-		}
-
-		folio_add_large_mapcount(folio, nr_pages, dst_vma);
-		break;
-	case PGTABLE_LEVEL_PMD:
-	case PGTABLE_LEVEL_PUD:
-		atomic_inc(&folio->_entire_mapcount);
-		folio_inc_large_mapcount(folio, dst_vma);
-		break;
-	default:
-		BUILD_BUG();
-	}
+	if (level == PGTABLE_LEVEL_PTE && !folio_test_large(folio))
+		atomic_inc(&folio->_mapcount);
+	else
+		folio_add_large_mapcount(folio, nr_mappings, nr_pages, dst_vma);
 }
 
 /**
@@ -559,7 +555,6 @@ static __always_inline int __folio_try_dup_anon_rmap(struct folio *folio,
 		struct page *page, int nr_pages, struct vm_area_struct *dst_vma,
 		struct vm_area_struct *src_vma, enum pgtable_level level)
 {
-	const int orig_nr_pages = nr_pages;
 	bool maybe_pinned;
 	int i;
 
@@ -581,39 +576,28 @@ static __always_inline int __folio_try_dup_anon_rmap(struct folio *folio,
 	 * folio. But if any page is PageAnonExclusive, we must fallback to
 	 * copying if the folio maybe pinned.
 	 */
-	switch (level) {
-	case PGTABLE_LEVEL_PTE:
-		if (unlikely(maybe_pinned)) {
-			for (i = 0; i < nr_pages; i++)
-				if (PageAnonExclusive(page + i))
-					return -EBUSY;
-		}
-
-		if (!folio_test_large(folio)) {
-			if (PageAnonExclusive(page))
-				ClearPageAnonExclusive(page);
-			atomic_inc(&folio->_mapcount);
-			break;
-		}
-
-		do {
-			if (PageAnonExclusive(page))
-				ClearPageAnonExclusive(page);
-		} while (page++, --nr_pages > 0);
-		folio_add_large_mapcount(folio, orig_nr_pages, dst_vma);
-		break;
-	case PGTABLE_LEVEL_PMD:
-	case PGTABLE_LEVEL_PUD:
+	if (level == PGTABLE_LEVEL_PTE && !folio_test_large(folio)) {
 		if (PageAnonExclusive(page)) {
 			if (unlikely(maybe_pinned))
 				return -EBUSY;
 			ClearPageAnonExclusive(page);
 		}
-		atomic_inc(&folio->_entire_mapcount);
-		folio_inc_large_mapcount(folio, dst_vma);
-		break;
-	default:
-		BUILD_BUG();
+		atomic_inc(&folio->_mapcount);
+	} else {
+		const unsigned int mapping_order = pgtable_level_to_order(level);
+		const unsigned int nr_mappings = nr_pages >> mapping_order;
+
+		if (unlikely(maybe_pinned)) {
+			for (i = 0; i < nr_pages; i += 1u << mapping_order)
+				if (PageAnonExclusive(page + i))
+					return -EBUSY;
+		} else {
+			for (i = 0; i < nr_pages; i += 1u << mapping_order) {
+				if (PageAnonExclusive(page + i))
+					ClearPageAnonExclusive(page + i);
+			}
+		}
+		folio_add_large_mapcount(folio, nr_mappings, nr_pages, dst_vma);
 	}
 	return 0;
 }

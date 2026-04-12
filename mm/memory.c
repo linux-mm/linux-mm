@@ -4155,8 +4155,7 @@ static bool __wp_can_reuse_large_anon_folio(struct folio *folio,
 	if (folio_large_mapcount(folio) != folio_ref_count(folio))
 		goto unlock;
 
-	VM_WARN_ON_ONCE_FOLIO(folio_large_mapcount(folio) > folio_nr_pages(folio), folio);
-	VM_WARN_ON_ONCE_FOLIO(folio_entire_mapcount(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(folio_total_mapped_pages(folio) > folio_nr_pages(folio), folio);
 	VM_WARN_ON_ONCE(folio_mm_id(folio, 0) != vma->vm_mm->mm_id &&
 			folio_mm_id(folio, 1) != vma->vm_mm->mm_id);
 

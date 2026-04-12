@@ -1114,8 +1114,8 @@ static int free_tail_page_prepare(struct page *head_page, struct page *page)
 				goto out;
 			}
 		}
-		if (folio_entire_mapcount(folio)) {
-			bad_page(page, "nonzero entire_mapcount");
+		if (unlikely(atomic_long_read(&folio->_total_mapped_pages))) {
+			bad_page(page, "nonzero total_mapped_pages");
 			goto out;
 		}
 		if (unlikely(atomic_read(&folio->_pincount))) {

@@ -1825,19 +1825,6 @@ static inline int is_vmalloc_or_module_addr(const void *x)
 }
 #endif
 
-/*
- * How many times the entire folio is mapped as a single unit (eg by a
- * PMD or PUD entry).  This is probably not what you want, except for
- * debugging purposes or implementation of other core folio_*() primitives.
- *
- * Always 0 for hugetlb folios.
- */
-static inline int folio_entire_mapcount(const struct folio *folio)
-{
-	VM_WARN_ON_FOLIO(!folio_test_large(folio), folio);
-	return atomic_read(&folio->_entire_mapcount) + 1;
-}
-
 static inline int folio_large_mapcount(const struct folio *folio)
 {
 	VM_WARN_ON_FOLIO(!folio_test_large(folio), folio);
@@ -1886,6 +1873,26 @@ static inline int folio_mapcount(const struct folio *folio)
 static inline bool folio_mapped(const struct folio *folio)
 {
 	return folio_mapcount(folio) >= 1;
+}
+
+/**
+ * folio_total_mapped_pages - total mapped pages across all mappings
+ * @folio: The folio.
+ *
+ * Return the total number of pages mapped by all mappings of this folio.
+ * A page mapped multiple times is counted multiple times.
+ *
+ * For example, a single folio mapped through two PMD-sized mappings will
+ * contribute 1024 pages to the total on systems where a PMD maps 512 pages.
+ *
+ * Return: Total number of mapped pages across all mappings of @folio.
+ */
+static inline unsigned long folio_total_mapped_pages(const struct folio *folio)
+{
+	if (!folio_test_large(folio) || folio_test_hugetlb(folio) ||
+	    !IS_ENABLED(CONFIG_MM_ID))
+		return folio_mapcount(folio);
+	return atomic_long_read(&folio->_total_mapped_pages);
 }
 
 /*

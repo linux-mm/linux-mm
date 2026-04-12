@@ -178,26 +178,16 @@ unsigned name_to_int(const struct qstr *qstr);
  */
 static inline int folio_average_page_mapcount(struct folio *folio)
 {
-	int mapcount, entire_mapcount, avg;
+	unsigned long total_mapped_pages = folio_total_mapped_pages(folio);
+	const unsigned int order = folio_order(folio);
 
-	if (!folio_test_large(folio))
-		return atomic_read(&folio->_mapcount) + 1;
-
-	mapcount = folio_large_mapcount(folio);
-	if (unlikely(mapcount <= 0))
-		return 0;
-	if (folio_test_hugetlb(folio))
-		return mapcount;
-
-	entire_mapcount = folio_entire_mapcount(folio);
-	if (mapcount <= entire_mapcount)
-		return entire_mapcount;
-	mapcount -= entire_mapcount;
+	if (!total_mapped_pages || !order)
+		return total_mapped_pages;
 
 	/* Round to closest integer ... */
-	avg = ((unsigned int)mapcount + folio_large_nr_pages(folio) / 2) >> folio_large_order(folio);
+	total_mapped_pages += 1ul << (order - 1);
 	/* ... but return at least 1. */
-	return max_t(int, avg + entire_mapcount, 1);
+	return max(total_mapped_pages >> order, 1);
 }
 /*
  * array.c
