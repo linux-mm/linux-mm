@@ -155,8 +155,7 @@ struct page {
 		/*
 		 * For head pages of typed folios, the value stored here
 		 * allows for determining what this page is used for. The
-		 * tail pages of typed folios will not store a type
-		 * (page_type == _mapcount == -1).
+		 * tail pages of typed folios will not store a type.
 		 *
 		 * See page-flags.h for a list of page types which are currently
 		 * stored here.
@@ -378,6 +377,7 @@ typedef unsigned short mm_id_t;
  * @_entire_mapcount: Do not use directly, call folio_entire_mapcount().
  * @_large_mapcount: Do not use directly, call folio_mapcount().
  * @_unused_1: Temporary placeholder.
+ * @_unused_2: Temporary placeholder.
  * @_pincount: Do not use directly, call folio_maybe_dma_pinned().
  * @_nr_pages: Do not use directly, call folio_nr_pages().
  * @_mm_id: Do not use outside of rmap code.
@@ -451,7 +451,7 @@ struct folio {
 			union {
 				struct {
 	/* public: */
-					atomic_t _large_mapcount;
+					unsigned int _unused_2;
 					atomic_t _entire_mapcount;
 #ifdef CONFIG_64BIT
 					unsigned int _unused_1;
@@ -466,7 +466,7 @@ struct folio {
 				};
 				unsigned long _usable_1[4];
 			};
-			atomic_t _mapcount_1;
+			atomic_t _large_mapcount;
 			atomic_t _refcount_1;
 	/* public: */
 #ifdef NR_PAGES_IN_LARGE_FOLIO
@@ -529,7 +529,7 @@ FOLIO_MATCH(_last_cpupid, _last_cpupid);
 			offsetof(struct page, pg) + sizeof(struct page))
 FOLIO_MATCH(flags, _flags_1);
 FOLIO_MATCH(compound_info, _head_1);
-FOLIO_MATCH(_mapcount, _mapcount_1);
+FOLIO_MATCH(_mapcount, _large_mapcount);
 FOLIO_MATCH(_refcount, _refcount_1);
 #undef FOLIO_MATCH
 #define FOLIO_MATCH(pg, fl)						\
