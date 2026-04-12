@@ -1884,13 +1884,6 @@ static int add_to_pagemap(pagemap_entry_t *pme, struct pagemapread *pm)
 	return 0;
 }
 
-static bool __folio_page_mapped_exclusively(struct folio *folio, struct page *page)
-{
-	if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT))
-		return folio_precise_page_mapcount(folio, page) == 1;
-	return !folio_maybe_mapped_shared(folio);
-}
-
 static int pagemap_pte_hole(unsigned long start, unsigned long end,
 			    __always_unused int depth, struct mm_walk *walk)
 {
@@ -1985,8 +1978,7 @@ static pagemap_entry_t pte_to_pagemap_entry(struct pagemapread *pm,
 		folio = page_folio(page);
 		if (!folio_test_anon(folio))
 			flags |= PM_FILE;
-		if ((flags & PM_PRESENT) &&
-		    __folio_page_mapped_exclusively(folio, page))
+		if ((flags & PM_PRESENT) && !folio_maybe_mapped_shared(folio))
 			flags |= PM_MMAP_EXCLUSIVE;
 	}
 
@@ -2058,7 +2050,7 @@ populate_pagemap:
 		pagemap_entry_t pme;
 
 		if (folio && (flags & PM_PRESENT) &&
-		    __folio_page_mapped_exclusively(folio, page))
+		    !folio_maybe_mapped_shared(folio))
 			cur_flags |= PM_MMAP_EXCLUSIVE;
 
 		pme = make_pme(frame, cur_flags);
