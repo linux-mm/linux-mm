@@ -133,10 +133,10 @@ static inline void folio_set_mm_id(struct folio *folio, int idx, mm_id_t id)
 }
 
 static inline void __folio_large_mapcount_sanity_checks(const struct folio *folio,
-		int diff, mm_id_t mm_id)
+		unsigned int nr_mappings, mm_id_t mm_id)
 {
 	VM_WARN_ON_ONCE(!folio_test_large(folio) || folio_test_hugetlb(folio));
-	VM_WARN_ON_ONCE(diff <= 0);
+	VM_WARN_ON_ONCE(nr_mappings == 0);
 	VM_WARN_ON_ONCE(mm_id < MM_ID_MIN || mm_id > MM_ID_MAX);
 
 	/*
@@ -145,7 +145,7 @@ static inline void __folio_large_mapcount_sanity_checks(const struct folio *foli
 	 * a check on 32bit, where we currently reduce the size of the per-MM
 	 * mapcount to a short.
 	 */
-	VM_WARN_ON_ONCE(diff > folio_large_nr_pages(folio));
+	VM_WARN_ON_ONCE(nr_mappings > folio_large_nr_pages(folio));
 	VM_WARN_ON_ONCE(folio_large_nr_pages(folio) - 1 > MM_ID_MAPCOUNT_MAX);
 
 	VM_WARN_ON_ONCE(folio_mm_id(folio, 0) == MM_ID_DUMMY &&
@@ -161,29 +161,29 @@ static inline void __folio_large_mapcount_sanity_checks(const struct folio *foli
 }
 
 static __always_inline void folio_set_large_mapcount(struct folio *folio,
-		int mapcount, struct vm_area_struct *vma)
+		unsigned int nr_mappings, struct vm_area_struct *vma)
 {
-	__folio_large_mapcount_sanity_checks(folio, mapcount, vma->vm_mm->mm_id);
+	__folio_large_mapcount_sanity_checks(folio, nr_mappings, vma->vm_mm->mm_id);
 
 	VM_WARN_ON_ONCE(folio_mm_id(folio, 0) != MM_ID_DUMMY);
 	VM_WARN_ON_ONCE(folio_mm_id(folio, 1) != MM_ID_DUMMY);
 
 	/* Note: mapcounts start at -1. */
-	atomic_set(&folio->_large_mapcount, mapcount - 1);
-	folio->_mm_id_mapcount[0] = mapcount - 1;
+	atomic_set(&folio->_large_mapcount, nr_mappings - 1);
+	folio->_mm_id_mapcount[0] = nr_mappings - 1;
 	folio_set_mm_id(folio, 0, vma->vm_mm->mm_id);
 }
 
 static __always_inline int folio_add_return_large_mapcount(struct folio *folio,
-		int diff, struct vm_area_struct *vma)
+		unsigned int nr_mappings, struct vm_area_struct *vma)
 {
 	const mm_id_t mm_id = vma->vm_mm->mm_id;
 	int new_mapcount_val;
 
 	folio_lock_large_mapcount(folio);
-	__folio_large_mapcount_sanity_checks(folio, diff, mm_id);
+	__folio_large_mapcount_sanity_checks(folio, nr_mappings, mm_id);
 
-	new_mapcount_val = atomic_read(&folio->_large_mapcount) + diff;
+	new_mapcount_val = atomic_read(&folio->_large_mapcount) + nr_mappings;
 	atomic_set(&folio->_large_mapcount, new_mapcount_val);
 
 	/*
@@ -194,14 +194,14 @@ static __always_inline int folio_add_return_large_mapcount(struct folio *folio,
 	 * we might be in trouble when unmapping pages later.
 	 */
 	if (folio_mm_id(folio, 0) == mm_id) {
-		folio->_mm_id_mapcount[0] += diff;
+		folio->_mm_id_mapcount[0] += nr_mappings;
 		if (!IS_ENABLED(CONFIG_64BIT) && unlikely(folio->_mm_id_mapcount[0] < 0)) {
 			folio->_mm_id_mapcount[0] = -1;
 			folio_set_mm_id(folio, 0, MM_ID_DUMMY);
 			folio->_mm_ids |= FOLIO_MM_IDS_SHARED_BIT;
 		}
 	} else if (folio_mm_id(folio, 1) == mm_id) {
-		folio->_mm_id_mapcount[1] += diff;
+		folio->_mm_id_mapcount[1] += nr_mappings;
 		if (!IS_ENABLED(CONFIG_64BIT) && unlikely(folio->_mm_id_mapcount[1] < 0)) {
 			folio->_mm_id_mapcount[1] = -1;
 			folio_set_mm_id(folio, 1, MM_ID_DUMMY);
@@ -209,13 +209,13 @@ static __always_inline int folio_add_return_large_mapcount(struct folio *folio,
 		}
 	} else if (folio_mm_id(folio, 0) == MM_ID_DUMMY) {
 		folio_set_mm_id(folio, 0, mm_id);
-		folio->_mm_id_mapcount[0] = diff - 1;
+		folio->_mm_id_mapcount[0] = nr_mappings - 1;
 		/* We might have other mappings already. */
-		if (new_mapcount_val != diff - 1)
+		if (new_mapcount_val != nr_mappings - 1)
 			folio->_mm_ids |= FOLIO_MM_IDS_SHARED_BIT;
 	} else if (folio_mm_id(folio, 1) == MM_ID_DUMMY) {
 		folio_set_mm_id(folio, 1, mm_id);
-		folio->_mm_id_mapcount[1] = diff - 1;
+		folio->_mm_id_mapcount[1] = nr_mappings - 1;
 		/* Slot 0 certainly has mappings as well. */
 		folio->_mm_ids |= FOLIO_MM_IDS_SHARED_BIT;
 	}
@@ -225,15 +225,15 @@ static __always_inline int folio_add_return_large_mapcount(struct folio *folio,
 #define folio_add_large_mapcount folio_add_return_large_mapcount
 
 static __always_inline int folio_sub_return_large_mapcount(struct folio *folio,
-		int diff, struct vm_area_struct *vma)
+		unsigned int nr_mappings, struct vm_area_struct *vma)
 {
 	const mm_id_t mm_id = vma->vm_mm->mm_id;
 	int new_mapcount_val;
 
 	folio_lock_large_mapcount(folio);
-	__folio_large_mapcount_sanity_checks(folio, diff, mm_id);
+	__folio_large_mapcount_sanity_checks(folio, nr_mappings, mm_id);
 
-	new_mapcount_val = atomic_read(&folio->_large_mapcount) - diff;
+	new_mapcount_val = atomic_read(&folio->_large_mapcount) - nr_mappings;
 	atomic_set(&folio->_large_mapcount, new_mapcount_val);
 
 	/*
@@ -243,13 +243,13 @@ static __always_inline int folio_sub_return_large_mapcount(struct folio *folio,
 	 * negative.
 	 */
 	if (folio_mm_id(folio, 0) == mm_id) {
-		folio->_mm_id_mapcount[0] -= diff;
+		folio->_mm_id_mapcount[0] -= nr_mappings;
 		if (folio->_mm_id_mapcount[0] >= 0)
 			goto out;
 		folio->_mm_id_mapcount[0] = -1;
 		folio_set_mm_id(folio, 0, MM_ID_DUMMY);
 	} else if (folio_mm_id(folio, 1) == mm_id) {
-		folio->_mm_id_mapcount[1] -= diff;
+		folio->_mm_id_mapcount[1] -= nr_mappings;
 		if (folio->_mm_id_mapcount[1] >= 0)
 			goto out;
 		folio->_mm_id_mapcount[1] = -1;
@@ -275,35 +275,36 @@ out:
  * See __folio_rmap_sanity_checks(), we might map large folios even without
  * CONFIG_TRANSPARENT_HUGEPAGE. We'll keep that working for now.
  */
-static inline void folio_set_large_mapcount(struct folio *folio, int mapcount,
+static inline void folio_set_large_mapcount(struct folio *folio,
+		unsigned int nr_mappings,
 		struct vm_area_struct *vma)
 {
 	/* Note: mapcounts start at -1. */
-	atomic_set(&folio->_large_mapcount, mapcount - 1);
+	atomic_set(&folio->_large_mapcount, nr_mappings - 1);
 }
 
 static inline void folio_add_large_mapcount(struct folio *folio,
-		int diff, struct vm_area_struct *vma)
+		unsigned int nr_mappings, struct vm_area_struct *vma)
 {
-	atomic_add(diff, &folio->_large_mapcount);
+	atomic_add(nr_mappings, &folio->_large_mapcount);
 }
 
 static inline int folio_add_return_large_mapcount(struct folio *folio,
-		int diff, struct vm_area_struct *vma)
+		unsigned int nr_mappings, struct vm_area_struct *vma)
 {
-	return atomic_add_return(diff, &folio->_large_mapcount) + 1;
+	return atomic_add_return(nr_mappings, &folio->_large_mapcount) + 1;
 }
 
 static inline void folio_sub_large_mapcount(struct folio *folio,
-		int diff, struct vm_area_struct *vma)
+		unsigned int nr_mappings, struct vm_area_struct *vma)
 {
-	atomic_sub(diff, &folio->_large_mapcount);
+	atomic_sub(nr_mappings, &folio->_large_mapcount);
 }
 
 static inline int folio_sub_return_large_mapcount(struct folio *folio,
-		int diff, struct vm_area_struct *vma)
+		unsigned int nr_mappings, struct vm_area_struct *vma)
 {
-	return atomic_sub_return(diff, &folio->_large_mapcount) + 1;
+	return atomic_sub_return(nr_mappings, &folio->_large_mapcount) + 1;
 }
 #endif /* CONFIG_MM_ID */
 
