@@ -3137,12 +3137,7 @@ static void gather_stats(struct page *page, struct numa_maps *md, int pte_dirty,
 			unsigned long nr_pages)
 {
 	struct folio *folio = page_folio(page);
-	int count;
-
-	if (IS_ENABLED(CONFIG_PAGE_MAPCOUNT))
-		count = folio_precise_page_mapcount(folio, page);
-	else
-		count = folio_average_page_mapcount(folio);
+	const int mapcount = folio_average_page_mapcount(folio);
 
 	md->pages += nr_pages;
 	if (pte_dirty || folio_test_dirty(folio))
@@ -3160,8 +3155,8 @@ static void gather_stats(struct page *page, struct numa_maps *md, int pte_dirty,
 	if (folio_test_anon(folio))
 		md->anon += nr_pages;
 
-	if (count > md->mapcount_max)
-		md->mapcount_max = count;
+	if (mapcount > md->mapcount_max)
+		md->mapcount_max = mapcount;
 
 	md->node[folio_nid(folio)] += nr_pages;
 }

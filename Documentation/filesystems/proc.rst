@@ -715,10 +715,10 @@ Where:
 node locality page counters (N0 == node0, N1 == node1, ...) and the kernel page
 size, in KB, that is backing the mapping up.
 
-Note that some kernel configurations do not track the precise number of times
-a page part of a larger allocation (e.g., THP) is mapped. In these
-configurations, "mapmax" might corresponds to the average number of mappings
-per page in such a larger allocation instead.
+"mapmax" is the maximum page mapcount of any page in the mapping, i.e.,
+the highest sharing level observed. For pages that are part of larger
+allocations (e.g., THP), it is derived from the average mapcount per page
+in the allocation, since precise per-page mapcounts are not available.
 
 1.2 Kernel data
 ---------------
