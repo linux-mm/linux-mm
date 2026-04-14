@@ -211,9 +211,13 @@ static inline bool userfaultfd_armed(struct vm_area_struct *vma)
 	return vma->vm_flags & __VM_UFFD_FLAGS;
 }
 
+/* Flags for vma_can_userfault() describing uffd context capabilities */
+#define UFFD_CTX_WP_ASYNC	(1 << 0)
+#define UFFD_CTX_MINOR_ANON	(1 << 1)
+
 static inline bool vma_can_userfault(struct vm_area_struct *vma,
 				     vm_flags_t vm_flags,
-				     bool wp_async)
+				     unsigned int ctx_flags)
 {
 	vm_flags &= __VM_UFFD_FLAGS;
 
@@ -221,14 +225,15 @@ static inline bool vma_can_userfault(struct vm_area_struct *vma,
 		return false;
 
 	if ((vm_flags & VM_UFFD_MINOR) &&
-	    (!is_vm_hugetlb_page(vma) && !vma_is_shmem(vma)))
+	    !is_vm_hugetlb_page(vma) && !vma_is_shmem(vma) &&
+	    !(vma_is_anonymous(vma) && (ctx_flags & UFFD_CTX_MINOR_ANON)))
 		return false;
 
 	/*
 	 * If wp async enabled, and WP is the only mode enabled, allow any
 	 * memory type.
 	 */
-	if (wp_async && (vm_flags == VM_UFFD_WP))
+	if ((ctx_flags & UFFD_CTX_WP_ASYNC) && (vm_flags == VM_UFFD_WP))
 		return true;
 
 	/*
@@ -273,6 +278,7 @@ extern void userfaultfd_unmap_complete(struct mm_struct *mm,
 				       struct list_head *uf);
 extern bool userfaultfd_wp_unpopulated(struct vm_area_struct *vma);
 extern bool userfaultfd_wp_async(struct vm_area_struct *vma);
+extern bool userfaultfd_minor_async(struct vm_area_struct *vma);
 
 void userfaultfd_reset_ctx(struct vm_area_struct *vma);
 
@@ -286,7 +292,7 @@ int userfaultfd_register_range(struct userfaultfd_ctx *ctx,
 			       struct vm_area_struct *vma,
 			       vm_flags_t vm_flags,
 			       unsigned long start, unsigned long end,
-			       bool wp_async);
+			       unsigned int ctx_flags);
 
 void userfaultfd_release_new(struct userfaultfd_ctx *ctx);
 
@@ -445,6 +451,11 @@ static inline bool userfaultfd_wp_unpopulated(struct vm_area_struct *vma)
 }
 
 static inline bool userfaultfd_wp_async(struct vm_area_struct *vma)
+{
+	return false;
+}
+
+static inline bool userfaultfd_minor_async(struct vm_area_struct *vma)
 {
 	return false;
 }

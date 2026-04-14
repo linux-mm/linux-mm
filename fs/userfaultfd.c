@@ -89,6 +89,27 @@ static bool userfaultfd_wp_async_ctx(struct userfaultfd_ctx *ctx)
 	return ctx && (ctx->features & UFFD_FEATURE_WP_ASYNC);
 }
 
+static bool userfaultfd_minor_anon_ctx(struct userfaultfd_ctx *ctx)
+{
+	return ctx && (ctx->features & UFFD_FEATURE_MINOR_ANON);
+}
+
+static bool userfaultfd_minor_async_ctx(struct userfaultfd_ctx *ctx)
+{
+	return ctx && (ctx->features & UFFD_FEATURE_MINOR_ASYNC);
+}
+
+static unsigned int userfaultfd_ctx_flags(struct userfaultfd_ctx *ctx)
+{
+	unsigned int flags = 0;
+
+	if (userfaultfd_wp_async_ctx(ctx))
+		flags |= UFFD_CTX_WP_ASYNC;
+	if (userfaultfd_minor_anon_ctx(ctx))
+		flags |= UFFD_CTX_MINOR_ANON;
+	return flags;
+}
+
 /*
  * Whether WP_UNPOPULATED is enabled on the uffd context.  It is only
  * meaningful when userfaultfd_wp()==true on the vma and when it's
@@ -1271,7 +1292,7 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 	bool basic_ioctls;
 	unsigned long start, end;
 	struct vma_iterator vmi;
-	bool wp_async = userfaultfd_wp_async_ctx(ctx);
+	unsigned int ctx_flags = userfaultfd_ctx_flags(ctx);
 
 	user_uffdio_register = (struct uffdio_register __user *) arg;
 
@@ -1345,7 +1366,7 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 
 		/* check not compatible vmas */
 		ret = -EINVAL;
-		if (!vma_can_userfault(cur, vm_flags, wp_async))
+		if (!vma_can_userfault(cur, vm_flags, ctx_flags))
 			goto out_unlock;
 
 		/*
@@ -1398,7 +1419,7 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 	VM_WARN_ON_ONCE(!found);
 
 	ret = userfaultfd_register_range(ctx, vma, vm_flags, start, end,
-					 wp_async);
+					 ctx_flags);
 
 out_unlock:
 	mmap_write_unlock(mm);
@@ -1443,7 +1464,7 @@ static int userfaultfd_unregister(struct userfaultfd_ctx *ctx,
 	unsigned long start, end, vma_end;
 	const void __user *buf = (void __user *)arg;
 	struct vma_iterator vmi;
-	bool wp_async = userfaultfd_wp_async_ctx(ctx);
+	unsigned int ctx_flags = userfaultfd_ctx_flags(ctx);
 
 	ret = -EFAULT;
 	if (copy_from_user(&uffdio_unregister, buf, sizeof(uffdio_unregister)))
@@ -1505,7 +1526,7 @@ static int userfaultfd_unregister(struct userfaultfd_ctx *ctx,
 		 * provides for more strict behavior to notice
 		 * unregistration errors.
 		 */
-		if (!vma_can_userfault(cur, cur->vm_flags, wp_async))
+		if (!vma_can_userfault(cur, cur->vm_flags, ctx_flags))
 			goto out_unlock;
 
 		found = true;
@@ -1526,7 +1547,7 @@ static int userfaultfd_unregister(struct userfaultfd_ctx *ctx,
 			goto skip;
 
 		VM_WARN_ON_ONCE(vma->vm_userfaultfd_ctx.ctx != ctx);
-		VM_WARN_ON_ONCE(!vma_can_userfault(vma, vma->vm_flags, wp_async));
+		VM_WARN_ON_ONCE(!vma_can_userfault(vma, vma->vm_flags, ctx_flags));
 		VM_WARN_ON_ONCE(!(vma->vm_flags & VM_MAYWRITE));
 
 		if (vma->vm_start > start)
@@ -1890,6 +1911,11 @@ bool userfaultfd_wp_async(struct vm_area_struct *vma)
 	return userfaultfd_wp_async_ctx(vma->vm_userfaultfd_ctx.ctx);
 }
 
+bool userfaultfd_minor_async(struct vm_area_struct *vma)
+{
+	return userfaultfd_minor_async_ctx(vma->vm_userfaultfd_ctx.ctx);
+}
+
 static inline unsigned int uffd_ctx_features(__u64 user_features)
 {
 	/*
@@ -1993,11 +2019,20 @@ static int userfaultfd_api(struct userfaultfd_ctx *ctx,
 	if (features & UFFD_FEATURE_WP_ASYNC)
 		features |= UFFD_FEATURE_WP_UNPOPULATED;
 
+	ret = -EINVAL;
+	/* MINOR_ASYNC requires at least one minor feature */
+	if ((features & UFFD_FEATURE_MINOR_ASYNC) &&
+	    !(features & (UFFD_FEATURE_MINOR_ANON |
+			  UFFD_FEATURE_MINOR_HUGETLBFS |
+			  UFFD_FEATURE_MINOR_SHMEM)))
+		goto err_out;
+
 	/* report all available features and ioctls to userland */
 	uffdio_api.features = UFFD_API_FEATURES;
 #ifndef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
 	uffdio_api.features &=
-		~(UFFD_FEATURE_MINOR_HUGETLBFS | UFFD_FEATURE_MINOR_SHMEM);
+		~(UFFD_FEATURE_MINOR_HUGETLBFS | UFFD_FEATURE_MINOR_SHMEM |
+		  UFFD_FEATURE_MINOR_ANON | UFFD_FEATURE_MINOR_ASYNC);
 #endif
 	if (!pgtable_supports_uffd_wp())
 		uffdio_api.features &= ~UFFD_FEATURE_PAGEFAULT_FLAG_WP;
