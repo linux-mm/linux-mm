@@ -380,8 +380,61 @@ out:
 	return ret;
 }
 
-/* Handles UFFDIO_CONTINUE for all shmem VMAs (shared or private). */
-static int mfill_atomic_pte_continue(pmd_t *dst_pmd,
+static int mfill_atomic_pte_continue_anon(pmd_t *dst_pmd,
+					  struct vm_area_struct *dst_vma,
+					  unsigned long dst_addr,
+					  uffd_flags_t flags)
+{
+	pte_t *ptep, pte;
+	spinlock_t *ptl;
+	int ret = -EFAULT;
+
+	ptep = pte_offset_map_lock(dst_vma->vm_mm, dst_pmd, dst_addr, &ptl);
+	if (!ptep)
+		return ret;
+
+	pte = ptep_get(ptep);
+	if (!pte_protnone(pte))
+		goto out_unlock;
+
+	pte = pte_modify(pte, dst_vma->vm_page_prot);
+	pte = pte_mkyoung(pte);
+	if (flags & MFILL_ATOMIC_WP)
+		pte = pte_wrprotect(pte);
+	set_pte_at(dst_vma->vm_mm, dst_addr, ptep, pte);
+	update_mmu_cache(dst_vma, dst_addr, ptep);
+	ret = 0;
+out_unlock:
+	pte_unmap_unlock(ptep, ptl);
+	return ret;
+}
+
+static int mfill_atomic_pmd_continue_anon(struct mm_struct *mm,
+					  struct vm_area_struct *vma,
+					  unsigned long addr,
+					  pmd_t *pmd, pmd_t orig_pmd,
+					  uffd_flags_t flags)
+{
+	spinlock_t *ptl;
+	pmd_t entry;
+
+	ptl = pmd_lock(mm, pmd);
+	if (unlikely(!pmd_same(pmdp_get(pmd), orig_pmd))) {
+		spin_unlock(ptl);
+		return -EAGAIN;
+	}
+
+	entry = pmd_modify(orig_pmd, vma->vm_page_prot);
+	entry = pmd_mkyoung(entry);
+	if (flags & MFILL_ATOMIC_WP)
+		entry = pmd_wrprotect(entry);
+	set_pmd_at(mm, addr & HPAGE_PMD_MASK, pmd, entry);
+	update_mmu_cache_pmd(vma, addr, pmd);
+	spin_unlock(ptl);
+	return 0;
+}
+
+static int mfill_atomic_pte_continue_shmem(pmd_t *dst_pmd,
 				     struct vm_area_struct *dst_vma,
 				     unsigned long dst_addr,
 				     uffd_flags_t flags)
@@ -667,7 +720,10 @@ static __always_inline ssize_t mfill_atomic_pte(pmd_t *dst_pmd,
 	ssize_t err;
 
 	if (uffd_flags_mode_is(flags, MFILL_ATOMIC_CONTINUE)) {
-		return mfill_atomic_pte_continue(dst_pmd, dst_vma,
+		if (vma_is_anonymous(dst_vma))
+			return mfill_atomic_pte_continue_anon(dst_pmd, dst_vma,
+							      dst_addr, flags);
+		return mfill_atomic_pte_continue_shmem(dst_pmd, dst_vma,
 						 dst_addr, flags);
 	} else if (uffd_flags_mode_is(flags, MFILL_ATOMIC_POISON)) {
 		return mfill_atomic_pte_poison(dst_pmd, dst_vma,
@@ -802,11 +858,25 @@ retry:
 			break;
 		}
 		/*
-		 * If the dst_pmd is THP don't override it and just be strict.
-		 * (This includes the case where the PMD used to be THP and
-		 * changed back to none after __pte_alloc().)
+		 * THP PMD: for anon CONTINUE, restore protnone PMD
+		 * permissions in place. For other operations, reject.
 		 */
 		if (unlikely(pmd_trans_huge(dst_pmdval))) {
+			if (uffd_flags_mode_is(flags, MFILL_ATOMIC_CONTINUE) &&
+			    vma_is_anonymous(dst_vma) &&
+			    pmd_protnone(dst_pmdval)) {
+				err = mfill_atomic_pmd_continue_anon(
+					dst_mm, dst_vma, dst_addr,
+					dst_pmd, dst_pmdval, flags);
+				if (err == -EAGAIN)
+					continue; /* PMD changed, re-read it */
+				if (err)
+					break;
+				dst_addr += HPAGE_PMD_SIZE;
+				src_addr += HPAGE_PMD_SIZE;
+				copied += HPAGE_PMD_SIZE;
+				continue;
+			}
 			err = -EEXIST;
 			break;
 		}

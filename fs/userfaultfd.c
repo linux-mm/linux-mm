@@ -340,8 +340,11 @@ again:
 	if (!pmd_present(_pmd))
 		return false;
 
-	if (pmd_trans_huge(_pmd))
+	if (pmd_trans_huge(_pmd)) {
+		if (pmd_protnone(_pmd) && (reason & VM_UFFD_MINOR))
+			return true;
 		return !pmd_write(_pmd) && (reason & VM_UFFD_WP);
+	}
 
 	pte = pte_offset_map(pmd, address);
 	if (!pte)
@@ -365,6 +368,9 @@ again:
 	 * resolve the fault.
 	 */
 	if (!pte_write(ptent) && (reason & VM_UFFD_WP))
+		goto out;
+	/* PTE is still protnone (deactivated), wait for userspace to resolve. */
+	if (pte_protnone(ptent) && (reason & VM_UFFD_MINOR))
 		goto out;
 
 	ret = false;
@@ -1819,6 +1825,7 @@ static int userfaultfd_deactivate(struct userfaultfd_ctx *ctx,
 
 	return ret;
 }
+
 
 static int userfaultfd_continue(struct userfaultfd_ctx *ctx, unsigned long arg)
 {
