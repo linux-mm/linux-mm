@@ -79,24 +79,33 @@ struct userfaultfd_wake_range {
 /* internal indication that UFFD_API ioctl was successfully executed */
 #define UFFD_FEATURE_INITIALIZED		(1u << 31)
 
+/*
+ * Read ctx->features with READ_ONCE() since UFFDIO_SET_MODE can
+ * modify it concurrently.
+ */
+static unsigned int userfaultfd_features(struct userfaultfd_ctx *ctx)
+{
+	return READ_ONCE(ctx->features);
+}
+
 static bool userfaultfd_is_initialized(struct userfaultfd_ctx *ctx)
 {
-	return ctx->features & UFFD_FEATURE_INITIALIZED;
+	return userfaultfd_features(ctx) & UFFD_FEATURE_INITIALIZED;
 }
 
 static bool userfaultfd_wp_async_ctx(struct userfaultfd_ctx *ctx)
 {
-	return ctx && (ctx->features & UFFD_FEATURE_WP_ASYNC);
+	return ctx && (userfaultfd_features(ctx) & UFFD_FEATURE_WP_ASYNC);
 }
 
 static bool userfaultfd_minor_anon_ctx(struct userfaultfd_ctx *ctx)
 {
-	return ctx && (ctx->features & UFFD_FEATURE_MINOR_ANON);
+	return ctx && (userfaultfd_features(ctx) & UFFD_FEATURE_MINOR_ANON);
 }
 
 static bool userfaultfd_minor_async_ctx(struct userfaultfd_ctx *ctx)
 {
-	return ctx && (ctx->features & UFFD_FEATURE_MINOR_ASYNC);
+	return ctx && (userfaultfd_features(ctx) & UFFD_FEATURE_MINOR_ASYNC);
 }
 
 static unsigned int userfaultfd_ctx_flags(struct userfaultfd_ctx *ctx)
@@ -122,7 +131,7 @@ bool userfaultfd_wp_unpopulated(struct vm_area_struct *vma)
 	if (!ctx)
 		return false;
 
-	return ctx->features & UFFD_FEATURE_WP_UNPOPULATED;
+	return userfaultfd_features(ctx) & UFFD_FEATURE_WP_UNPOPULATED;
 }
 
 static int userfaultfd_wake_function(wait_queue_entry_t *wq, unsigned mode,
@@ -435,7 +444,7 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	/* 0 or > 1 flags set is a bug; we expect exactly 1. */
 	VM_WARN_ON_ONCE(!reason || (reason & (reason - 1)));
 
-	if (ctx->features & UFFD_FEATURE_SIGBUS)
+	if (userfaultfd_features(ctx) & UFFD_FEATURE_SIGBUS)
 		goto out;
 	if (!(vmf->flags & FAULT_FLAG_USER) && (ctx->flags & UFFD_USER_MODE_ONLY))
 		goto out;
@@ -506,7 +515,7 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	init_waitqueue_func_entry(&uwq.wq, userfaultfd_wake_function);
 	uwq.wq.private = current;
 	uwq.msg = userfault_msg(vmf->address, vmf->real_address, vmf->flags,
-				reason, ctx->features);
+				reason, userfaultfd_features(ctx));
 	uwq.ctx = ctx;
 	uwq.waken = false;
 
@@ -668,7 +677,7 @@ int dup_userfaultfd(struct vm_area_struct *vma, struct list_head *fcs)
 	if (!octx)
 		return 0;
 
-	if (!(octx->features & UFFD_FEATURE_EVENT_FORK)) {
+	if (!(userfaultfd_features(octx) & UFFD_FEATURE_EVENT_FORK)) {
 		userfaultfd_reset_ctx(vma);
 		return 0;
 	}
@@ -774,7 +783,7 @@ void mremap_userfaultfd_prep(struct vm_area_struct *vma,
 	if (!ctx)
 		return;
 
-	if (ctx->features & UFFD_FEATURE_EVENT_REMAP) {
+	if (userfaultfd_features(ctx) & UFFD_FEATURE_EVENT_REMAP) {
 		vm_ctx->ctx = ctx;
 		userfaultfd_ctx_get(ctx);
 		down_write(&ctx->map_changing_lock);
@@ -824,7 +833,7 @@ bool userfaultfd_remove(struct vm_area_struct *vma,
 	struct userfaultfd_wait_queue ewq;
 
 	ctx = vma->vm_userfaultfd_ctx.ctx;
-	if (!ctx || !(ctx->features & UFFD_FEATURE_EVENT_REMOVE))
+	if (!ctx || !(userfaultfd_features(ctx) & UFFD_FEATURE_EVENT_REMOVE))
 		return true;
 
 	userfaultfd_ctx_get(ctx);
@@ -863,7 +872,7 @@ int userfaultfd_unmap_prep(struct vm_area_struct *vma, unsigned long start,
 	struct userfaultfd_unmap_ctx *unmap_ctx;
 	struct userfaultfd_ctx *ctx = vma->vm_userfaultfd_ctx.ctx;
 
-	if (!ctx || !(ctx->features & UFFD_FEATURE_EVENT_UNMAP) ||
+	if (!ctx || !(userfaultfd_features(ctx) & UFFD_FEATURE_EVENT_UNMAP) ||
 	    has_unmap_ctx(ctx, unmaps, start, end))
 		return 0;
 
@@ -1826,6 +1835,65 @@ static int userfaultfd_deactivate(struct userfaultfd_ctx *ctx,
 	return ret;
 }
 
+/*
+ * Features that can be toggled at runtime via UFFDIO_SET_MODE.
+ * Only async features that were enabled at UFFDIO_API time may be toggled.
+ */
+#define UFFD_FEATURE_TOGGLEABLE	(UFFD_FEATURE_MINOR_ASYNC)
+
+static int userfaultfd_set_mode(struct userfaultfd_ctx *ctx,
+				  unsigned long arg)
+{
+	struct uffdio_set_mode mode;
+	struct mm_struct *mm = ctx->mm;
+
+	if (copy_from_user(&mode, (void __user *)arg, sizeof(mode)))
+		return -EFAULT;
+
+	/* enable and disable must not overlap */
+	if (mode.enable & mode.disable)
+		return -EINVAL;
+
+	/* only toggleable features are allowed */
+	if ((mode.enable | mode.disable) & ~UFFD_FEATURE_TOGGLEABLE)
+		return -EINVAL;
+
+	if (!mmget_not_zero(mm))
+		return -ESRCH;
+
+	/*
+	 * mmap_write_lock serializes against all page faults.
+	 * After we release, no in-flight faults from the old mode exist.
+	 */
+	{
+		unsigned int new_features;
+
+		mmap_write_lock(mm);
+		new_features = userfaultfd_features(ctx);
+		new_features |= mode.enable;
+		new_features &= ~mode.disable;
+		WRITE_ONCE(ctx->features, new_features);
+		mmap_write_unlock(mm);
+	}
+
+	/*
+	 * If switching to async, wake threads blocked in handle_userfault().
+	 * They will retry the fault and auto-resolve under the new mode.
+	 * len=0 means wake all pending faults on this context.
+	 */
+	if (mode.enable & UFFD_FEATURE_MINOR_ASYNC) {
+		struct userfaultfd_wake_range range = { .len = 0 };
+
+		spin_lock_irq(&ctx->fault_pending_wqh.lock);
+		__wake_up_locked_key(&ctx->fault_pending_wqh, TASK_NORMAL,
+				     &range);
+		__wake_up(&ctx->fault_wqh, TASK_NORMAL, 1, &range);
+		spin_unlock_irq(&ctx->fault_pending_wqh.lock);
+	}
+
+	mmput(mm);
+	return 0;
+}
 
 static int userfaultfd_continue(struct userfaultfd_ctx *ctx, unsigned long arg)
 {
@@ -2150,6 +2218,9 @@ static long userfaultfd_ioctl(struct file *file, unsigned cmd,
 	case UFFDIO_DEACTIVATE:
 		ret = userfaultfd_deactivate(ctx, arg);
 		break;
+	case UFFDIO_SET_MODE:
+		ret = userfaultfd_set_mode(ctx, arg);
+		break;
 	}
 	return ret;
 }
@@ -2177,7 +2248,7 @@ static void userfaultfd_show_fdinfo(struct seq_file *m, struct file *f)
 	 *	protocols: aa:... bb:...
 	 */
 	seq_printf(m, "pending:\t%lu\ntotal:\t%lu\nAPI:\t%Lx:%x:%Lx\n",
-		   pending, total, UFFD_API, ctx->features,
+		   pending, total, UFFD_API, userfaultfd_features(ctx),
 		   UFFD_API_IOCTLS|UFFD_API_RANGE_IOCTLS);
 }
 #endif
