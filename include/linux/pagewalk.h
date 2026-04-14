@@ -94,8 +94,8 @@ struct mm_walk_ops {
 };
 
 /*
- * Action for pud_entry / pmd_entry callbacks.
- * ACTION_SUBTREE is the default
+ * Action for pgd_entry / p4d_entry / pud_entry / pmd_entry callbacks.
+ * ACTION_SUBTREE is the default.
  */
 enum page_walk_action {
 	/* Descend to next level, splitting huge pages if needed and possible */

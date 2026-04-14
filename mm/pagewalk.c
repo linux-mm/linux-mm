@@ -260,6 +260,7 @@ static int walk_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 
 	p4d = p4d_offset(pgd, addr);
 	do {
+again:
 		next = p4d_addr_end(addr, end);
 		if (p4d_none_or_clear_bad(p4d)) {
 			if (has_install)
@@ -271,11 +272,20 @@ static int walk_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 			if (!has_install)
 				continue;
 		}
+
+		walk->action = ACTION_SUBTREE;
+
 		if (ops->p4d_entry) {
 			err = ops->p4d_entry(p4d, addr, next, walk);
 			if (err)
 				break;
 		}
+
+		if (walk->action == ACTION_AGAIN)
+			goto again;
+		if (walk->action == ACTION_CONTINUE)
+			continue;
+
 		if (has_handler || has_install)
 			err = walk_pud_range(p4d, addr, next, walk);
 		if (err)
@@ -301,6 +311,7 @@ static int walk_pgd_range(unsigned long addr, unsigned long end,
 	else
 		pgd = pgd_offset(walk->mm, addr);
 	do {
+again:
 		next = pgd_addr_end(addr, end);
 		if (pgd_none_or_clear_bad(pgd)) {
 			if (has_install)
@@ -312,11 +323,20 @@ static int walk_pgd_range(unsigned long addr, unsigned long end,
 			if (!has_install)
 				continue;
 		}
+
+		walk->action = ACTION_SUBTREE;
+
 		if (ops->pgd_entry) {
 			err = ops->pgd_entry(pgd, addr, next, walk);
 			if (err)
 				break;
 		}
+
+		if (walk->action == ACTION_AGAIN)
+			goto again;
+		if (walk->action == ACTION_CONTINUE)
+			continue;
+
 		if (has_handler || has_install)
 			err = walk_p4d_range(pgd, addr, next, walk);
 		if (err)
