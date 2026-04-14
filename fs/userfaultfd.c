@@ -1441,6 +1441,10 @@ out_unlock:
 		if (!(uffdio_register.mode & UFFDIO_REGISTER_MODE_MINOR))
 			ioctls_out &= ~((__u64)1 << _UFFDIO_CONTINUE);
 
+		/* DEACTIVATE is only supported for MINOR ranges. */
+		if (!(uffdio_register.mode & UFFDIO_REGISTER_MODE_MINOR))
+			ioctls_out &= ~((__u64)1 << _UFFDIO_DEACTIVATE);
+
 		/*
 		 * Now that we scanned all vmas we can already tell
 		 * userland which ioctls methods are guaranteed to
@@ -1788,6 +1792,34 @@ static int userfaultfd_writeprotect(struct userfaultfd_ctx *ctx,
 	return ret;
 }
 
+static int userfaultfd_deactivate(struct userfaultfd_ctx *ctx,
+				  unsigned long arg)
+{
+	int ret;
+	struct uffdio_range uffdio_range;
+
+	if (atomic_read(&ctx->mmap_changing))
+		return -EAGAIN;
+
+	if (copy_from_user(&uffdio_range, (void __user *)arg,
+			   sizeof(uffdio_range)))
+		return -EFAULT;
+
+	ret = validate_range(ctx->mm, uffdio_range.start, uffdio_range.len);
+	if (ret)
+		return ret;
+
+	if (mmget_not_zero(ctx->mm)) {
+		ret = mdeactivate_range(ctx, uffdio_range.start,
+					uffdio_range.len);
+		mmput(ctx->mm);
+	} else {
+		return -ESRCH;
+	}
+
+	return ret;
+}
+
 static int userfaultfd_continue(struct userfaultfd_ctx *ctx, unsigned long arg)
 {
 	__s64 ret;
@@ -2107,6 +2139,9 @@ static long userfaultfd_ioctl(struct file *file, unsigned cmd,
 		break;
 	case UFFDIO_POISON:
 		ret = userfaultfd_poison(ctx, arg);
+		break;
+	case UFFDIO_DEACTIVATE:
+		ret = userfaultfd_deactivate(ctx, arg);
 		break;
 	}
 	return ret;

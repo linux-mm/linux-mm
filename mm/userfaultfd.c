@@ -775,7 +775,7 @@ retry:
 
 	if (!vma_is_anonymous(dst_vma) && !vma_is_shmem(dst_vma))
 		goto out_unlock;
-	if (!vma_is_shmem(dst_vma) &&
+	if (!vma_is_shmem(dst_vma) && !vma_is_anonymous(dst_vma) &&
 	    uffd_flags_mode_is(flags, MFILL_ATOMIC_CONTINUE))
 		goto out_unlock;
 
@@ -797,13 +797,16 @@ retry:
 			break;
 		}
 		dst_pmdval = pmdp_get_lockless(dst_pmd);
+		if (unlikely(!pmd_present(dst_pmdval))) {
+			err = -EEXIST;
+			break;
+		}
 		/*
 		 * If the dst_pmd is THP don't override it and just be strict.
 		 * (This includes the case where the PMD used to be THP and
 		 * changed back to none after __pte_alloc().)
 		 */
-		if (unlikely(!pmd_present(dst_pmdval) ||
-				pmd_trans_huge(dst_pmdval))) {
+		if (unlikely(pmd_trans_huge(dst_pmdval))) {
 			err = -EEXIST;
 			break;
 		}
@@ -996,6 +999,65 @@ out_unlock:
 	return err;
 }
 
+int mdeactivate_range(struct userfaultfd_ctx *ctx, unsigned long start,
+		      unsigned long len)
+{
+	struct mm_struct *dst_mm = ctx->mm;
+	unsigned long end = start + len;
+	struct vm_area_struct *dst_vma;
+	long err;
+	VMA_ITERATOR(vmi, dst_mm, start);
+
+	VM_WARN_ON_ONCE(start & ~PAGE_MASK);
+	VM_WARN_ON_ONCE(len & ~PAGE_MASK);
+	VM_WARN_ON_ONCE(start + len <= start);
+
+	guard(mmap_read_lock)(dst_mm);
+	guard(rwsem_read)(&ctx->map_changing_lock);
+
+	if (atomic_read(&ctx->mmap_changing))
+		return -EAGAIN;
+
+	err = -ENOENT;
+	for_each_vma_range(vmi, dst_vma, end) {
+		unsigned long vma_start = max(dst_vma->vm_start, start);
+		unsigned long vma_end = min(dst_vma->vm_end, end);
+
+		if (!userfaultfd_minor(dst_vma)) {
+			err = -ENOENT;
+			break;
+		}
+
+		/*
+		 * Private hugetlb has no page cache to fall back on —
+		 * zapping PTEs would destroy page content.
+		 */
+		if (is_vm_hugetlb_page(dst_vma) &&
+		    !(dst_vma->vm_flags & VM_SHARED)) {
+			err = -EINVAL;
+			break;
+		}
+
+		if (vma_is_anonymous(dst_vma)) {
+			/* Anonymous: set protnone, pages stay resident */
+			struct mmu_gather tlb;
+
+			tlb_gather_mmu(&tlb, dst_mm);
+			err = change_protection(&tlb, dst_vma, vma_start,
+						vma_end,
+						MM_CP_UFFD_DEACTIVATE);
+			tlb_finish_mmu(&tlb);
+			if (err < 0)
+				break;
+		} else {
+			/* Shared shmem/hugetlb: zap PTEs, pages stay in page cache */
+			zap_page_range_single(dst_vma, vma_start,
+					      vma_end - vma_start, NULL);
+		}
+		err = 0;
+	}
+	return err;
+}
 
 void double_pt_lock(spinlock_t *ptl1,
 		    spinlock_t *ptl2)
@@ -1990,6 +2052,16 @@ struct vm_area_struct *userfaultfd_clear_vma(struct vma_iterator *vmi,
 	/* Reset ptes for the whole vma range if wr-protected */
 	if (userfaultfd_wp(vma))
 		uffd_wp_range(vma, start, end - start, false);
+
+	/* Restore protnone PTEs to normal permissions */
+	if (userfaultfd_minor(vma) && vma_is_anonymous(vma)) {
+		struct mmu_gather tlb;
+
+		tlb_gather_mmu(&tlb, vma->vm_mm);
+		change_protection(&tlb, vma, start, end,
+				  MM_CP_TRY_CHANGE_WRITABLE);
+		tlb_finish_mmu(&tlb);
+	}
 
 	ret = vma_modify_flags_uffd(vmi, prev, vma, start, end,
 				    &new_vma_flags, NULL_VM_UFFD_CTX,

@@ -2649,6 +2649,7 @@ int change_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 	spinlock_t *ptl;
 	pmd_t oldpmd, entry;
 	bool prot_numa = cp_flags & MM_CP_PROT_NUMA;
+	bool uffd_deactivate = cp_flags & MM_CP_UFFD_DEACTIVATE;
 	bool uffd_wp = cp_flags & MM_CP_UFFD_WP;
 	bool uffd_wp_resolve = cp_flags & MM_CP_UFFD_WP_RESOLVE;
 	int ret = 1;
@@ -2668,17 +2669,17 @@ int change_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		goto unlock;
 	}
 
-	if (prot_numa) {
+	/* Already protnone — nothing to do for either NUMA or uffd */
+	if ((prot_numa || uffd_deactivate) && pmd_protnone(*pmd))
+		goto unlock;
 
+	if (prot_numa) {
 		/*
 		 * Avoid trapping faults against the zero page. The read-only
 		 * data is likely to be read-cached on the local CPU and
 		 * local/remote hits to the zero page are not interesting.
 		 */
 		if (is_huge_zero_pmd(*pmd))
-			goto unlock;
-
-		if (pmd_protnone(*pmd))
 			goto unlock;
 
 		if (!folio_can_map_prot_numa(pmd_folio(*pmd), vma,
