@@ -7,6 +7,7 @@
 
 #include "uffd-common.h"
 
+#include <linux/fs.h>
 #include "../../../../mm/gup_test.h"
 
 #ifdef __NR_userfaultfd
@@ -621,6 +622,423 @@ void uffd_minor_wp_test(uffd_global_test_opts_t *gopts, uffd_test_args_t *args)
 void uffd_minor_collapse_test(uffd_global_test_opts_t *gopts, uffd_test_args_t *args)
 {
 	uffd_minor_test_common(gopts, true, false);
+}
+
+static void deactivate_range(int uffd, __u64 start, __u64 len)
+{
+	struct uffdio_range range = { .start = start, .len = len };
+
+	if (ioctl(uffd, UFFDIO_DEACTIVATE, &range))
+		err("UFFDIO_DEACTIVATE failed");
+}
+
+static void set_async_mode(int uffd, bool enable)
+{
+	struct uffdio_set_mode mode = { };
+
+	if (enable)
+		mode.enable = UFFD_FEATURE_MINOR_ASYNC;
+	else
+		mode.disable = UFFD_FEATURE_MINOR_ASYNC;
+
+	if (ioctl(uffd, UFFDIO_SET_MODE, &mode))
+		err("UFFDIO_SET_MODE failed");
+}
+
+/*
+ * Test async minor faults on anonymous memory.
+ * Populate pages, register MODE_MINOR with MINOR_ASYNC,
+ * deactivate, re-access, verify content preserved and no faults delivered.
+ */
+static void uffd_minor_anon_async_test(uffd_global_test_opts_t *gopts,
+				       uffd_test_args_t *args)
+{
+	unsigned long nr_pages = gopts->nr_pages;
+	unsigned long page_size = gopts->page_size;
+	unsigned long p;
+
+	/* Populate all pages with known content */
+	for (p = 0; p < nr_pages; p++)
+		memset(gopts->area_dst + p * page_size, p % 255 + 1, page_size);
+
+	/* Register MODE_MINOR (uffd was opened with MINOR_ANON | MINOR_ASYNC) */
+	if (uffd_register(gopts->uffd, gopts->area_dst,
+			  nr_pages * page_size,
+			  false, false, true))
+		err("register failure");
+
+	/* Deactivate all pages — sets protnone */
+	deactivate_range(gopts->uffd, (uint64_t)gopts->area_dst,
+			 nr_pages * page_size);
+
+	/* Access all pages — should auto-resolve, no faults */
+	for (p = 0; p < nr_pages; p++) {
+		unsigned char *page = (unsigned char *)gopts->area_dst +
+				      p * page_size;
+		unsigned char expected = p % 255 + 1;
+
+		if (page[0] != expected) {
+			uffd_test_fail("page %lu content mismatch: %u != %u",
+				       p, page[0], expected);
+			return;
+		}
+	}
+
+	uffd_test_pass();
+}
+
+/*
+ * Custom fault handler for anon minor — just UFFDIO_CONTINUE, no content
+ * modification (the page is protnone so we can't access it from here).
+ */
+static void uffd_handle_minor_anon(uffd_global_test_opts_t *gopts,
+				   struct uffd_msg *msg,
+				   struct uffd_args *uargs)
+{
+	struct uffdio_continue req;
+
+	if (!(msg->arg.pagefault.flags & UFFD_PAGEFAULT_FLAG_MINOR))
+		err("expected minor fault, got 0x%llx",
+		    msg->arg.pagefault.flags);
+
+	req.range.start = msg->arg.pagefault.address;
+	req.range.len = gopts->page_size;
+	req.mode = 0;
+	if (ioctl(gopts->uffd, UFFDIO_CONTINUE, &req)) {
+		/*
+		 * THP races with khugepaged collapse/split:
+		 * EAGAIN: PMD changed under us
+		 * EEXIST: THP present but already resolved
+		 * In both cases the page is accessible — the faulting
+		 * thread retries and succeeds.
+		 */
+		if (errno != EEXIST && errno != EAGAIN)
+			err("UFFDIO_CONTINUE failed");
+	}
+
+	uargs->minor_faults++;
+}
+
+/*
+ * Test sync minor faults on anonymous memory.
+ * Populate pages, register MODE_MINOR (sync), deactivate,
+ * access from worker thread, verify fault delivered, UFFDIO_CONTINUE resolves.
+ */
+static void uffd_minor_anon_sync_test(uffd_global_test_opts_t *gopts,
+				      uffd_test_args_t *args)
+{
+	unsigned long nr_pages = gopts->nr_pages;
+	unsigned long page_size = gopts->page_size;
+	pthread_t uffd_mon;
+	struct uffd_args uargs = { };
+	char c = '\0';
+	unsigned long p;
+
+	uargs.gopts = gopts;
+	uargs.handle_fault = uffd_handle_minor_anon;
+
+	/* Populate all pages */
+	for (p = 0; p < nr_pages; p++)
+		memset(gopts->area_dst + p * page_size, p % 255 + 1, page_size);
+
+	/* Register MODE_MINOR (uffd opened with MINOR_ANON, no MINOR_ASYNC) */
+	if (uffd_register(gopts->uffd, gopts->area_dst,
+			  nr_pages * page_size,
+			  false, false, true))
+		err("register failure");
+
+	/* Deactivate all pages */
+	deactivate_range(gopts->uffd, (uint64_t)gopts->area_dst,
+			 nr_pages * page_size);
+
+	/* Start fault handler thread */
+	if (pthread_create(&uffd_mon, NULL, uffd_poll_thread, &uargs))
+		err("uffd_poll_thread create");
+
+	/* Access all pages — triggers sync minor faults, handler does CONTINUE */
+	for (p = 0; p < nr_pages; p++) {
+		unsigned char *page = (unsigned char *)gopts->area_dst +
+				      p * page_size;
+
+		if (page[0] != (p % 255 + 1)) {
+			uffd_test_fail("page %lu content mismatch", p);
+			goto out;
+		}
+	}
+
+	if (uargs.minor_faults == 0) {
+		uffd_test_fail("expected minor faults, got 0");
+		goto out;
+	}
+
+	uffd_test_pass();
+out:
+	if (write(gopts->pipefd[1], &c, sizeof(c)) != sizeof(c))
+		err("pipe write");
+	if (pthread_join(uffd_mon, NULL))
+		err("join() failed");
+}
+
+/*
+ * Test PAGEMAP_SCAN detection of deactivated (cold) pages.
+ */
+static void uffd_minor_anon_pagemap_test(uffd_global_test_opts_t *gopts,
+					  uffd_test_args_t *args)
+{
+	unsigned long nr_pages = gopts->nr_pages;
+	unsigned long page_size = gopts->page_size;
+	unsigned long p;
+	struct page_region regions[16];
+	struct pm_scan_arg pm_arg;
+	int pagemap_fd;
+	long ret;
+
+	/* Need at least 4 pages */
+	if (nr_pages < 4) {
+		uffd_test_skip("need at least 4 pages");
+		return;
+	}
+
+	/* Populate all pages */
+	for (p = 0; p < nr_pages; p++)
+		memset(gopts->area_dst + p * page_size, 0xab, page_size);
+
+	/* Register and deactivate */
+	if (uffd_register(gopts->uffd, gopts->area_dst,
+			  nr_pages * page_size,
+			  false, false, true))
+		err("register failure");
+
+	deactivate_range(gopts->uffd, (uint64_t)gopts->area_dst,
+			 nr_pages * page_size);
+
+	/* Touch first half of pages to re-activate them (async auto-resolve) */
+	for (p = 0; p < nr_pages / 2; p++) {
+		volatile char *page = gopts->area_dst + p * page_size;
+		(void)*page;
+	}
+
+	/* Scan for cold (still deactivated) pages */
+	pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
+	if (pagemap_fd < 0)
+		err("open pagemap");
+
+	memset(&pm_arg, 0, sizeof(pm_arg));
+	pm_arg.size = sizeof(pm_arg);
+	pm_arg.start = (uint64_t)gopts->area_dst;
+	pm_arg.end = (uint64_t)gopts->area_dst + nr_pages * page_size;
+	pm_arg.vec = (uint64_t)regions;
+	pm_arg.vec_len = 16;
+	pm_arg.category_mask = PAGE_IS_UFFD_DEACTIVATED;
+	pm_arg.return_mask = PAGE_IS_UFFD_DEACTIVATED;
+
+	ret = ioctl(pagemap_fd, PAGEMAP_SCAN, &pm_arg);
+	close(pagemap_fd);
+
+	if (ret < 0) {
+		uffd_test_fail("PAGEMAP_SCAN failed: %s", strerror(errno));
+		return;
+	}
+
+	/*
+	 * The second half of pages should be reported as deactivated.
+	 * They may be coalesced into one region.
+	 */
+	if (ret < 1) {
+		uffd_test_fail("expected cold pages, got %ld regions", ret);
+		return;
+	}
+
+	/* Verify the cold region covers the second half */
+	uint64_t cold_start = regions[0].start;
+	uint64_t expected_start = (uint64_t)gopts->area_dst +
+				  (nr_pages / 2) * page_size;
+
+	if (cold_start != expected_start) {
+		uffd_test_fail("cold region starts at 0x%lx, expected 0x%lx",
+			       (unsigned long)cold_start,
+			       (unsigned long)expected_start);
+		return;
+	}
+
+	uffd_test_pass();
+}
+
+/*
+ * Test that GUP resolves through protnone PTEs (async mode).
+ * Deactivate pages, then use a pipe to exercise GUP on the deactivated
+ * memory. write() from deactivated pages triggers GUP which must fault
+ * through the protnone PTE.
+ */
+static void uffd_minor_anon_gup_test(uffd_global_test_opts_t *gopts,
+				     uffd_test_args_t *args)
+{
+	unsigned long page_size = gopts->page_size;
+	char *buf;
+	int pipefd[2];
+
+	buf = malloc(page_size);
+	if (!buf)
+		err("malloc");
+
+	/* Populate first page with known content */
+	memset(gopts->area_dst, 0xCD, page_size);
+
+	if (uffd_register(gopts->uffd, gopts->area_dst, page_size,
+			  false, false, true))
+		err("register failure");
+
+	deactivate_range(gopts->uffd, (uint64_t)gopts->area_dst, page_size);
+
+	if (pipe(pipefd))
+		err("pipe");
+
+	/*
+	 * write() from the deactivated page into the pipe.
+	 * This triggers GUP on the protnone PTE. In async mode the
+	 * kernel auto-restores permissions and GUP succeeds.
+	 */
+	if (write(pipefd[1], gopts->area_dst, page_size) != page_size) {
+		uffd_test_fail("write from deactivated page failed: %s",
+			       strerror(errno));
+		goto out;
+	}
+
+	if (read(pipefd[0], buf, page_size) != page_size) {
+		uffd_test_fail("read from pipe failed");
+		goto out;
+	}
+
+	if (memcmp(buf, "\xCD", 1) != 0) {
+		uffd_test_fail("content mismatch: got 0x%02x, expected 0xCD",
+			       (unsigned char)buf[0]);
+		goto out;
+	}
+
+	uffd_test_pass();
+out:
+	close(pipefd[0]);
+	close(pipefd[1]);
+	free(buf);
+}
+
+/*
+ * Test runtime toggle between async and sync modes.
+ * Start in async mode (detection), flip to sync (eviction), verify faults
+ * block, resolve them, flip back to async.
+ */
+static void uffd_minor_anon_async_toggle_test(uffd_global_test_opts_t *gopts,
+					      uffd_test_args_t *args)
+{
+	unsigned long nr_pages = gopts->nr_pages;
+	unsigned long page_size = gopts->page_size;
+	struct uffd_args uargs = { };
+	pthread_t uffd_mon;
+	char c = '\0';
+	unsigned long p;
+
+	uargs.gopts = gopts;
+	uargs.handle_fault = uffd_handle_minor_anon;
+
+	/* Populate */
+	for (p = 0; p < nr_pages; p++)
+		memset(gopts->area_dst + p * page_size, p % 255 + 1, page_size);
+
+	if (uffd_register(gopts->uffd, gopts->area_dst,
+			  nr_pages * page_size,
+			  false, false, true))
+		err("register failure");
+
+	/* Phase 1: async detection — deactivate, access first half */
+	deactivate_range(gopts->uffd, (uint64_t)gopts->area_dst,
+			 nr_pages * page_size);
+
+	for (p = 0; p < nr_pages / 2; p++) {
+		volatile char *page = gopts->area_dst + p * page_size;
+		(void)*page;  /* auto-resolves in async mode */
+	}
+
+	/* Phase 2: flip to sync for eviction */
+	set_async_mode(gopts->uffd, false);
+
+	/* Start handler — will receive faults for cold pages */
+	if (pthread_create(&uffd_mon, NULL, uffd_poll_thread, &uargs))
+		err("uffd_poll_thread create");
+
+	/* Access second half (cold pages) — should trigger sync faults */
+	for (p = nr_pages / 2; p < nr_pages; p++) {
+		unsigned char *page = (unsigned char *)gopts->area_dst +
+				      p * page_size;
+		if (page[0] != (p % 255 + 1)) {
+			uffd_test_fail("page %lu content mismatch", p);
+			goto out;
+		}
+	}
+
+	if (uargs.minor_faults == 0) {
+		uffd_test_fail("expected sync faults, got 0");
+		goto out;
+	}
+
+	/* Phase 3: flip back to async */
+	set_async_mode(gopts->uffd, true);
+
+	/* Deactivate and access again — should auto-resolve */
+	deactivate_range(gopts->uffd, (uint64_t)gopts->area_dst,
+			 nr_pages * page_size);
+
+	for (p = 0; p < nr_pages; p++) {
+		volatile char *page = gopts->area_dst + p * page_size;
+		(void)*page;
+	}
+
+	uffd_test_pass();
+out:
+	if (write(gopts->pipefd[1], &c, sizeof(c)) != sizeof(c))
+		err("pipe write");
+	if (pthread_join(uffd_mon, NULL))
+		err("join() failed");
+}
+
+/*
+ * Test that deactivated pages become accessible after closing uffd.
+ */
+static void uffd_minor_anon_close_test(uffd_global_test_opts_t *gopts,
+				       uffd_test_args_t *args)
+{
+	unsigned long nr_pages = gopts->nr_pages;
+	unsigned long page_size = gopts->page_size;
+	unsigned long p;
+
+	/* Populate */
+	for (p = 0; p < nr_pages; p++)
+		memset(gopts->area_dst + p * page_size, p % 255 + 1, page_size);
+
+	if (uffd_register(gopts->uffd, gopts->area_dst,
+			  nr_pages * page_size,
+			  false, false, true))
+		err("register failure");
+
+	deactivate_range(gopts->uffd, (uint64_t)gopts->area_dst,
+			 nr_pages * page_size);
+
+	/* Close uffd — should restore protnone PTEs */
+	close(gopts->uffd);
+	gopts->uffd = -1;
+
+	/* All pages should be accessible with original content */
+	for (p = 0; p < nr_pages; p++) {
+		unsigned char *page = (unsigned char *)gopts->area_dst +
+				      p * page_size;
+		unsigned char expected = p % 255 + 1;
+
+		if (page[0] != expected) {
+			uffd_test_fail("page %lu not accessible after close", p);
+			return;
+		}
+	}
+
+	uffd_test_pass();
 }
 
 static sigjmp_buf jbuf, *sigbuf;
@@ -1624,6 +2042,46 @@ uffd_test_case_t uffd_tests[] = {
 		.mem_targets = MEM_SHMEM,
 		/* We can't test MADV_COLLAPSE, so try our luck */
 		.uffd_feature_required = UFFD_FEATURE_MINOR_SHMEM,
+	},
+	{
+		.name = "minor-anon-async",
+		.uffd_fn = uffd_minor_anon_async_test,
+		.mem_targets = MEM_ANON,
+		.uffd_feature_required =
+		UFFD_FEATURE_MINOR_ANON | UFFD_FEATURE_MINOR_ASYNC,
+	},
+	{
+		.name = "minor-anon-sync",
+		.uffd_fn = uffd_minor_anon_sync_test,
+		.mem_targets = MEM_ANON,
+		.uffd_feature_required = UFFD_FEATURE_MINOR_ANON,
+	},
+	{
+		.name = "minor-anon-pagemap",
+		.uffd_fn = uffd_minor_anon_pagemap_test,
+		.mem_targets = MEM_ANON,
+		.uffd_feature_required =
+		UFFD_FEATURE_MINOR_ANON | UFFD_FEATURE_MINOR_ASYNC,
+	},
+	{
+		.name = "minor-anon-gup",
+		.uffd_fn = uffd_minor_anon_gup_test,
+		.mem_targets = MEM_ANON,
+		.uffd_feature_required =
+		UFFD_FEATURE_MINOR_ANON | UFFD_FEATURE_MINOR_ASYNC,
+	},
+	{
+		.name = "minor-anon-async-toggle",
+		.uffd_fn = uffd_minor_anon_async_toggle_test,
+		.mem_targets = MEM_ANON,
+		.uffd_feature_required =
+		UFFD_FEATURE_MINOR_ANON | UFFD_FEATURE_MINOR_ASYNC,
+	},
+	{
+		.name = "minor-anon-close",
+		.uffd_fn = uffd_minor_anon_close_test,
+		.mem_targets = MEM_ANON,
+		.uffd_feature_required = UFFD_FEATURE_MINOR_ANON,
 	},
 	{
 		.name = "sigbus",
