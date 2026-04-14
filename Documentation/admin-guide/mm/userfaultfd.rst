@@ -111,7 +111,11 @@ events, except page fault notifications, may be generated:
 - ``UFFD_FEATURE_MINOR_HUGETLBFS`` indicates that the kernel supports
   ``UFFDIO_REGISTER_MODE_MINOR`` registration for hugetlbfs virtual memory
   areas. ``UFFD_FEATURE_MINOR_SHMEM`` is the analogous feature indicating
-  support for shmem virtual memory areas.
+  support for shmem virtual memory areas. ``UFFD_FEATURE_MINOR_ANON``
+  extends minor fault support to anonymous private memory using
+  PROT_NONE hinting; see the `Anonymous Minor Faults`_ section.
+  ``UFFD_FEATURE_MINOR_ASYNC`` enables asynchronous auto-resolution for
+  anonymous minor faults (requires ``UFFD_FEATURE_MINOR_ANON``).
 
 - ``UFFD_FEATURE_MOVE`` indicates that the kernel supports moving an
   existing page contents from userspace.
@@ -296,6 +300,141 @@ the VM to another physical machine. Since we want the migration to be
 transparent to the guest, we want that same address range to act as if it was
 still poisoned, even though it's on a new physical host which ostensibly
 doesn't have a memory error in the exact same spot.
+
+Anonymous Minor Faults
+----------------------
+
+``UFFD_FEATURE_MINOR_ANON`` enables ``UFFDIO_REGISTER_MODE_MINOR`` on
+anonymous private memory. Unlike shmem/hugetlbfs minor faults (where a page
+exists in the page cache but has no PTE), anonymous minor faults use the
+PROT_NONE hinting mechanism: pages remain resident in memory with their PFNs
+preserved in the PTEs, but access permissions are removed so the next access
+triggers a fault.
+
+This is designed for VM memory managers that need to track the working set of
+anonymous guest memory for cold page eviction to tiered or remote storage.
+
+**Setup:**
+
+1. Open a userfaultfd and enable ``UFFD_FEATURE_MINOR_ANON`` (and optionally
+   ``UFFD_FEATURE_MINOR_ASYNC``) via ``UFFDIO_API``.
+
+2. Register the guest memory range with ``UFFDIO_REGISTER_MODE_MINOR``
+   (and ``UFFDIO_REGISTER_MODE_MISSING`` if evicted pages will need to be
+   fetched back from storage).
+
+**Deactivation:**
+
+Use ``UFFDIO_DEACTIVATE`` to mark pages as inaccessible. This ioctl takes a
+``struct uffdio_range`` and sets PROT_NONE on all present PTEs in the range,
+using the same mechanism as NUMA balancing. Pages stay resident and their
+physical frames are preserved — only access permissions are removed.
+
+**Fault Handling:**
+
+When a deactivated page is accessed:
+
+- **Sync mode** (default): The faulting thread blocks and a
+  ``UFFD_PAGEFAULT_FLAG_MINOR`` message is delivered to the userfaultfd
+  handler. The handler resolves the fault with ``UFFDIO_CONTINUE``, which
+  restores the PTE permissions and wakes the faulting thread.
+
+- **Async mode** (``UFFD_FEATURE_MINOR_ASYNC``): The kernel automatically
+  restores PTE permissions and the thread continues without blocking. No
+  message is delivered to the handler.
+
+**Cold Page Detection with PAGEMAP_SCAN:**
+
+After deactivating a range and letting the application run, use the
+``PAGEMAP_SCAN`` ioctl on ``/proc/pid/pagemap`` with the
+``PAGE_IS_UFFD_DEACTIVATED`` category flag to efficiently find pages that were
+never re-accessed (cold pages)::
+
+    struct pm_scan_arg arg = {
+        .size = sizeof(arg),
+        .start = guest_mem_start,
+        .end = guest_mem_end,
+        .vec = (uint64_t)regions,
+        .vec_len = regions_len,
+        .category_mask = PAGE_IS_UFFD_DEACTIVATED,
+        .return_mask = PAGE_IS_UFFD_DEACTIVATED,
+    };
+    long n = ioctl(pagemap_fd, PAGEMAP_SCAN, &arg);
+
+The returned ``page_region`` array contains contiguous cold ranges that can
+then be evicted.
+
+**Cleanup:**
+
+When the userfaultfd is closed or the range is unregistered, all protnone
+PTEs are automatically restored to their normal VMA permissions. This
+prevents pages from becoming permanently inaccessible.
+
+**Interaction with NUMA Balancing:**
+
+NUMA balancing is automatically disabled on anonymous VMAs registered with
+``UFFDIO_REGISTER_MODE_MINOR``, since both mechanisms use PROT_NONE PTEs
+as access hints and would interfere with each other. Shmem VMAs are not
+affected since ``UFFDIO_DEACTIVATE`` zaps PTEs there instead of using
+PROT_NONE.
+
+**VMM Working Set Tracking Workflow:**
+
+A typical VMM lifecycle for cold page eviction to tiered storage::
+
+    /* One-time setup */
+    uffd = userfaultfd(O_CLOEXEC | O_NONBLOCK);
+    ioctl(uffd, UFFDIO_API, &(struct uffdio_api){
+        .api = UFFD_API,
+        .features = UFFD_FEATURE_MINOR_ANON |
+                    UFFD_FEATURE_MINOR_ASYNC,
+    });
+    ioctl(uffd, UFFDIO_REGISTER, &(struct uffdio_register){
+        .range = { guest_mem, guest_size },
+        .mode = UFFDIO_REGISTER_MODE_MINOR |
+                UFFDIO_REGISTER_MODE_MISSING,
+    });
+
+    /* Tracking loop */
+    while (vm_running) {
+        /* 1. Detection phase (async — no vCPU stalls) */
+        ioctl(uffd, UFFDIO_DEACTIVATE, &full_range);
+        sleep(tracking_interval);
+
+        /* 2. Find cold pages */
+        ioctl(pagemap_fd, PAGEMAP_SCAN, &(struct pm_scan_arg){
+            .category_mask = PAGE_IS_UFFD_DEACTIVATED,
+            ...
+        });
+
+        /* 3. Switch to sync for safe eviction */
+        ioctl(uffd, UFFDIO_SET_MODE,
+              &(struct uffdio_set_mode){
+                  .disable = UFFD_FEATURE_MINOR_ASYNC });
+
+        /* 4. Evict cold pages (vCPU faults block in handler) */
+        for each cold range:
+            pwrite(storage_fd, cold_addr, len, offset);
+            madvise(cold_addr, len, MADV_DONTNEED);
+
+        /* 5. Resume async tracking */
+        ioctl(uffd, UFFDIO_SET_MODE,
+              &(struct uffdio_set_mode){
+                  .enable = UFFD_FEATURE_MINOR_ASYNC });
+    }
+
+During step 4, if a vCPU accesses a cold page being evicted, it blocks
+with a ``UFFD_PAGEFAULT_FLAG_MINOR`` fault. The handler can either let it
+wait (the eviction completes, ``MADV_DONTNEED`` fires, the fault retries as
+``MISSING`` and is resolved with ``UFFDIO_COPY`` from storage) or resolve
+it immediately with ``UFFDIO_CONTINUE``.
+
+The same workflow applies to shmem-backed guest memory
+(``UFFD_FEATURE_MINOR_SHMEM``). The only difference is the
+``PAGEMAP_SCAN`` mask for cold page detection: use
+``!PAGE_IS_PRESENT`` instead of ``PAGE_IS_UFFD_DEACTIVATED``, since
+``UFFDIO_DEACTIVATE`` zaps PTEs on shmem (pages stay in page cache)
+rather than setting PROT_NONE.
 
 QEMU/KVM
 ========
