@@ -79,6 +79,7 @@
 #define _UFFDIO_WRITEPROTECT		(0x06)
 #define _UFFDIO_CONTINUE		(0x07)
 #define _UFFDIO_POISON			(0x08)
+#define _UFFDIO_DEACTIVATE		(0x09)
 #define _UFFDIO_API			(0x3F)
 
 /* userfaultfd ioctl ids */
@@ -103,6 +104,8 @@
 				      struct uffdio_continue)
 #define UFFDIO_POISON		_IOWR(UFFDIO, _UFFDIO_POISON, \
 				      struct uffdio_poison)
+#define UFFDIO_DEACTIVATE	_IOR(UFFDIO, _UFFDIO_DEACTIVATE,	\
+				     struct uffdio_range)
 
 /* read() structure */
 struct uffd_msg {
@@ -230,6 +233,18 @@ struct uffdio_api {
 	 *
 	 * UFFD_FEATURE_MOVE indicates that the kernel supports moving an
 	 * existing page contents from userspace.
+	 *
+	 * UFFD_FEATURE_MINOR_ANON indicates that minor fault interception
+	 * is supported for anonymous private memory.  Pages are made
+	 * inaccessible via UFFDIO_DEACTIVATE (sets PROT_NONE while
+	 * preserving the page) and faults are delivered when the pages
+	 * are re-accessed.
+	 *
+	 * UFFD_FEATURE_MINOR_ASYNC indicates asynchronous minor fault
+	 * mode.  When set, faults on deactivated pages are auto-resolved
+	 * by the kernel (PTE permissions restored immediately) without
+	 * delivering a message to the userfaultfd handler.  Use
+	 * PAGEMAP_SCAN to find pages that were not re-accessed.
 	 */
 #define UFFD_FEATURE_PAGEFAULT_FLAG_WP		(1<<0)
 #define UFFD_FEATURE_EVENT_FORK			(1<<1)
@@ -248,6 +263,8 @@ struct uffdio_api {
 #define UFFD_FEATURE_POISON			(1<<14)
 #define UFFD_FEATURE_WP_ASYNC			(1<<15)
 #define UFFD_FEATURE_MOVE			(1<<16)
+#define UFFD_FEATURE_MINOR_ANON			(1<<17)
+#define UFFD_FEATURE_MINOR_ASYNC		(1<<18)
 	__u64 features;
 
 	__u64 ioctls;
