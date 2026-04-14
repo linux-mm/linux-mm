@@ -2242,6 +2242,30 @@ static inline bool can_change_pmd_writable(struct vm_area_struct *vma,
 	return pmd_dirty(pmd);
 }
 
+vm_fault_t do_huge_pmd_uffd_minor(struct vm_fault *vmf)
+{
+	struct vm_area_struct *vma = vmf->vma;
+
+	if (userfaultfd_minor_async(vma)) {
+		pmd_t pmd;
+
+		vmf->ptl = pmd_lock(vma->vm_mm, vmf->pmd);
+		if (unlikely(!pmd_same(pmdp_get(vmf->pmd), vmf->orig_pmd))) {
+			spin_unlock(vmf->ptl);
+			return 0;
+		}
+		pmd = pmd_modify(vmf->orig_pmd, vma->vm_page_prot);
+		pmd = pmd_mkyoung(pmd);
+		set_pmd_at(vma->vm_mm, vmf->address & HPAGE_PMD_MASK,
+			   vmf->pmd, pmd);
+		update_mmu_cache_pmd(vma, vmf->address, vmf->pmd);
+		spin_unlock(vmf->ptl);
+		return 0;
+	}
+
+	return handle_userfault(vmf, VM_UFFD_MINOR);
+}
+
 /* NUMA hinting page fault entry point for trans huge pmds */
 vm_fault_t do_huge_pmd_numa_page(struct vm_fault *vmf)
 {
