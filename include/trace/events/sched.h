@@ -728,7 +728,8 @@ DEFINE_EVENT(sched_numa_pair_template, sched_swap_numa,
 	EM( NUMAB_SKIP_SCAN_DELAY,		"scan_delay" )	\
 	EM( NUMAB_SKIP_PID_INACTIVE,		"pid_inactive" )	\
 	EM( NUMAB_SKIP_IGNORE_PID,		"ignore_pid_inactive" )		\
-	EMe(NUMAB_SKIP_SEQ_COMPLETED,		"seq_completed" )
+	EM( NUMAB_SKIP_SEQ_COMPLETED,		"seq_completed" )	\
+	EMe(NUMAB_SKIP_UFFD_MINOR,		"uffd_minor" )
 
 /* Redefine for export. */
 #undef EM

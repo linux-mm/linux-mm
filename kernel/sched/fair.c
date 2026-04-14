@@ -25,6 +25,7 @@
 #include <linux/hugetlb_inline.h>
 #include <linux/jiffies.h>
 #include <linux/mm_api.h>
+#include <linux/userfaultfd_k.h>
 #include <linux/highmem.h>
 #include <linux/spinlock_api.h>
 #include <linux/cpumask_api.h>
@@ -3548,6 +3549,18 @@ retry_pids:
 		if (!vma_migratable(vma) || !vma_policy_mof(vma) ||
 			is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_MIXEDMAP)) {
 			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_UNSUITABLE);
+			continue;
+		}
+
+		/*
+		 * Skip anonymous VMAs registered for userfaultfd minor faults.
+		 * Both NUMA balancing and uffd use protnone PTEs on anonymous
+		 * memory — let uffd own the hinting. For shmem, UFFDIO_DEACTIVATE
+		 * zaps PTEs entirely (no protnone conflict), so NUMA scanning
+		 * can proceed normally.
+		 */
+		if (vma_is_anonymous(vma) && userfaultfd_minor(vma)) {
+			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_UFFD_MINOR);
 			continue;
 		}
 
