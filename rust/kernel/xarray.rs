@@ -217,6 +217,28 @@ impl<'a, T: ForeignOwnable> Guard<'a, T> {
         unsafe { T::try_from_foreign(ptr) }
     }
 
+    /// Finds the first present entry.
+    ///
+    /// Returns the index of the first present entry, or `None` if the array is empty.
+    pub fn find(&mut self) -> Option<usize> {
+        let mut index = 0usize;
+        // SAFETY: `self.xa.xa` is always valid by the type invariant, and we hold the lock.
+        let ptr = unsafe {
+            bindings::xa_find(
+                self.xa.xa.get(),
+                &mut index,
+                usize::MAX,
+                bindings::XA_PRESENT,
+            )
+        };
+
+        if ptr.is_null() {
+            None
+        } else {
+            Some(index)
+        }
+    }
+
     /// Stores an element at the given index.
     ///
     /// May drop the lock if needed to allocate memory, and then reacquire it afterwards.
