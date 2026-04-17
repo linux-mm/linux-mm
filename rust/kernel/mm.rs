@@ -149,6 +149,13 @@ impl Mm {
             None
         }
     }
+
+    /// Returns task size for this mm_struct.
+    #[inline]
+    pub fn task_size(&self) -> u64 {
+        // SAFETY: self.as_raw() is a valid pointer to an mm_struct.
+        unsafe { (*self.as_raw()).__bindgen_anon_1.task_size as u64 }
+    }
 }
 
 // These methods require `mm_users` to be non-zero.
