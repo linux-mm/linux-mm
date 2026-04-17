@@ -161,13 +161,13 @@ impl<T: ForeignOwnable> Drop for Guard<'_, T> {
     }
 }
 
-/// The error returned by [`store`](Guard::store).
+/// The error returned by [`Guard::store`] and [`Guard::alloc`].
 ///
-/// Contains the underlying error and the value that was not stored.
+/// Contains the underlying error and the value that was not stored or allocated.
 pub struct StoreError<T> {
     /// The error that occurred.
     pub error: Error,
-    /// The value that was not stored.
+    /// The value that was not stored or allocated.
     pub value: T,
 }
 
