@@ -48,3 +48,5 @@ pub const SZ_512M: usize = bindings::SZ_512M as usize;
 pub const SZ_1G: usize = bindings::SZ_1G as usize;
 /// 0x80000000
 pub const SZ_2G: usize = bindings::SZ_2G as usize;
+/// 0x100000000
+pub const SZ_4G: usize = SZ_2G * 2;
