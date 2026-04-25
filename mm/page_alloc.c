@@ -2544,6 +2544,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 		 * pages are ordered properly.
 		 */
 		list_add_tail(&page->pcp_list, list);
+		trace_mm_page_pcpu_refill(page, order, migratetype);
 	}
 	spin_unlock_irqrestore(&zone->lock, flags);
 
