@@ -259,6 +259,7 @@ enum node_stat_item {
 			   only modified from process context */
 	NR_FILE_PAGES,
 	NR_FILE_DIRTY,
+	NR_DONTCACHE_DIRTY,
 	NR_WRITEBACK,
 	NR_SHMEM,		/* shmem pages (included tmpfs/GEM pages) */
 	NR_SHMEM_THPS,
