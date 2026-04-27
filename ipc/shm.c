@@ -855,7 +855,7 @@ static inline unsigned long copy_shmid_to_user(void __user *buf, struct shmid64_
 {
 	switch (version) {
 	case IPC_64:
-		return copy_to_user(buf, in, sizeof(*in));
+		return copy_to_user_partial(buf, in, sizeof(*in));
 	case IPC_OLD:
 	    {
 		struct shmid_ds out;
@@ -870,7 +870,7 @@ static inline unsigned long copy_shmid_to_user(void __user *buf, struct shmid64_
 		out.shm_lpid	= in->shm_lpid;
 		out.shm_nattch	= in->shm_nattch;
 
-		return copy_to_user(buf, &out, sizeof(out));
+		return copy_to_user_partial(buf, &out, sizeof(out));
 	    }
 	default:
 		return -EINVAL;
@@ -907,7 +907,7 @@ static inline unsigned long copy_shminfo_to_user(void __user *buf, struct shminf
 {
 	switch (version) {
 	case IPC_64:
-		return copy_to_user(buf, in, sizeof(*in));
+		return copy_to_user_partial(buf, in, sizeof(*in));
 	case IPC_OLD:
 	    {
 		struct shminfo out;
@@ -922,7 +922,7 @@ static inline unsigned long copy_shminfo_to_user(void __user *buf, struct shminf
 		out.shmseg	= in->shmseg;
 		out.shmall	= in->shmall;
 
-		return copy_to_user(buf, &out, sizeof(out));
+		return copy_to_user_partial(buf, &out, sizeof(out));
 	    }
 	default:
 		return -EINVAL;
@@ -1361,7 +1361,7 @@ static int copy_compat_shminfo_to_user(void __user *buf, struct shminfo64 *in,
 		info.shmmni = in->shmmni;
 		info.shmseg = in->shmseg;
 		info.shmall = in->shmall;
-		return copy_to_user(buf, &info, sizeof(info));
+		return copy_to_user_partial(buf, &info, sizeof(info));
 	} else {
 		struct shminfo info;
 		memset(&info, 0, sizeof(info));
@@ -1370,7 +1370,7 @@ static int copy_compat_shminfo_to_user(void __user *buf, struct shminfo64 *in,
 		info.shmmni = in->shmmni;
 		info.shmseg = in->shmseg;
 		info.shmall = in->shmall;
-		return copy_to_user(buf, &info, sizeof(info));
+		return copy_to_user_partial(buf, &info, sizeof(info));
 	}
 }
 
@@ -1386,7 +1386,7 @@ static int put_compat_shm_info(struct shm_info *ip,
 	info.shm_swp = ip->shm_swp;
 	info.swap_attempts = ip->swap_attempts;
 	info.swap_successes = ip->swap_successes;
-	return copy_to_user(uip, &info, sizeof(info));
+	return copy_to_user_partial(uip, &info, sizeof(info));
 }
 
 static int copy_compat_shmid_to_user(void __user *buf, struct shmid64_ds *in,
@@ -1406,7 +1406,7 @@ static int copy_compat_shmid_to_user(void __user *buf, struct shmid64_ds *in,
 		v.shm_nattch = in->shm_nattch;
 		v.shm_cpid = in->shm_cpid;
 		v.shm_lpid = in->shm_lpid;
-		return copy_to_user(buf, &v, sizeof(v));
+		return copy_to_user_partial(buf, &v, sizeof(v));
 	} else {
 		struct compat_shmid_ds v;
 		memset(&v, 0, sizeof(v));
@@ -1419,7 +1419,7 @@ static int copy_compat_shmid_to_user(void __user *buf, struct shmid64_ds *in,
 		v.shm_nattch = in->shm_nattch;
 		v.shm_cpid = in->shm_cpid;
 		v.shm_lpid = in->shm_lpid;
-		return copy_to_user(buf, &v, sizeof(v));
+		return copy_to_user_partial(buf, &v, sizeof(v));
 	}
 }
 
