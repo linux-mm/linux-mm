@@ -67,6 +67,24 @@ FIXTURE_TEARDOWN(migration)
 	free(self->pids);
 }
 
+static bool kill_children(FIXTURE_DATA(migration) * self)
+{
+	int i, status;
+	pid_t pid;
+
+	for (i = 0; i < self->nthreads; i++) {
+		pid = self->pids[i];
+		if (kill(pid, SIGTERM))
+			return false;
+		if (pid != waitpid(pid, &status, 0))
+			return false;
+		if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGTERM)
+			return false;
+	}
+
+	return true;
+}
+
 int migrate(uint64_t *ptr, int n1, int n2)
 {
 	int ret, tmp;
@@ -160,20 +178,14 @@ TEST_F_TIMEOUT(migration, shared_anon, 2*RUNTIME)
 	memset(ptr, 0xde, TWOMEG);
 	for (i = 0; i < self->nthreads; i++) {
 		pid = fork();
-		if (!pid) {
-			prctl(PR_SET_PDEATHSIG, SIGHUP);
-			/* Parent may have died before prctl so check now. */
-			if (getppid() == 1)
-				kill(getpid(), SIGHUP);
+		if (!pid)
 			access_mem(ptr);
-		} else {
+		else
 			self->pids[i] = pid;
-		}
 	}
 
 	ASSERT_EQ(migrate(ptr, self->n1, self->n2), 0);
-	for (i = 0; i < self->nthreads; i++)
-		ASSERT_EQ(kill(self->pids[i], SIGTERM), 0);
+	ASSERT_EQ(kill_children(self), true);
 }
 
 /*
@@ -236,20 +248,14 @@ TEST_F_TIMEOUT(migration, shared_anon_thp, 2*RUNTIME)
 	memset(ptr, 0xde, pmdsize);
 	for (i = 0; i < self->nthreads; i++) {
 		pid = fork();
-		if (!pid) {
-			prctl(PR_SET_PDEATHSIG, SIGHUP);
-			/* Parent may have died before prctl so check now. */
-			if (getppid() == 1)
-				kill(getpid(), SIGHUP);
+		if (!pid)
 			access_mem(ptr);
-		} else {
+		else
 			self->pids[i] = pid;
-		}
 	}
 
 	ASSERT_EQ(migrate(ptr, self->n1, self->n2), 0);
-	for (i = 0; i < self->nthreads; i++)
-		ASSERT_EQ(kill(self->pids[i], SIGTERM), 0);
+	ASSERT_EQ(kill_children(self), true);
 }
 
 /*
@@ -300,20 +306,14 @@ TEST_F_TIMEOUT(migration, shared_anon_htlb, 2*RUNTIME)
 	memset(ptr, 0xde, hugepage_size);
 	for (i = 0; i < self->nthreads; i++) {
 		pid = fork();
-		if (!pid) {
-			prctl(PR_SET_PDEATHSIG, SIGHUP);
-			/* Parent may have died before prctl so check now. */
-			if (getppid() == 1)
-				kill(getpid(), SIGHUP);
+		if (!pid)
 			access_mem(ptr);
-		} else {
+		else
 			self->pids[i] = pid;
-		}
 	}
 
 	ASSERT_EQ(migrate(ptr, self->n1, self->n2), 0);
-	for (i = 0; i < self->nthreads; i++)
-		ASSERT_EQ(kill(self->pids[i], SIGTERM), 0);
+	ASSERT_EQ(kill_children(self), true);
 }
 
 TEST_HARNESS_MAIN
