@@ -850,6 +850,19 @@ void folio_migrate_flags(struct folio *newfolio, struct folio *folio)
 }
 EXPORT_SYMBOL(folio_migrate_flags);
 
+/*
+ * To record some information during migration, we use the migrate_info
+ * field of struct folio of the newly allocated destination folio.
+ * This is safe because nobody is using it except us.
+ */
+enum {
+	FOLIO_WAS_MAPPED = BIT(0),
+	FOLIO_WAS_MLOCKED = BIT(1),
+	FOLIO_ALREADY_COPIED = BIT(2),
+	FOLIO_OLD_STATES = FOLIO_WAS_MAPPED | FOLIO_WAS_MLOCKED |
+			   FOLIO_ALREADY_COPIED,
+};
+
 /************************************************************
  *                    Migration functions
  ***********************************************************/
@@ -859,14 +872,20 @@ static int __migrate_folio(struct address_space *mapping, struct folio *dst,
 			   enum migrate_mode mode)
 {
 	int rc, expected_count = folio_expected_ref_count(src) + 1;
+	bool already_copied = (dst->migrate_info & FOLIO_ALREADY_COPIED);
+
+	if (already_copied)
+		dst->migrate_info = 0;
 
 	/* Check whether src does not have extra refs before we do more work */
 	if (folio_ref_count(src) != expected_count)
 		return -EAGAIN;
 
-	rc = folio_mc_copy(dst, src);
-	if (unlikely(rc))
-		return rc;
+	if (!already_copied) {
+		rc = folio_mc_copy(dst, src);
+		if (unlikely(rc))
+			return rc;
+	}
 
 	rc = __folio_migrate_mapping(mapping, dst, src, expected_count);
 	if (rc)
@@ -1090,13 +1109,16 @@ static int fallback_migrate_folio(struct address_space *mapping,
  *     0 - success
  */
 static int move_to_new_folio(struct folio *dst, struct folio *src,
-				enum migrate_mode mode)
+		enum migrate_mode mode, bool already_copied)
 {
 	struct address_space *mapping = folio_mapping(src);
 	int rc = -EAGAIN;
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(src), src);
 	VM_BUG_ON_FOLIO(!folio_test_locked(dst), dst);
+
+	if (already_copied)
+		dst->migrate_info = FOLIO_ALREADY_COPIED;
 
 	if (!mapping)
 		rc = migrate_folio(mapping, dst, src, mode);
@@ -1128,17 +1150,6 @@ static int move_to_new_folio(struct folio *dst, struct folio *src,
 	}
 	return rc;
 }
-
-/*
- * To record some information during migration, we use the migrate_info
- * field of struct folio of the newly allocated destination folio.
- * This is safe because nobody is using it except us.
- */
-enum {
-	FOLIO_WAS_MAPPED = BIT(0),
-	FOLIO_WAS_MLOCKED = BIT(1),
-	FOLIO_OLD_STATES = FOLIO_WAS_MAPPED | FOLIO_WAS_MLOCKED,
-};
 
 static void __migrate_folio_record(struct folio *dst,
 		int old_folio_state, struct anon_vma *anon_vma)
@@ -1353,7 +1364,7 @@ out:
 static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 			      struct folio *src, struct folio *dst,
 			      enum migrate_mode mode, enum migrate_reason reason,
-			      struct list_head *ret)
+			      struct list_head *ret, bool already_copied)
 {
 	int rc;
 	int old_folio_state = 0;
@@ -1379,7 +1390,7 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 		src_partially_mapped = folio_test_partially_mapped(src);
 	}
 
-	rc = move_to_new_folio(dst, src, mode);
+	rc = move_to_new_folio(dst, src, mode, already_copied);
 	if (rc)
 		goto out;
 
@@ -1536,7 +1547,7 @@ static int unmap_and_move_huge_page(new_folio_t get_new_folio,
 	}
 
 	if (!folio_mapped(src))
-		rc = move_to_new_folio(dst, src, mode);
+		rc = move_to_new_folio(dst, src, mode, false);
 
 	if (page_was_mapped)
 		remove_migration_ptes(src, !rc ? dst : src, ttu);
@@ -1720,7 +1731,7 @@ static void migrate_folios_move(struct list_head *src_folios,
 		struct list_head *ret_folios,
 		struct migrate_pages_stats *stats,
 		int *retry, int *thp_retry, int *nr_failed,
-		int *nr_retry_pages)
+		int *nr_retry_pages, bool already_copied)
 {
 	struct folio *folio, *folio2, *dst, *dst2;
 	bool is_thp;
@@ -1737,7 +1748,7 @@ static void migrate_folios_move(struct list_head *src_folios,
 
 		rc = migrate_folio_move(put_new_folio, private,
 				folio, dst, mode,
-				reason, ret_folios);
+				reason, ret_folios, already_copied);
 		/*
 		 * The rules are:
 		 *	0: folio will be freed
@@ -1994,7 +2005,7 @@ move:
 		migrate_folios_move(&unmap_folios, &dst_folios,
 				put_new_folio, private, mode, reason,
 				ret_folios, stats, &retry, &thp_retry,
-				&nr_failed, &nr_retry_pages);
+				&nr_failed, &nr_retry_pages, false);
 	}
 	nr_failed += retry;
 	stats->nr_thp_failed += thp_retry;
