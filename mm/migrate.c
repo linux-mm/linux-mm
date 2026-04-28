@@ -43,6 +43,7 @@
 #include <linux/sched/sysctl.h>
 #include <linux/memory-tiers.h>
 #include <linux/pagewalk.h>
+#include <linux/jump_label.h>
 
 #include <asm/tlbflush.h>
 
@@ -50,6 +51,8 @@
 
 #include "internal.h"
 #include "swap.h"
+
+DEFINE_STATIC_KEY_FALSE(migrate_offload_enabled);
 
 static const struct movable_operations *offline_movable_ops;
 static const struct movable_operations *zsmalloc_movable_ops;
@@ -1724,6 +1727,12 @@ static int migrate_hugetlbs(struct list_head *from, new_folio_t get_new_folio,
 	return nr_failed;
 }
 
+/* movable_ops folios have their own migrate path */
+static bool folio_supports_batch_copy(struct folio *folio)
+{
+	return likely(!page_has_movable_ops(&folio->page));
+}
+
 static void migrate_folios_move(struct list_head *src_folios,
 		struct list_head *dst_folios,
 		free_folio_t put_new_folio, unsigned long private,
@@ -1752,7 +1761,7 @@ static void migrate_folios_move(struct list_head *src_folios,
 		/*
 		 * The rules are:
 		 *	0: folio will be freed
-		 *	-EAGAIN: stay on the unmap_folios list
+		 *	-EAGAIN: stay on the src_folios list
 		 *	Other errno: put on ret_folios list
 		 */
 		switch (rc) {
@@ -1823,8 +1832,12 @@ static int migrate_pages_batch(struct list_head *from,
 	bool is_large = false;
 	struct folio *folio, *folio2, *dst = NULL;
 	int rc, rc_saved = 0, nr_pages;
-	LIST_HEAD(unmap_folios);
-	LIST_HEAD(dst_folios);
+	unsigned int nr_batch = 0;
+	bool batch_copied = false;
+	LIST_HEAD(unmap_batch);
+	LIST_HEAD(dst_batch);
+	LIST_HEAD(unmap_single);
+	LIST_HEAD(dst_single);
 	bool nosplit = (reason == MR_NUMA_MISPLACED);
 
 	VM_WARN_ON_ONCE(mode != MIGRATE_ASYNC &&
@@ -1919,8 +1932,8 @@ static int migrate_pages_batch(struct list_head *from,
 					private, folio, &dst, mode, ret_folios);
 			/*
 			 * The rules are:
-			 *	0: folio will be put on unmap_folios list,
-			 *	   dst folio put on dst_folios list
+			 *	0: folio put on unmap_batch or unmap_single,
+			 *	   dst folio put on dst_batch or dst_single
 			 *	-EAGAIN: stay on the from list
 			 *	-ENOMEM: stay on the from list
 			 *	Other errno: put on ret_folios list
@@ -1961,7 +1974,7 @@ static int migrate_pages_batch(struct list_head *from,
 				/* nr_failed isn't updated for not used */
 				stats->nr_thp_failed += thp_retry;
 				rc_saved = rc;
-				if (list_empty(&unmap_folios))
+				if (list_empty(&unmap_batch) && list_empty(&unmap_single))
 					goto out;
 				else
 					goto move;
@@ -1971,8 +1984,15 @@ static int migrate_pages_batch(struct list_head *from,
 				nr_retry_pages += nr_pages;
 				break;
 			case 0:
-				list_move_tail(&folio->lru, &unmap_folios);
-				list_add_tail(&dst->lru, &dst_folios);
+				if (static_branch_unlikely(&migrate_offload_enabled) &&
+				    folio_supports_batch_copy(folio)) {
+					list_move_tail(&folio->lru, &unmap_batch);
+					list_add_tail(&dst->lru, &dst_batch);
+					nr_batch++;
+				} else {
+					list_move_tail(&folio->lru, &unmap_single);
+					list_add_tail(&dst->lru, &dst_single);
+				}
 				break;
 			default:
 				/*
@@ -1995,17 +2015,28 @@ move:
 	/* Flush TLBs for all unmapped folios */
 	try_to_unmap_flush();
 
+	/* Batch-copy eligible folios before the move phase */
+	if (!list_empty(&unmap_batch)) {
+		rc = folios_mc_copy(&dst_batch, &unmap_batch, nr_batch);
+		batch_copied = (rc == 0);
+	}
+
 	retry = 1;
 	for (pass = 0; pass < nr_pass && retry; pass++) {
 		retry = 0;
 		thp_retry = 0;
 		nr_retry_pages = 0;
 
-		/* Move the unmapped folios */
-		migrate_folios_move(&unmap_folios, &dst_folios,
-				put_new_folio, private, mode, reason,
-				ret_folios, stats, &retry, &thp_retry,
-				&nr_failed, &nr_retry_pages, false);
+		if (!list_empty(&unmap_batch))
+			migrate_folios_move(&unmap_batch, &dst_batch, put_new_folio,
+					private, mode, reason, ret_folios, stats,
+					&retry, &thp_retry, &nr_failed,
+					&nr_retry_pages, batch_copied);
+		if (!list_empty(&unmap_single))
+			migrate_folios_move(&unmap_single, &dst_single,	put_new_folio,
+					private, mode, reason, ret_folios, stats,
+					&retry, &thp_retry, &nr_failed,
+					&nr_retry_pages, false);
 	}
 	nr_failed += retry;
 	stats->nr_thp_failed += thp_retry;
@@ -2014,7 +2045,9 @@ move:
 	rc = rc_saved ? : nr_failed;
 out:
 	/* Cleanup remaining folios */
-	migrate_folios_undo(&unmap_folios, &dst_folios,
+	migrate_folios_undo(&unmap_batch, &dst_batch,
+			put_new_folio, private, ret_folios);
+	migrate_folios_undo(&unmap_single, &dst_single,
 			put_new_folio, private, ret_folios);
 
 	return rc;

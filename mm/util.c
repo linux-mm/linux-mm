@@ -778,6 +778,36 @@ int folio_mc_copy(struct folio *dst, struct folio *src)
 }
 EXPORT_SYMBOL(folio_mc_copy);
 
+/**
+ * folios_mc_copy - Copy the contents of list of folios.
+ * @dst_list: destination folio list.
+ * @src_list: source folio list.
+ * @folios_cnt: unused here, present for callback signature compatibility.
+ *
+ * Walks list of src and dst folios in lockstep and copies folio
+ * content via folio_mc_copy(). The caller must ensure both lists have
+ * the same number of entries. This may sleep.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int folios_mc_copy(struct list_head *dst_list, struct list_head *src_list,
+		unsigned int __always_unused folios_cnt)
+{
+	struct folio *src, *dst;
+	int ret;
+
+	dst = list_first_entry(dst_list, struct folio, lru);
+	list_for_each_entry(src, src_list, lru) {
+		ret = folio_mc_copy(dst, src);
+		if (ret)
+			return ret;
+		dst = list_next_entry(dst, lru);
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(folios_mc_copy);
+
 int sysctl_overcommit_memory __read_mostly = OVERCOMMIT_GUESS;
 static int sysctl_overcommit_ratio __read_mostly = 50;
 static unsigned long sysctl_overcommit_kbytes __read_mostly;
