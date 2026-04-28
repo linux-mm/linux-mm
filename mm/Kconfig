@@ -647,6 +647,12 @@ config MIGRATION
 config DEVICE_MIGRATION
 	def_bool MIGRATION && ZONE_DEVICE
 
+# Page-migration batch-copy offload infrastructure.
+# Selected by migrator drivers (e.g. CONFIG_DCBM_DMA).
+config MIGRATION_COPY_OFFLOAD
+	bool
+	depends on MIGRATION
+
 config ARCH_ENABLE_HUGEPAGE_MIGRATION
 	bool
 

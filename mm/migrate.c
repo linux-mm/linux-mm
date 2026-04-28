@@ -44,6 +44,8 @@
 #include <linux/memory-tiers.h>
 #include <linux/pagewalk.h>
 #include <linux/jump_label.h>
+#include <linux/static_call.h>
+#include <linux/migrate_copy_offload.h>
 
 #include <asm/tlbflush.h>
 
@@ -53,6 +55,51 @@
 #include "swap.h"
 
 DEFINE_STATIC_KEY_FALSE(migrate_offload_enabled);
+
+#ifdef CONFIG_MIGRATION_COPY_OFFLOAD
+DEFINE_SRCU(migrate_offload_srcu);
+DEFINE_STATIC_CALL(migrate_offload_copy, folios_mc_copy);
+
+static bool migrate_offload_do_batch(int reason)
+{
+	if (!static_branch_unlikely(&migrate_offload_enabled))
+		return false;
+
+	switch (reason) {
+	case MR_COMPACTION:
+	case MR_SYSCALL:
+	case MR_DEMOTION:
+	case MR_NUMA_MISPLACED:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static int migrate_offload_batch_copy(struct list_head *dst_batch,
+				      struct list_head *src_batch,
+				      unsigned int nr_batch)
+{
+	int idx, rc;
+
+	idx = srcu_read_lock(&migrate_offload_srcu);
+	rc = static_call(migrate_offload_copy)(dst_batch, src_batch, nr_batch);
+	srcu_read_unlock(&migrate_offload_srcu, idx);
+	return rc;
+}
+#else
+static bool migrate_offload_do_batch(int reason)
+{
+	return false;
+}
+
+static int migrate_offload_batch_copy(struct list_head *dst_batch,
+				      struct list_head *src_batch,
+				      unsigned int nr_batch)
+{
+	return -EOPNOTSUPP;
+}
+#endif
 
 static const struct movable_operations *offline_movable_ops;
 static const struct movable_operations *zsmalloc_movable_ops;
@@ -1833,7 +1880,7 @@ static int migrate_pages_batch(struct list_head *from,
 	struct folio *folio, *folio2, *dst = NULL;
 	int rc, rc_saved = 0, nr_pages;
 	unsigned int nr_batch = 0;
-	bool batch_copied = false;
+	bool do_batch = false, batch_copied = false;
 	LIST_HEAD(unmap_batch);
 	LIST_HEAD(dst_batch);
 	LIST_HEAD(unmap_single);
@@ -1842,6 +1889,8 @@ static int migrate_pages_batch(struct list_head *from,
 
 	VM_WARN_ON_ONCE(mode != MIGRATE_ASYNC &&
 			!list_empty(from) && !list_is_singular(from));
+
+	do_batch = migrate_offload_do_batch(reason);
 
 	for (pass = 0; pass < nr_pass && retry; pass++) {
 		retry = 0;
@@ -1984,8 +2033,7 @@ static int migrate_pages_batch(struct list_head *from,
 				nr_retry_pages += nr_pages;
 				break;
 			case 0:
-				if (static_branch_unlikely(&migrate_offload_enabled) &&
-				    folio_supports_batch_copy(folio)) {
+				if (do_batch && folio_supports_batch_copy(folio)) {
 					list_move_tail(&folio->lru, &unmap_batch);
 					list_add_tail(&dst->lru, &dst_batch);
 					nr_batch++;
@@ -2017,7 +2065,8 @@ move:
 
 	/* Batch-copy eligible folios before the move phase */
 	if (!list_empty(&unmap_batch)) {
-		rc = folios_mc_copy(&dst_batch, &unmap_batch, nr_batch);
+		rc = migrate_offload_batch_copy(&dst_batch, &unmap_batch,
+						nr_batch);
 		batch_copied = (rc == 0);
 	}
 
