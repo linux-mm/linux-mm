@@ -1,0 +1,9 @@
+config DCBM_DMA
+	tristate "DMA Core Batch Migrator"
+	depends on MIGRATION && DMA_ENGINE
+	select MIGRATION_COPY_OFFLOAD
+	help
+	  DMA-based batch copy engine for page migration. Uses
+	  DMAEngine memcpy channels to offload folio data copies
+	  during migration. Primarily intended for testing the copy
+	  offload infrastructure.
