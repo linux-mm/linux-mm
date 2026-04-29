@@ -1,0 +1,53 @@
+name: mm-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - mm-new
+      - mm-unstable
+  workflow_dispatch:
+
+jobs:
+  host-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          # - runner: ubuntu-24.04-arm
+          #   arch: arm64
+    runs-on: ${{ matrix.runner }}
+    name: Host tests (${{ matrix.arch }})
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -q update
+          sudo apt-get -qy install build-essential liburcu-dev
+
+      - name: Run memblock tests
+        run: bash .github/scripts/run-memblock-tests.sh
+
+      - name: Run VMA tests
+        if: always()
+        run: bash .github/scripts/run-vma-tests.sh
+
+      - name: Run data structure tests
+        if: always()
+        run: bash .github/scripts/run-datastructure-tests.sh
+
+  vm-tests:
+    runs-on: self-hosted
+    name: VM tests
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run VM tests
+        run: bash .github/scripts/run-vm-tests.sh
