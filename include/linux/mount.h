@@ -10,6 +10,7 @@
 #ifndef _LINUX_MOUNT_H
 #define _LINUX_MOUNT_H
 
+#include <linux/cleanup.h>
 #include <linux/types.h>
 #include <asm/barrier.h>
 
@@ -99,6 +100,7 @@ extern bool our_mnt(struct vfsmount *mnt);
 
 extern struct vfsmount *kern_mount(struct file_system_type *);
 extern void kern_unmount(struct vfsmount *mnt);
+DEFINE_FREE(kern_unmount, struct vfsmount *, if (_T) kern_unmount(_T));
 extern int may_umount_tree(struct vfsmount *);
 extern int may_umount(struct vfsmount *);
 int do_mount(const char *, const char __user *,
