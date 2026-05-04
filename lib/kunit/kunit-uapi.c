@@ -33,6 +33,8 @@ enum {
 	KSFT_SKIP	= 4,
 };
 
+KUNIT_UAPI_EMBED_BLOB(kunit_uapi_preinit, "uapi-preinit");
+
 static struct vfsmount *kunit_uapi_mount_fs(const char *name)
 {
 	struct file_system_type *type;
@@ -158,18 +160,17 @@ static int kunit_uapi_run_executable_in_mount(struct kunit *test,
 					      const struct kunit_uapi_blob *executable,
 					      struct vfsmount *mnt)
 {
-	const char *executable_target = kunit_uapi_executable_target(executable);
 	struct kunit_uapi_usermodehelper_ctx ctx = {
 		.test	= test,
 		.mnt	= mnt,
 	};
 	struct subprocess_info *info;
 	const char *const argv[] = {
-		executable_target,
+		kunit_uapi_executable_target(executable),
 		NULL
 	};
 
-	info = call_usermodehelper_setup(AT_FDCWD, executable_target, (char **)argv, NULL,
+	info = call_usermodehelper_setup(AT_FDCWD, kunit_uapi_preinit.path, (char **)argv, NULL,
 					 GFP_KERNEL, kunit_uapi_usermodehelper_init, NULL, &ctx);
 	if (!info)
 		return -ENOMEM;
@@ -189,6 +190,10 @@ static int kunit_uapi_run_executable(struct kunit *test, const struct kunit_uapi
 		return PTR_ERR(mnt);
 
 	err = kunit_uapi_write_executable(mnt, executable);
+	if (err)
+		return err;
+
+	err = kunit_uapi_write_executable(mnt, &kunit_uapi_preinit);
 	if (err)
 		return err;
 
