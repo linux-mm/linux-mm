@@ -1846,7 +1846,7 @@ static int do_execveat_common(int fd, struct filename *filename,
 	return bprm_execve(bprm);
 }
 
-int kernel_execve(const char *kernel_filename,
+int kernel_execve(int dirfd, const char *kernel_filename,
 		  const char *const *argv, const char *const *envp)
 {
 	int retval;
@@ -1856,7 +1856,7 @@ int kernel_execve(const char *kernel_filename,
 		return -EINVAL;
 
 	CLASS(filename_kernel, filename)(kernel_filename);
-	CLASS(bprm, bprm)(AT_FDCWD, filename, 0);
+	CLASS(bprm, bprm)(dirfd, filename, 0);
 	if (IS_ERR(bprm))
 		return PTR_ERR(bprm);
 
