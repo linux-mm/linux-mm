@@ -141,4 +141,20 @@ config KUNIT_UML_PCI
 
 	  If unsure, say N.
 
+config KUNIT_UAPI
+	tristate "KUnit UAPI testing framework"
+	depends on KUNIT
+	depends on ARCH_HAS_NOLIBC
+	depends on !STATIC_USERMODEHELPER
+	depends on !LTO_CLANG # https://github.com/llvm/llvm-project/issues/112920
+	select HEADERS_INSTALL
+	select DEVTMPFS
+	default KUNIT
+	help
+	  Enables support for building and running userspace selftests as part of kunit.
+	  These tests should be statically linked and use kselftest.h or kselftest_harness.h
+	  for status reporting.
+
+	  In most cases this should be left as its default.
+
 endif # KUNIT
