@@ -628,7 +628,7 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action,
 			goto exit;
 
 		retval = -ENOMEM;
-		info = call_usermodehelper_setup(env->argv[0], env->argv,
+		info = call_usermodehelper_setup(AT_FDCWD, env->argv[0], env->argv,
 						 env->envp, GFP_KERNEL,
 						 NULL, cleanup_uevent_env, env);
 		if (info) {

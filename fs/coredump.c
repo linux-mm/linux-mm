@@ -1015,7 +1015,7 @@ static bool coredump_pipe(struct core_name *cn, struct coredump_params *cprm,
 		helper_argv[argi] = cn->corename + argv[argi];
 	helper_argv[argi] = NULL;
 
-	sub_info = call_usermodehelper_setup(helper_argv[0], helper_argv, NULL,
+	sub_info = call_usermodehelper_setup(AT_FDCWD, helper_argv[0], helper_argv, NULL,
 					     GFP_KERNEL, umh_coredump_setup,
 					     NULL, cprm);
 	if (!sub_info)

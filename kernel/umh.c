@@ -106,7 +106,7 @@ static int call_usermodehelper_exec_async(void *data)
 	commit_creds(new);
 
 	wait_for_initramfs();
-	retval = kernel_execve(AT_FDCWD, sub_info->path,
+	retval = kernel_execve(sub_info->dirfd, sub_info->path,
 			       (const char *const *)sub_info->argv,
 			       (const char *const *)sub_info->envp);
 out:
@@ -331,6 +331,7 @@ static void helper_unlock(void)
 
 /**
  * call_usermodehelper_setup - prepare to call a usermode helper
+ * @dirfd: directory to resolve path against
  * @path: path to usermode executable
  * @argv: arg vector for process
  * @envp: environment for process
@@ -352,7 +353,7 @@ static void helper_unlock(void)
  * Function must be runnable in either a process context or the
  * context in which call_usermodehelper_exec is called.
  */
-struct subprocess_info *call_usermodehelper_setup(const char *path, char **argv,
+struct subprocess_info *call_usermodehelper_setup(int dirfd, const char *path, char **argv,
 		char **envp, gfp_t gfp_mask,
 		int (*init)(struct subprocess_info *info, struct cred *new),
 		void (*cleanup)(struct subprocess_info *info),
@@ -366,8 +367,10 @@ struct subprocess_info *call_usermodehelper_setup(const char *path, char **argv,
 	INIT_WORK(&sub_info->work, call_usermodehelper_exec_work);
 
 #ifdef CONFIG_STATIC_USERMODEHELPER
+	sub_info->dirfd = AT_FDCWD;
 	sub_info->path = CONFIG_STATIC_USERMODEHELPER_PATH;
 #else
+	sub_info->dirfd = dirfd;
 	sub_info->path = path;
 #endif
 	sub_info->argv = argv;
@@ -484,7 +487,7 @@ int call_usermodehelper(const char *path, char **argv, char **envp, int wait)
 	struct subprocess_info *info;
 	gfp_t gfp_mask = (wait == UMH_NO_WAIT) ? GFP_ATOMIC : GFP_KERNEL;
 
-	info = call_usermodehelper_setup(path, argv, envp, gfp_mask,
+	info = call_usermodehelper_setup(AT_FDCWD, path, argv, envp, gfp_mask,
 					 NULL, NULL, NULL);
 	if (info == NULL)
 		return -ENOMEM;

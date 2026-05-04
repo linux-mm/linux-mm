@@ -20,6 +20,7 @@ struct file;
 struct subprocess_info {
 	struct work_struct work;
 	struct completion *complete;
+	int dirfd;
 	const char *path;
 	char **argv;
 	char **envp;
@@ -34,7 +35,7 @@ extern int
 call_usermodehelper(const char *path, char **argv, char **envp, int wait);
 
 extern struct subprocess_info *
-call_usermodehelper_setup(const char *path, char **argv, char **envp,
+call_usermodehelper_setup(int dirfd, const char *path, char **argv, char **envp,
 			  gfp_t gfp_mask,
 			  int (*init)(struct subprocess_info *info, struct cred *new),
 			  void (*cleanup)(struct subprocess_info *), void *data);
