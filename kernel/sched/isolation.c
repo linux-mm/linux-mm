@@ -18,7 +18,14 @@ enum hk_flags {
 	HK_FLAG_KERNEL_NOISE	= BIT(HK_TYPE_KERNEL_NOISE),
 };
 
-DEFINE_STATIC_KEY_FALSE(housekeeping_overridden);
+/*
+ * This key is accessed in early entry code to drive the CPU isolation IPI
+ * deferral mechanism. This happens before a serializing instruction has been
+ * executed in the entry path. This is acceptable as a stale value will only be
+ * observed during transient CPU isolation states, and the updated value will be
+ * acted upon at the next kernel exit.
+ */
+DEFINE_STATIC_KEY_FALSE_ENTRY(housekeeping_overridden);
 EXPORT_SYMBOL_GPL(housekeeping_overridden);
 
 struct housekeeping {

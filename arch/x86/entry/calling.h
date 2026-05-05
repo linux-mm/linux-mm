@@ -9,6 +9,7 @@
 #include <asm/ptrace-abi.h>
 #include <asm/msr.h>
 #include <asm/nospec-branch.h>
+#include <asm/jump_label.h>
 
 /*
 
@@ -170,8 +171,22 @@ For 32-bit we have the following conventions - kernel is built with
 	andq    $(~PTI_USER_PGTABLE_AND_PCID_MASK), \reg
 .endm
 
+.macro NOTE_CR3_SWITCH scratch_reg:req in_kernel:req
+#ifdef CONFIG_TRACK_CR3
+	STATIC_BRANCH_FALSE_LIKELY housekeeping_overridden, .Lend_\@
+	LOCK_PREFIX
+.if \in_kernel == 1
+	orq $1, PER_CPU_VAR(kernel_cr3_loaded)
+.else
+	andq $0, PER_CPU_VAR(kernel_cr3_loaded)
+.endif
+.Lend_\@:
+#endif // CONFIG_TRACK_CR3
+.endm
+
 .macro SWITCH_TO_KERNEL_CR3 scratch_reg:req
 	ALTERNATIVE "jmp .Lend_\@", "", X86_FEATURE_PTI
+	NOTE_CR3_SWITCH \scratch_reg $1
 	mov	%cr3, \scratch_reg
 	ADJUST_KERNEL_CR3 \scratch_reg
 	mov	\scratch_reg, %cr3
@@ -182,6 +197,7 @@ For 32-bit we have the following conventions - kernel is built with
 	PER_CPU_VAR(cpu_tlbstate + TLB_STATE_user_pcid_flush_mask)
 
 .macro SWITCH_TO_USER_CR3 scratch_reg:req scratch_reg2:req
+	NOTE_CR3_SWITCH \scratch_reg $0
 	mov	%cr3, \scratch_reg
 
 	ALTERNATIVE "jmp .Lwrcr3_\@", "", X86_FEATURE_PCID
@@ -229,6 +245,7 @@ For 32-bit we have the following conventions - kernel is built with
 
 .macro SAVE_AND_SWITCH_TO_KERNEL_CR3 scratch_reg:req save_reg:req
 	ALTERNATIVE "jmp .Ldone_\@", "", X86_FEATURE_PTI
+	NOTE_CR3_SWITCH \scratch_reg $1
 	movq	%cr3, \scratch_reg
 	movq	\scratch_reg, \save_reg
 	/*
@@ -257,6 +274,7 @@ For 32-bit we have the following conventions - kernel is built with
 	bt	$PTI_USER_PGTABLE_BIT, \save_reg
 	jnc	.Lend_\@
 
+	NOTE_CR3_SWITCH \scratch_reg $0
 	ALTERNATIVE "jmp .Lwrcr3_\@", "", X86_FEATURE_PCID
 
 	/*
