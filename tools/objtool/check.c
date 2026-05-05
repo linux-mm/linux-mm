@@ -328,8 +328,10 @@ static void init_insn_state(struct objtool_file *file, struct insn_state *state,
 	memset(state, 0, sizeof(*state));
 	init_cfi_state(&state->cfi);
 
-	if (opts.noinstr && sec)
+	if (opts.noinstr && sec) {
 		state->noinstr = sec->noinstr;
+		state->entry = sec->entry;
+	}
 }
 
 static struct cfi_state *cfi_alloc(void)
@@ -433,6 +435,9 @@ static int decode_instructions(struct objtool_file *file)
 		    !strcmp(sec->name, ".cpuidle.text") ||
 		    !strncmp(sec->name, ".text..__x86.", 13))
 			sec->noinstr = true;
+
+		if (!strcmp(sec->name, ".entry.text"))
+			sec->entry= true;
 
 		/*
 		 * .init.text code is ran before userspace and thus doesn't
@@ -1075,6 +1080,45 @@ static int create_sym_checksum_section(struct objtool_file *file)
 #else
 static int create_sym_checksum_section(struct objtool_file *file) { return -EINVAL; }
 #endif
+
+static int read_entry_allowed(struct objtool_file *file)
+{
+	struct section *rsec;
+	struct symbol *sym;
+	struct reloc *reloc;
+
+	rsec = find_section_by_name(file->elf, ".rela.discard.entry_allowed");
+	if (!rsec)
+		return 0;
+
+	for_each_reloc(rsec, reloc) {
+		switch (reloc->sym->type) {
+		case STT_OBJECT:
+		case STT_FUNC:
+			sym = reloc->sym;
+			break;
+
+		case STT_SECTION:
+			sym = find_symbol_by_offset(reloc->sym->sec,
+						    reloc_addend(reloc));
+			if (!sym) {
+				WARN_FUNC(reloc->sym->sec, reloc_addend(reloc),
+					  "can't find static key/call symbol");
+				return -1;
+			}
+			break;
+
+		default:
+			WARN("unexpected relocation symbol type in %s: %d",
+			     rsec->name, reloc->sym->type);
+			return -1;
+		}
+
+		sym->entry_allowed = 1;
+	}
+
+	return 0;
+}
 
 /*
  * Warnings shouldn't be reported for ignored functions.
@@ -1919,6 +1963,8 @@ static int handle_jump_alt(struct objtool_file *file,
 		return -1;
 	}
 
+	orig_insn->key = special_alt->key;
+
 	if (opts.hack_jump_label && special_alt->key_addend & 2) {
 		struct reloc *reloc = insn_reloc(file, orig_insn);
 
@@ -2698,6 +2744,9 @@ static int decode_sections(struct objtool_file *file)
 	 * dead_end_function() marks.
 	 */
 	if (read_annotate(file, __annotate_late))
+		return -1;
+
+	if (read_entry_allowed(file))
 		return -1;
 
 	return 0;
@@ -3598,6 +3647,17 @@ static int validate_return(struct symbol *func, struct instruction *insn, struct
 	return 0;
 }
 
+static int validate_static_key(struct instruction *insn, struct insn_state *state)
+{
+	if (state->entry && !insn->key->entry_allowed) {
+		WARN_INSN(insn, "%s: non-RO static key usage in entry code",
+			  insn->key->name);
+		return 1;
+	}
+
+	return 0;
+}
+
 static struct instruction *next_insn_to_validate(struct objtool_file *file,
 						 struct instruction *insn)
 {
@@ -3860,6 +3920,9 @@ static int validate_insn(struct objtool_file *file, struct symbol *func,
 
 	if (handle_insn_ops(insn, next_insn, statep))
 		return 1;
+
+	if (insn->key)
+		validate_static_key(insn, statep);
 
 	switch (insn->type) {
 
