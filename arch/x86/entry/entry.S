@@ -40,6 +40,8 @@ SYM_FUNC_START(__WARN_trap)
 SYM_FUNC_END(__WARN_trap)
 EXPORT_SYMBOL(__WARN_trap)
 
+THUNK warn_thunk_thunk, __warn_thunk
+
 .popsection
 
 /*
@@ -60,7 +62,6 @@ EXPORT_SYMBOL_FOR_KVM(x86_verw_sel);
 
 .popsection
 
-THUNK warn_thunk_thunk, __warn_thunk
 
 /*
  * Clang's implementation of TLS stack cookies requires the variable in
