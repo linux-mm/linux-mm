@@ -311,6 +311,34 @@ int generic_error_remove_folio(struct address_space *mapping,
 }
 EXPORT_SYMBOL(generic_error_remove_folio);
 
+static long __mapping_evict_folio(struct address_space *mapping,
+				  struct folio *folio, bool *lru_refs)
+{
+	if (lru_refs)
+		*lru_refs = false;
+	/* The page may have been truncated before it was locked */
+	if (!mapping)
+		return 0;
+	if (folio_test_dirty(folio) || folio_test_writeback(folio))
+		return 0;
+	/* The refcount will be elevated if any page in the folio is mapped */
+	if (folio_ref_count(folio) >
+			folio_nr_pages(folio) + folio_has_private(folio) + 1) {
+		/*
+		 * A remote LRU drain can only help with extra references on
+		 * otherwise evictable folios.  Mapped folios also have an
+		 * elevated refcount, but draining LRU caches cannot unmap them.
+		 */
+		if (lru_refs && !folio_mapped(folio))
+			*lru_refs = true;
+		return 0;
+	}
+	if (!filemap_release_folio(folio, 0))
+		return 0;
+
+	return remove_mapping(mapping, folio);
+}
+
 /**
  * mapping_evict_folio() - Remove an unused folio from the page-cache.
  * @mapping: The mapping this folio belongs to.
@@ -324,19 +352,7 @@ EXPORT_SYMBOL(generic_error_remove_folio);
  */
 long mapping_evict_folio(struct address_space *mapping, struct folio *folio)
 {
-	/* The page may have been truncated before it was locked */
-	if (!mapping)
-		return 0;
-	if (folio_test_dirty(folio) || folio_test_writeback(folio))
-		return 0;
-	/* The refcount will be elevated if any page in the folio is mapped */
-	if (folio_ref_count(folio) >
-			folio_nr_pages(folio) + folio_has_private(folio) + 1)
-		return 0;
-	if (!filemap_release_folio(folio, 0))
-		return 0;
-
-	return remove_mapping(mapping, folio);
+	return __mapping_evict_folio(mapping, folio, NULL);
 }
 
 /**
@@ -526,13 +542,15 @@ EXPORT_SYMBOL(truncate_inode_pages_final);
  * @mapping: the address_space which holds the folios to invalidate
  * @start: the offset 'from' which to invalidate
  * @end: the offset 'to' which to invalidate (inclusive)
- * @nr_failed: How many folio invalidations failed
+ * @nr_lru_refs: Optional counter for failures which may be due to remote
+ *                per-cpu LRU refs
  *
- * This function is similar to invalidate_mapping_pages(), except that it
- * returns the number of folios which could not be evicted in @nr_failed.
+ * This function is similar to invalidate_mapping_pages(), except that callers
+ * may request the number of folio eviction failures that may be resolved by
+ * draining remote per-cpu LRU batches in @nr_lru_refs.
  */
 unsigned long mapping_try_invalidate(struct address_space *mapping,
-		pgoff_t start, pgoff_t end, unsigned long *nr_failed)
+		pgoff_t start, pgoff_t end, unsigned long *nr_lru_refs)
 {
 	pgoff_t indices[FOLIO_BATCH_SIZE];
 	struct folio_batch fbatch;
@@ -548,6 +566,7 @@ unsigned long mapping_try_invalidate(struct address_space *mapping,
 
 		for (i = 0; i < nr; i++) {
 			struct folio *folio = fbatch.folios[i];
+			bool lru_refs = false;
 
 			/* We rely upon deletion not changing folio->index */
 
@@ -557,18 +576,17 @@ unsigned long mapping_try_invalidate(struct address_space *mapping,
 				continue;
 			}
 
-			ret = mapping_evict_folio(mapping, folio);
+			ret = __mapping_evict_folio(mapping, folio,
+						    nr_lru_refs ? &lru_refs : NULL);
+			if (!ret && lru_refs)
+				(*nr_lru_refs)++;
 			folio_unlock(folio);
 			/*
 			 * Invalidation is a hint that the folio is no longer
 			 * of interest and try to speed up its reclaim.
 			 */
-			if (!ret) {
+			if (!ret)
 				deactivate_file_folio(folio);
-				/* Likely in the lru cache of a remote CPU */
-				if (nr_failed)
-					(*nr_failed)++;
-			}
 			count += ret;
 		}
 

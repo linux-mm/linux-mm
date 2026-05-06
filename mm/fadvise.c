@@ -141,7 +141,7 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 		}
 
 		if (end_index >= start_index) {
-			unsigned long nr_failed = 0;
+			unsigned long nr_lru_refs = 0;
 
 			/*
 			 * It's common to FADV_DONTNEED right after
@@ -155,14 +155,18 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 			lru_add_drain();
 
 			mapping_try_invalidate(mapping, start_index, end_index,
-					&nr_failed);
+					&nr_lru_refs);
 
 			/*
-			 * The failures may be due to the folio being
-			 * in the LRU cache of a remote CPU. Drain all
-			 * caches and try again.
+			 * Some clean, unmapped folios can fail invalidation
+			 * because they are still sitting in remote per-cpu LRU
+			 * batches.  Failures caused by dirty/writeback state,
+			 * user mappings or filesystem-private release state are
+			 * not helped by a remote drain, so avoid it unless
+			 * mapping_try_invalidate() found a failure that could
+			 * plausibly be resolved by it.
 			 */
-			if (nr_failed) {
+			if (nr_lru_refs) {
 				lru_add_drain_all();
 				invalidate_mapping_pages(mapping, start_index,
 						end_index);
