@@ -1430,36 +1430,38 @@ static unsigned long shrink_vma(struct vma_remap_struct *vrm,
 	return 0;
 }
 
-/*
- * mremap_to() - remap a vma to a new location.
- * Returns: The new address of the vma or an error.
- */
-static unsigned long mremap_to(struct vma_remap_struct *vrm)
+static unsigned long unmap_fixed_target(struct vma_remap_struct *vrm,
+					unsigned long addr, unsigned long len)
 {
 	struct mm_struct *mm = current->mm;
 	unsigned long err;
 
-	if (vrm->flags & MREMAP_FIXED) {
-		/*
-		 * In mremap_to().
-		 * VMA is moved to dst address, and munmap dst first.
-		 * do_munmap will check if dst is sealed.
-		 */
-		err = do_munmap(mm, vrm->new_addr, vrm->new_len,
-				vrm->uf_unmap_early);
-		vrm->vma = NULL; /* Invalidated. */
-		vrm->vmi_needs_invalidate = true;
-		if (err)
-			return err;
+	err = do_munmap(mm, addr, len, vrm->uf_unmap_early);
+	vrm->vma = NULL; /* Invalidated. */
+	vrm->vmi_needs_invalidate = true;
+	if (err)
+		return err;
 
-		/*
-		 * If we remap a portion of a VMA elsewhere in the same VMA,
-		 * this can invalidate the old VMA. Reset.
-		 */
-		vrm->vma = vma_lookup(mm, vrm->addr);
-		if (!vrm->vma)
-			return -EFAULT;
-	}
+	/*
+	 * If we remap a portion of a VMA elsewhere in the same VMA, this can
+	 * invalidate the old VMA. Reset.
+	 */
+	vrm->vma = vma_lookup(mm, vrm->addr);
+	if (!vrm->vma)
+		return -EFAULT;
+
+	return 0;
+}
+
+/*
+ * __mremap_to() - remap a vma to a new location, assuming any required
+ * MREMAP_FIXED target unmap has already been handled.
+ * Returns: The new address of the vma or an error.
+ */
+static unsigned long __mremap_to(struct vma_remap_struct *vrm)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long err;
 
 	if (vrm->remap_type == MREMAP_SHRINK) {
 		err = shrink_vma(vrm, /* drop_lock= */false);
@@ -1484,6 +1486,23 @@ static unsigned long mremap_to(struct vma_remap_struct *vrm)
 		return err;
 
 	return move_vma(vrm);
+}
+
+/*
+ * mremap_to() - remap a vma to a new location.
+ * Returns: The new address of the vma or an error.
+ */
+static unsigned long mremap_to(struct vma_remap_struct *vrm)
+{
+	unsigned long err;
+
+	if (vrm->flags & MREMAP_FIXED) {
+		err = unmap_fixed_target(vrm, vrm->new_addr, vrm->new_len);
+		if (err)
+			return err;
+	}
+
+	return __mremap_to(vrm);
 }
 
 static int vma_expandable(struct vm_area_struct *vma, unsigned long delta)
@@ -1882,9 +1901,11 @@ static unsigned long remap_move(struct vma_remap_struct *vrm)
 	unsigned long start = vrm->addr;
 	unsigned long end = vrm->addr + vrm->old_len;
 	unsigned long new_addr = vrm->new_addr;
+	unsigned long new_len = vrm->new_len;
 	unsigned long target_addr = new_addr;
 	unsigned long res = -EFAULT;
 	unsigned long last_end;
+	bool fixed_target_unmapped = false;
 	bool seen_vma = false;
 
 	VMA_ITERATOR(vmi, current->mm, start);
@@ -1939,8 +1960,27 @@ static unsigned long remap_move(struct vma_remap_struct *vrm)
 		}
 
 		res_vma = check_prep_vma(vrm);
-		if (!res_vma)
-			res_vma = mremap_to(vrm);
+		/*
+		 * remap_move() narrows vrm->new_len to the current source VMA
+		 * segment before calling mremap_to(). For sparse source ranges
+		 * this would leave target ranges corresponding to source holes
+		 * mapped.
+		 *
+		 * If the requested source range extends beyond the first VMA,
+		 * unmap the full fixed target range once, using the original
+		 * new_addr/new_len, before moving any segment.
+		 */
+		if (!res_vma && !seen_vma && vma->vm_end < end) {
+			res_vma = unmap_fixed_target(vrm, new_addr, new_len);
+			if (!res_vma)
+				fixed_target_unmapped = true;
+		}
+		if (!res_vma) {
+			if (fixed_target_unmapped)
+				res_vma = __mremap_to(vrm);
+			else
+				res_vma = mremap_to(vrm);
+		}
 		if (IS_ERR_VALUE(res_vma))
 			return res_vma;
 

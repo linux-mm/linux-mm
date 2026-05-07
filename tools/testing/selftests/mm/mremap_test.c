@@ -398,6 +398,54 @@ static bool is_multiple_vma_range_ok(unsigned int pattern_seed,
 	return true;
 }
 
+static bool is_range_unmapped(void *addr, size_t size)
+{
+	void *ptr;
+
+	ptr = mmap(addr, size, PROT_NONE,
+		   MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE, -1, 0);
+	if (ptr == MAP_FAILED) {
+		if (errno == EEXIST)
+			ksft_print_msg("range %p-%p is still mapped\n",
+				       addr, (char *)addr + size);
+		else
+			perror("mmap MAP_FIXED_NOREPLACE");
+		return false;
+	}
+
+	if (ptr != addr) {
+		ksft_print_msg("mmap MAP_FIXED_NOREPLACE returned %p, expected %p\n",
+			       ptr, addr);
+		munmap(ptr, size);
+		return false;
+	}
+
+	if (munmap(ptr, size)) {
+		perror("munmap MAP_FIXED_NOREPLACE probe");
+		return false;
+	}
+
+	return true;
+}
+
+static bool multiple_vma_holes_unmapped(char *ptr, unsigned long page_size)
+{
+	static const int holes[] = { 1, 3, 7, 9 };
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(holes); i++) {
+		char *addr = &ptr[holes[i] * page_size];
+
+		if (!is_range_unmapped(addr, page_size)) {
+			ksft_print_msg("target hole page %d is mapped\n",
+				       holes[i]);
+			return false;
+		}
+	}
+
+	return true;
+}
+
 static void mremap_move_multiple_vmas(unsigned int pattern_seed,
 				      unsigned long page_size,
 				      bool dont_unmap)
@@ -505,6 +553,10 @@ static void mremap_move_multiple_vmas(unsigned int pattern_seed,
 	}
 	/* Check that the move is ok. */
 	if (!is_multiple_vma_range_ok(pattern_seed, tgt_ptr, page_size)) {
+		success = false;
+		goto out_unmap;
+	}
+	if (!multiple_vma_holes_unmapped(tgt_ptr, page_size)) {
 		success = false;
 		goto out_unmap;
 	}
