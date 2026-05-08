@@ -19,6 +19,7 @@
 #include <linux/highmem.h>
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
+#include <linux/sched/clock.h>
 #include <linux/compiler.h>
 #include <linux/kernel.h>
 #include <linux/kasan.h>
@@ -1448,6 +1449,43 @@ bool free_pages_prepare(struct page *page, unsigned int order)
 }
 
 /*
+ * Helper functions for locking zone->lock with tracepoints.
+ *
+ * This makes it easier to diagnose locking issues and contention in
+ * production environments.  The @count parameter indicates the number
+ * of pages being freed or allocated in the batch operation.
+ *
+ * For minimum overhead attach to kmem:mm_zone_lock_contended, which
+ * only gets activated when trylock detects lock is contended.
+ */
+static inline void
+__zone_lock(struct zone *zone, int count, unsigned long *flags)
+	__acquires(&zone->lock)
+{
+	unsigned long caller = _RET_IP_;
+	u64 wait_start, wait_time = 0;
+	bool contended;
+
+	local_irq_save(*flags);
+	contended = !spin_trylock(&zone->lock);
+	if (contended) {
+		wait_start = local_clock();
+		trace_mm_zone_lock_contended(zone, count, caller);
+		spin_lock(&zone->lock);
+		wait_time = local_clock() - wait_start;
+	}
+	trace_mm_zone_locked(zone, count, contended, caller, wait_time);
+}
+
+static inline void
+__zone_unlock(struct zone *zone, int count, unsigned long *flags)
+	__releases(&zone->lock)
+{
+	trace_mm_zone_lock_unlock(zone, count, _RET_IP_);
+	spin_unlock_irqrestore(&zone->lock, *flags);
+}
+
+/*
  * Frees a number of pages from the PCP lists
  * Assumes all pages on list are in same zone.
  * count is the number of pages to free.
@@ -1469,7 +1507,7 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 	/* Ensure requested pindex is drained first. */
 	pindex = pindex - 1;
 
-	spin_lock_irqsave(&zone->lock, flags);
+	__zone_lock(zone, count, &flags);
 
 	while (count > 0) {
 		struct list_head *list;
@@ -1502,7 +1540,7 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 		} while (count > 0 && !list_empty(list));
 	}
 
-	spin_unlock_irqrestore(&zone->lock, flags);
+	__zone_unlock(zone, count, &flags);
 }
 
 /* Split a multi-block free page into its individual pageblocks. */
@@ -1551,7 +1589,7 @@ static void free_one_page(struct zone *zone, struct page *page,
 			return;
 		}
 	} else {
-		spin_lock_irqsave(&zone->lock, flags);
+		__zone_lock(zone, 1 << order, &flags);
 	}
 
 	/* The lock succeeded. Process deferred pages. */
@@ -1569,7 +1607,7 @@ static void free_one_page(struct zone *zone, struct page *page,
 		}
 	}
 	split_large_buddy(zone, page, pfn, order, fpi_flags);
-	spin_unlock_irqrestore(&zone->lock, flags);
+	__zone_unlock(zone, 1 << order, &flags);
 
 	__count_vm_events(PGFREE, 1 << order);
 }
@@ -2525,7 +2563,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 		if (!spin_trylock_irqsave(&zone->lock, flags))
 			return 0;
 	} else {
-		spin_lock_irqsave(&zone->lock, flags);
+		__zone_lock(zone, count, &flags);
 	}
 	for (i = 0; i < count; ++i) {
 		struct page *page = __rmqueue(zone, order, migratetype,
@@ -2545,7 +2583,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 		 */
 		list_add_tail(&page->pcp_list, list);
 	}
-	spin_unlock_irqrestore(&zone->lock, flags);
+	__zone_unlock(zone, i, &flags);
 
 	return i;
 }

@@ -458,6 +458,107 @@ TRACE_EVENT(rss_stat,
 		__print_symbolic(__entry->member, TRACE_MM_PAGES),
 		__entry->size)
 	);
+
+/*
+ * Tracepoints for zone->lock on the page allocator fast paths only.
+ * Other code paths that acquire zone->lock (compaction, isolation,
+ * memory hotplug, vmstat, etc.) are not covered here.
+ *
+ * Three events:
+ *   mm_zone_lock_contended - trylock failed, about to spin
+ *   mm_zone_locked         - lock acquired, includes wait_ns when
+ *                            contended (zero otherwise)
+ *   mm_zone_lock_unlock    - lock released
+ *
+ * For production use with minimum overhead, enable only
+ * mm_zone_lock_contended -- it fires only when trylock detects the
+ * lock is already held.
+ *
+ * For wait-time analysis, enable mm_zone_locked -- its wait_ns
+ * field gives the spin duration directly.  Adding unlock allows
+ * hold-time measurement, at the cost of one event per acquisition.
+ */
+TRACE_EVENT(mm_zone_lock_contended,
+
+	TP_PROTO(struct zone *zone, int count, unsigned long caller),
+
+	TP_ARGS(zone, count, caller),
+
+	TP_STRUCT__entry(
+		__field(	int,		node_id		)
+		__string(	name,		zone->name	)
+		__field(	int,		count		)
+		__field(	unsigned long,	caller		)
+	),
+
+	TP_fast_assign(
+		__entry->node_id = zone_to_nid(zone);
+		__assign_str(name);
+		__entry->count = count;
+		__entry->caller = caller;
+	),
+
+	TP_printk("node=%d zone=%-8s count=%-5d caller=%pS",
+		  __entry->node_id, __get_str(name),
+		  __entry->count, (void *)__entry->caller)
+);
+
+TRACE_EVENT(mm_zone_locked,
+
+	TP_PROTO(struct zone *zone, int count, bool contended,
+		 unsigned long caller, u64 wait_ns),
+
+	TP_ARGS(zone, count, contended, caller, wait_ns),
+
+	TP_STRUCT__entry(
+		__field(	int,		node_id		)
+		__string(	name,		zone->name	)
+		__field(	int,		count		)
+		__field(	bool,		contended	)
+		__field(	unsigned long,	caller		)
+		__field(	u64,		wait_ns		)
+	),
+
+	TP_fast_assign(
+		__entry->node_id = zone_to_nid(zone);
+		__assign_str(name);
+		__entry->count = count;
+		__entry->contended = contended;
+		__entry->caller = caller;
+		__entry->wait_ns = wait_ns;
+	),
+
+	TP_printk("node=%d zone=%-8s count=%-5d contended=%d caller=%pS wait=%llu ns",
+		  __entry->node_id, __get_str(name),
+		  __entry->count, __entry->contended,
+		  (void *)__entry->caller, __entry->wait_ns)
+);
+
+TRACE_EVENT(mm_zone_lock_unlock,
+
+	TP_PROTO(struct zone *zone, int count, unsigned long caller),
+
+	TP_ARGS(zone, count, caller),
+
+	TP_STRUCT__entry(
+		__field(	int,		node_id		)
+		__string(	name,		zone->name	)
+		__field(	int,		count		)
+		__field(	unsigned long,	caller		)
+	),
+
+	TP_fast_assign(
+		__entry->node_id = zone_to_nid(zone);
+		__assign_str(name);
+		__entry->count = count;
+		__entry->caller = caller;
+	),
+
+	TP_printk("node=%d zone=%-8s count=%-5d caller=%pS",
+		  __entry->node_id, __get_str(name),
+		  __entry->count, (void *)__entry->caller)
+);
+
 #endif /* _TRACE_KMEM_H */
 
 /* This part must be outside protection */
