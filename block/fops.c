@@ -926,7 +926,9 @@ static int blkdev_mmap_prepare(struct vm_area_desc *desc)
 
 static int blkdev_swap_activate(struct file *file, struct swap_info_struct *sis)
 {
-	return add_swap_extent(sis, sis->max, 0);
+	loff_t isize = i_size_read(bdev_file_inode(file));
+
+	return add_swap_extent(sis, div_u64(isize, PAGE_SIZE), 0);
 }
 
 const struct file_operations def_blk_fops = {
