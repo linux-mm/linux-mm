@@ -2757,6 +2757,13 @@ add:
 }
 EXPORT_SYMBOL_GPL(add_swap_extent);
 
+int swap_activate_fs_ops(struct swap_info_struct *sis)
+{
+	sis->flags |= SWP_FS_OPS;
+	return add_swap_extent(sis, sis->max, NULL, 0);
+}
+EXPORT_SYMBOL_GPL(swap_activate_fs_ops);
+
 /*
  * A `swap extent' is a simple thing which maps a contiguous range of pages
  * onto a contiguous range of disk blocks.  A rbtree of swap extents is

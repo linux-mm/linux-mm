@@ -3331,8 +3331,7 @@ int cifs_swap_activate(struct file *swap_file, struct swap_info_struct *sis)
 	 * from reading or writing the file
 	 */
 
-	sis->flags |= SWP_FS_OPS;
-	return add_swap_extent(sis, sis->max, NULL, 0);
+	return swap_activate_fs_ops(sis);
 }
 
 void cifs_swap_deactivate(struct file *file)
