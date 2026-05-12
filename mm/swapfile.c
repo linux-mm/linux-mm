@@ -2781,12 +2781,7 @@ EXPORT_SYMBOL_GPL(add_swap_extent);
 static int setup_swap_extents(struct swap_info_struct *sis,
 			      struct file *swap_file)
 {
-	struct address_space *mapping = swap_file->f_mapping;
-	struct inode *inode = mapping->host;
 	int ret, error = 0;
-
-	if (S_ISBLK(inode->i_mode))
-		return add_swap_extent(sis, sis->max, 0);
 
 	if (swap_file->f_op->swap_activate)
 		ret = swap_file->f_op->swap_activate(swap_file, sis);
