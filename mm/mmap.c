@@ -855,6 +855,12 @@ __get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 	if (IS_ERR_VALUE(addr))
 		return addr;
 
+	/*
+	 * The check below ensures vm_end = addr + len <= TASK_SIZE.
+	 * Since (unsigned long)-1 (USER_ADDR_NONE) >= TASK_SIZE and
+	 * vm_end is exclusive, USER_ADDR_NONE is thus never a valid
+	 * userspace address.
+	 */
 	if (addr > TASK_SIZE - len)
 		return -ENOMEM;
 	if (offset_in_page(addr))
