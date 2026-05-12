@@ -588,7 +588,7 @@ int nfs_swap_activate(struct file *file, struct swap_info_struct *sis)
 	ret = rpc_clnt_swap_activate(clnt);
 	if (ret)
 		return ret;
-	ret = add_swap_extent(sis, sis->max, 0);
+	ret = add_swap_extent(sis, sis->max, NULL, 0);
 	if (ret < 0) {
 		rpc_clnt_swap_deactivate(clnt);
 		return ret;

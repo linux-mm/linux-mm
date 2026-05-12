@@ -2707,7 +2707,7 @@ static void destroy_swap_extents(struct swap_info_struct *sis,
  */
 int
 add_swap_extent(struct swap_info_struct *sis, unsigned long nr_pages,
-		sector_t start_block)
+		struct block_device *bdev, sector_t start_block)
 {
 	struct rb_node **link = &sis->swap_extent_root.rb_node, *parent = NULL;
 	struct swap_extent *se;
@@ -2717,6 +2717,12 @@ add_swap_extent(struct swap_info_struct *sis, unsigned long nr_pages,
 	if (unlikely(sis->pages >= sis->max))
 		return 0;
 	nr_pages = min(nr_pages, sis->max - sis->pages);
+
+	/* Only one bdev per swap file for now. */
+	if (!sis->bdev)
+		sis->bdev = bdev;
+	else if (bdev != sis->bdev)
+		return -EINVAL;
 
 	/*
 	 * place the new node at the right most since the
@@ -2793,6 +2799,8 @@ static int setup_swap_extents(struct swap_info_struct *sis,
 	sis->flags |= SWP_ACTIVATED;
 	if (sis->flags & SWP_FS_OPS)
 		error = sio_pool_init();
+	else if (WARN_ON_ONCE(!sis->bdev))
+		error = -EINVAL;
 	if (error)
 		destroy_swap_extents(sis, swap_file);
 	return error;
@@ -3224,26 +3232,6 @@ static struct swap_info_struct *alloc_swap_info(void)
 	return p;
 }
 
-static int claim_swapfile(struct swap_info_struct *si, struct inode *inode)
-{
-	if (S_ISBLK(inode->i_mode)) {
-		si->bdev = I_BDEV(inode);
-		/*
-		 * Zoned block devices contain zones that have a sequential
-		 * write only restriction.  Hence zoned block devices are not
-		 * suitable for swapping.  Disallow them here.
-		 */
-		if (bdev_is_zoned(si->bdev))
-			return -EINVAL;
-		si->flags |= SWP_BLKDEV;
-	} else if (S_ISREG(inode->i_mode)) {
-		si->bdev = inode->i_sb->s_bdev;
-	}
-
-	return 0;
-}
-
-
 /*
  * Find out how many pages are allowed for a single swap device. There
  * are two limiting factors:
@@ -3500,16 +3488,14 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	dentry = swap_file->f_path.dentry;
 	inode = mapping->host;
 
-	error = claim_swapfile(si, inode);
-	if (unlikely(error))
-		goto bad_swap;
-
 	inode_lock(inode);
 	if (d_unlinked(dentry) || cant_mount(dentry)) {
 		error = -ENOENT;
 		goto bad_swap_unlock_inode;
 	}
-	if (!S_ISBLK(inode->i_mode) && !S_ISREG(inode->i_mode)) {
+	if (S_ISBLK(inode->i_mode)) {
+		si->flags |= SWP_BLKDEV;
+	} else if (!S_ISREG(inode->i_mode)) {
 		error = -EINVAL;
 		goto bad_swap_unlock_inode;
 	}

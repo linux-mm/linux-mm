@@ -50,10 +50,6 @@ static int iomap_swapfile_iter(struct iomap_iter *iter, struct file *file,
 	if (iomap->flags & IOMAP_F_SHARED)
 		return iomap_swapfile_fail(file, "has shared extents");
 
-	/* Only one bdev per swap file. */
-	if (iomap->bdev != sis->bdev)
-		return iomap_swapfile_fail(file, "outside the main device");
-
 	/*
 	 * Round the start up and the end down so that the physical extent
 	 * aligns to a page boundary.
@@ -61,7 +57,8 @@ static int iomap_swapfile_iter(struct iomap_iter *iter, struct file *file,
 	first_ppage = ALIGN(iomap->addr, PAGE_SIZE) >> PAGE_SHIFT;
 	next_ppage = ALIGN_DOWN(iomap->addr + iomap->length, PAGE_SIZE) >>
 			PAGE_SHIFT;
-	error = add_swap_extent(sis, next_ppage - first_ppage, first_ppage);
+	error = add_swap_extent(sis, next_ppage - first_ppage, iomap->bdev,
+			first_ppage);
 	if (error)
 		return error;
 	return iomap_iter_advance_full(iter);

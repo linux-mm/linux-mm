@@ -926,9 +926,16 @@ static int blkdev_mmap_prepare(struct vm_area_desc *desc)
 
 static int blkdev_swap_activate(struct file *file, struct swap_info_struct *sis)
 {
+	struct block_device *bdev = I_BDEV(file->f_mapping->host);
 	loff_t isize = i_size_read(bdev_file_inode(file));
 
-	return add_swap_extent(sis, div_u64(isize, PAGE_SIZE), 0);
+	/*
+	 * The swap code performs arbitrary overwrites, which are not supported
+	 * on zones with sequential write constraints.
+	 */
+	if (bdev_is_zoned(bdev))
+		return -EINVAL;
+	return add_swap_extent(sis, div_u64(isize, PAGE_SIZE), bdev, 0);
 }
 
 const struct file_operations def_blk_fops = {

@@ -4326,7 +4326,8 @@ retry:
 		/*
 		 * We found a PAGE_SIZE-length, PAGE_SIZE-aligned run of blocks
 		 */
-		ret = add_swap_extent(sis, nr_pblocks, pblock);
+		ret = add_swap_extent(sis, nr_pblocks, inode->i_sb->s_bdev,
+				pblock);
 		if (ret < 0)
 			goto out;
 		cur_lblock += nr_pblocks;

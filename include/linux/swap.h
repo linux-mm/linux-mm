@@ -404,7 +404,7 @@ extern void __meminit kswapd_stop(int nid);
 #ifdef CONFIG_SWAP
 
 int add_swap_extent(struct swap_info_struct *sis, unsigned long nr_pages,
-		sector_t start_block);
+		struct block_device *bdev, sector_t start_block);
 int generic_swap_activate(struct file *swap_file, struct swap_info_struct *sis);
 
 static inline unsigned long total_swapcache_pages(void)
@@ -528,7 +528,7 @@ static inline bool folio_free_swap(struct folio *folio)
 
 static inline int add_swap_extent(struct swap_info_struct *sis,
 		unsigned long start_page, unsigned long nr_pages,
-		sector_t start_block)
+		struct block_device *bdev, sector_t start_block)
 {
 	return -EINVAL;
 }

@@ -132,7 +132,7 @@ int generic_swap_activate(struct file *swap_file, struct swap_info_struct *sis)
 		/*
 		 * We found a PAGE_SIZE-length, PAGE_SIZE-aligned run of blocks
 		 */
-		ret = add_swap_extent(sis, 1,
+		ret = add_swap_extent(sis, 1, inode->i_sb->s_bdev,
 				first_block >> (PAGE_SHIFT - blkbits));
 		if (ret < 0)
 			return ret;
@@ -141,7 +141,6 @@ reprobe:
 		continue;
 	}
 	return 0;
-
 bad_bmap:
 	pr_err("swapon: swapfile has holes\n");
 	return -EINVAL;

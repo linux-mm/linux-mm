@@ -2116,12 +2116,6 @@ xfs_file_swap_activate(
 	 */
 	xfs_inodegc_flush(ip->i_mount);
 
-	/*
-	 * Direct the swap code to the correct block device when this file
-	 * sits on the RT device.
-	 */
-	sis->bdev = xfs_inode_buftarg(ip)->bt_bdev;
-
 	return iomap_swap_activate(file, sis, &xfs_read_iomap_ops);
 }
 
