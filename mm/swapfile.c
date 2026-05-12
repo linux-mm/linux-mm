@@ -3515,6 +3515,10 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		error = -ENOENT;
 		goto bad_swap_unlock_inode;
 	}
+	if (!S_ISBLK(inode->i_mode) && !S_ISREG(inode->i_mode)) {
+		error = -EINVAL;
+		goto bad_swap_unlock_inode;
+	}
 	if (IS_SWAPFILE(inode)) {
 		error = -EBUSY;
 		goto bad_swap_unlock_inode;
