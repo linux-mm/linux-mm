@@ -3350,10 +3350,9 @@ static unsigned long read_swap_header(struct swap_info_struct *si,
 }
 
 static int setup_swap_clusters_info(struct swap_info_struct *si,
-				    union swap_header *swap_header,
-				    unsigned long maxpages)
+				    union swap_header *swap_header)
 {
-	unsigned long nr_clusters = DIV_ROUND_UP(maxpages, SWAPFILE_CLUSTER);
+	unsigned long nr_clusters = DIV_ROUND_UP(si->max, SWAPFILE_CLUSTER);
 	struct swap_cluster_info *cluster_info;
 	int err = -ENOMEM;
 	unsigned long i;
@@ -3395,7 +3394,7 @@ static int setup_swap_clusters_info(struct swap_info_struct *si,
 		if (err)
 			goto err;
 	}
-	for (i = maxpages; i < round_up(maxpages, SWAPFILE_CLUSTER); i++) {
+	for (i = si->max; i < round_up(si->max, SWAPFILE_CLUSTER); i++) {
 		err = swap_cluster_setup_bad_slot(si, cluster_info, i, true);
 		if (err)
 			goto err;
@@ -3425,7 +3424,7 @@ static int setup_swap_clusters_info(struct swap_info_struct *si,
 	si->cluster_info = cluster_info;
 	return 0;
 err:
-	free_swap_cluster_info(cluster_info, maxpages);
+	free_swap_cluster_info(cluster_info, si->max);
 	return err;
 }
 
@@ -3440,7 +3439,6 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	union swap_header *swap_header;
 	int nr_extents;
 	sector_t span;
-	unsigned long maxpages;
 	struct folio *folio = NULL;
 	struct inode *inode = NULL;
 	bool inced_nr_rotate_swap = false;
@@ -3512,14 +3510,13 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	}
 	swap_header = kmap_local_folio(folio, 0);
 
-	maxpages = read_swap_header(si, swap_header, inode);
-	if (unlikely(!maxpages)) {
+	si->max = read_swap_header(si, swap_header, inode);
+	if (unlikely(!si->max)) {
 		error = -EINVAL;
 		goto bad_swap_unlock_inode;
 	}
 
-	si->max = maxpages;
-	si->pages = maxpages - 1;
+	si->pages = si->max - 1;
 	nr_extents = setup_swap_extents(si, swap_file, &span);
 	if (nr_extents < 0) {
 		error = nr_extents;
@@ -3531,14 +3528,12 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		goto bad_swap_unlock_inode;
 	}
 
-	maxpages = si->max;
-
 	/* Set up the swap cluster info */
-	error = setup_swap_clusters_info(si, swap_header, maxpages);
+	error = setup_swap_clusters_info(si, swap_header);
 	if (error)
 		goto bad_swap_unlock_inode;
 
-	error = swap_cgroup_swapon(si->type, maxpages);
+	error = swap_cgroup_swapon(si->type, si->max);
 	if (error)
 		goto bad_swap_unlock_inode;
 
@@ -3546,7 +3541,7 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	 * Use kvmalloc_array instead of bitmap_zalloc as the allocation order might
 	 * be above MAX_PAGE_ORDER incase of a large swap file.
 	 */
-	si->zeromap = kvmalloc_array(BITS_TO_LONGS(maxpages), sizeof(long),
+	si->zeromap = kvmalloc_array(BITS_TO_LONGS(si->max), sizeof(long),
 				     GFP_KERNEL | __GFP_ZERO);
 	if (!si->zeromap) {
 		error = -ENOMEM;
@@ -3597,7 +3592,7 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 		}
 	}
 
-	error = zswap_swapon(si->type, maxpages);
+	error = zswap_swapon(si->type, si->max);
 	if (error)
 		goto bad_swap_unlock_inode;
 
