@@ -10035,51 +10035,17 @@ struct btrfs_swap_info {
 	u64 start;
 	u64 block_start;
 	u64 block_len;
-	u64 lowest_ppage;
-	u64 highest_ppage;
-	unsigned long nr_pages;
-	int nr_extents;
 };
 
 static int btrfs_add_swap_extent(struct swap_info_struct *sis,
 				 struct btrfs_swap_info *bsi)
 {
-	unsigned long nr_pages;
-	unsigned long max_pages;
-	u64 first_ppage, first_ppage_reported, next_ppage;
-	int ret;
+	u64 first_ppage, next_ppage;
 
-	/*
-	 * Our swapfile may have had its size extended after the swap header was
-	 * written. In that case activating the swapfile should not go beyond
-	 * the max size set in the swap header.
-	 */
-	if (bsi->nr_pages >= sis->max)
-		return 0;
-
-	max_pages = sis->max - bsi->nr_pages;
 	first_ppage = PAGE_ALIGN(bsi->block_start) >> PAGE_SHIFT;
 	next_ppage = PAGE_ALIGN_DOWN(bsi->block_start + bsi->block_len) >> PAGE_SHIFT;
 
-	if (first_ppage >= next_ppage)
-		return 0;
-	nr_pages = next_ppage - first_ppage;
-	nr_pages = min(nr_pages, max_pages);
-
-	first_ppage_reported = first_ppage;
-	if (bsi->start == 0)
-		first_ppage_reported++;
-	if (bsi->lowest_ppage > first_ppage_reported)
-		bsi->lowest_ppage = first_ppage_reported;
-	if (bsi->highest_ppage < (next_ppage - 1))
-		bsi->highest_ppage = next_ppage - 1;
-
-	ret = add_swap_extent(sis, bsi->nr_pages, nr_pages, first_ppage);
-	if (ret < 0)
-		return ret;
-	bsi->nr_extents += ret;
-	bsi->nr_pages += nr_pages;
-	return 0;
+	return add_swap_extent(sis, next_ppage - first_ppage, first_ppage);
 }
 
 static void btrfs_swap_deactivate(struct file *file)
@@ -10090,8 +10056,7 @@ static void btrfs_swap_deactivate(struct file *file)
 	atomic_dec(&BTRFS_I(inode)->root->nr_swapfiles);
 }
 
-static int btrfs_swap_activate(struct swap_info_struct *sis, struct file *file,
-			       sector_t *span)
+static int btrfs_swap_activate(struct swap_info_struct *sis, struct file *file)
 {
 	struct inode *inode = file_inode(file);
 	struct btrfs_root *root = BTRFS_I(inode)->root;
@@ -10100,9 +10065,7 @@ static int btrfs_swap_activate(struct swap_info_struct *sis, struct file *file,
 	struct extent_state *cached_state = NULL;
 	struct btrfs_chunk_map *map = NULL;
 	struct btrfs_device *device = NULL;
-	struct btrfs_swap_info bsi = {
-		.lowest_ppage = (sector_t)-1ULL,
-	};
+	struct btrfs_swap_info bsi = {};
 	struct btrfs_backref_share_check_ctx *backref_ctx = NULL;
 	struct btrfs_path *path = NULL;
 	int ret = 0;
@@ -10401,23 +10364,16 @@ out_unlock_mmap:
 	up_write(&BTRFS_I(inode)->i_mmap_lock);
 	btrfs_free_backref_share_ctx(backref_ctx);
 	btrfs_free_path(path);
-	if (ret)
-		return ret;
-
-	if (device)
+	if (!ret && device)
 		sis->bdev = device->bdev;
-	*span = bsi.highest_ppage - bsi.lowest_ppage + 1;
-	sis->max = bsi.nr_pages;
-	sis->pages = bsi.nr_pages - 1;
-	return bsi.nr_extents;
+	return ret;
 }
 #else
 static void btrfs_swap_deactivate(struct file *file)
 {
 }
 
-static int btrfs_swap_activate(struct swap_info_struct *sis, struct file *file,
-			       sector_t *span)
+static int btrfs_swap_activate(struct swap_info_struct *sis, struct file *file)
 {
 	return -EOPNOTSUPP;
 }

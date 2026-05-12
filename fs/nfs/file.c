@@ -567,8 +567,7 @@ static int nfs_launder_folio(struct folio *folio)
 	return ret;
 }
 
-static int nfs_swap_activate(struct swap_info_struct *sis, struct file *file,
-						sector_t *span)
+static int nfs_swap_activate(struct swap_info_struct *sis, struct file *file)
 {
 	unsigned long blocks;
 	long long isize;
@@ -589,19 +588,17 @@ static int nfs_swap_activate(struct swap_info_struct *sis, struct file *file,
 	ret = rpc_clnt_swap_activate(clnt);
 	if (ret)
 		return ret;
-	ret = add_swap_extent(sis, 0, sis->max, 0);
+	ret = add_swap_extent(sis, sis->max, 0);
 	if (ret < 0) {
 		rpc_clnt_swap_deactivate(clnt);
 		return ret;
 	}
 
-	*span = sis->pages;
-
 	if (cl->rpc_ops->enable_swap)
 		cl->rpc_ops->enable_swap(inode);
 
 	sis->flags |= SWP_FS_OPS;
-	return ret;
+	return 0;
 }
 
 static void nfs_swap_deactivate(struct file *file)

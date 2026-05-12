@@ -11,10 +11,7 @@
 struct iomap_swapfile_info {
 	struct iomap iomap;		/* accumulated iomap */
 	struct swap_info_struct *sis;
-	uint64_t lowest_ppage;		/* lowest physical addr seen (pages) */
-	uint64_t highest_ppage;		/* highest physical addr seen (pages) */
 	unsigned long nr_pages;		/* number of pages collected */
-	int nr_extents;			/* extent count */
 	struct file *file;
 };
 
@@ -27,16 +24,8 @@ struct iomap_swapfile_info {
 static int iomap_swapfile_add_extent(struct iomap_swapfile_info *isi)
 {
 	struct iomap *iomap = &isi->iomap;
-	unsigned long nr_pages;
-	unsigned long max_pages;
 	uint64_t first_ppage;
-	uint64_t first_ppage_reported;
 	uint64_t next_ppage;
-	int error;
-
-	if (unlikely(isi->nr_pages >= isi->sis->max))
-		return 0;
-	max_pages = isi->sis->max - isi->nr_pages;
 
 	/*
 	 * Round the start up and the end down so that the physical
@@ -45,33 +34,7 @@ static int iomap_swapfile_add_extent(struct iomap_swapfile_info *isi)
 	first_ppage = ALIGN(iomap->addr, PAGE_SIZE) >> PAGE_SHIFT;
 	next_ppage = ALIGN_DOWN(iomap->addr + iomap->length, PAGE_SIZE) >>
 			PAGE_SHIFT;
-
-	/* Skip too-short physical extents. */
-	if (first_ppage >= next_ppage)
-		return 0;
-	nr_pages = next_ppage - first_ppage;
-	nr_pages = min(nr_pages, max_pages);
-
-	/*
-	 * Calculate how much swap space we're adding; the first page contains
-	 * the swap header and doesn't count.  The mm still wants that first
-	 * page fed to add_swap_extent, however.
-	 */
-	first_ppage_reported = first_ppage;
-	if (iomap->offset == 0)
-		first_ppage_reported++;
-	if (isi->lowest_ppage > first_ppage_reported)
-		isi->lowest_ppage = first_ppage_reported;
-	if (isi->highest_ppage < (next_ppage - 1))
-		isi->highest_ppage = next_ppage - 1;
-
-	/* Add extent, set up for the next call. */
-	error = add_swap_extent(isi->sis, isi->nr_pages, nr_pages, first_ppage);
-	if (error < 0)
-		return error;
-	isi->nr_extents += error;
-	isi->nr_pages += nr_pages;
-	return 0;
+	return add_swap_extent(isi->sis, next_ppage - first_ppage, first_ppage);
 }
 
 static int iomap_swapfile_fail(struct iomap_swapfile_info *isi, const char *str)
@@ -138,8 +101,7 @@ static int iomap_swapfile_iter(struct iomap_iter *iter,
  * passed to the swapfile subsystem.
  */
 int iomap_swapfile_activate(struct swap_info_struct *sis,
-		struct file *swap_file, sector_t *pagespan,
-		const struct iomap_ops *ops)
+		struct file *swap_file, const struct iomap_ops *ops)
 {
 	struct inode *inode = swap_file->f_mapping->host;
 	struct iomap_iter iter = {
@@ -150,7 +112,6 @@ int iomap_swapfile_activate(struct swap_info_struct *sis,
 	};
 	struct iomap_swapfile_info isi = {
 		.sis = sis,
-		.lowest_ppage = (sector_t)-1ULL,
 		.file = swap_file,
 	};
 	int ret;
@@ -174,19 +135,6 @@ int iomap_swapfile_activate(struct swap_info_struct *sis,
 			return ret;
 	}
 
-	/*
-	 * If this swapfile doesn't contain even a single page-aligned
-	 * contiguous range of blocks, reject this useless swapfile to
-	 * prevent confusion later on.
-	 */
-	if (isi.nr_pages == 0) {
-		pr_warn("swapon: Cannot find a single usable page in file.\n");
-		return -EINVAL;
-	}
-
-	*pagespan = 1 + isi.highest_ppage - isi.lowest_ppage;
-	sis->max = isi.nr_pages;
-	sis->pages = isi.nr_pages - 1;
-	return isi.nr_extents;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(iomap_swapfile_activate);

@@ -271,10 +271,9 @@ static int ntfs_writepages(struct address_space *mapping,
 }
 
 static int ntfs_swap_activate(struct swap_info_struct *sis,
-		struct file *swap_file, sector_t *span)
+		struct file *swap_file)
 {
-	return iomap_swapfile_activate(sis, swap_file, span,
-			&ntfs_read_iomap_ops);
+	return iomap_swapfile_activate(sis, swap_file, &ntfs_read_iomap_ops);
 }
 
 const struct address_space_operations ntfs_aops = {

@@ -435,8 +435,7 @@ struct address_space_operations {
 	int (*error_remove_folio)(struct address_space *, struct folio *);
 
 	/* swapfile support */
-	int (*swap_activate)(struct swap_info_struct *sis, struct file *file,
-				sector_t *span);
+	int (*swap_activate)(struct swap_info_struct *sis, struct file *file);
 	void (*swap_deactivate)(struct file *file);
 	int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 };

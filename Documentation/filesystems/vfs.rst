@@ -774,7 +774,7 @@ cache in your filesystem.  The following members are defined:
 					       size_t count);
 		void (*is_dirty_writeback)(struct folio *, bool *, bool *);
 		int (*error_remove_folio)(struct mapping *mapping, struct folio *);
-		int (*swap_activate)(struct swap_info_struct *sis, struct file *f, sector_t *span)
+		int (*swap_activate)(struct swap_info_struct *sis, struct file *f);
 		int (*swap_deactivate)(struct file *);
 		int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 	};

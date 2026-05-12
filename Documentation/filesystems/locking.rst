@@ -264,7 +264,7 @@ prototypes::
 	int (*launder_folio)(struct folio *);
 	bool (*is_partially_uptodate)(struct folio *, size_t from, size_t count);
 	int (*error_remove_folio)(struct address_space *, struct folio *);
-	int (*swap_activate)(struct swap_info_struct *sis, struct file *f, sector_t *span)
+	int (*swap_activate)(struct swap_info_struct *sis, struct file *f)
 	int (*swap_deactivate)(struct file *);
 	int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 

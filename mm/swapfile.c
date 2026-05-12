@@ -2704,15 +2704,21 @@ static void destroy_swap_extents(struct swap_info_struct *sis,
  * Add a block range (and the corresponding page range) into this swapdev's
  * extent tree.
  *
- * This function rather assumes that it is called in ascending page order.
+ * Note that start_block is in units of PAGE_SIZE and not actually in block
+ * layer sectors as the sector_t would suggest.
  */
 int
-add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
-		unsigned long nr_pages, sector_t start_block)
+add_swap_extent(struct swap_info_struct *sis, unsigned long nr_pages,
+		sector_t start_block)
 {
 	struct rb_node **link = &sis->swap_extent_root.rb_node, *parent = NULL;
 	struct swap_extent *se;
-	struct swap_extent *new_se;
+
+	if (!nr_pages)
+		return 0;
+	if (unlikely(sis->pages >= sis->max))
+		return 0;
+	nr_pages = min(nr_pages, sis->max - sis->pages);
 
 	/*
 	 * place the new node at the right most since the
@@ -2725,25 +2731,25 @@ add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
 
 	if (parent) {
 		se = rb_entry(parent, struct swap_extent, rb_node);
-		BUG_ON(se->start_page + se->nr_pages != start_page);
-		if (se->start_block + se->nr_pages == start_block) {
-			/* Merge it */
-			se->nr_pages += nr_pages;
-			return 0;
-		}
+		if (WARN_ON_ONCE(se->start_page + se->nr_pages != sis->pages))
+			return -EINVAL;
+		if (se->start_block + se->nr_pages == start_block)
+			goto add;
 	}
 
 	/* No merge, insert a new extent. */
-	new_se = kmalloc_obj(*se);
-	if (new_se == NULL)
+	se = kzalloc_obj(*se);
+	if (!se)
 		return -ENOMEM;
-	new_se->start_page = start_page;
-	new_se->nr_pages = nr_pages;
-	new_se->start_block = start_block;
+	rb_link_node(&se->rb_node, parent, link);
+	rb_insert_color(&se->rb_node, &sis->swap_extent_root);
 
-	rb_link_node(&new_se->rb_node, parent, link);
-	rb_insert_color(&new_se->rb_node, &sis->swap_extent_root);
-	return 1;
+	se->start_page = sis->pages;
+	se->start_block = start_block;
+add:
+	se->nr_pages += nr_pages;
+	sis->pages += nr_pages;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(add_swap_extent);
 
@@ -2775,20 +2781,17 @@ EXPORT_SYMBOL_GPL(add_swap_extent);
  * extents in the rbtree. - akpm.
  */
 static int setup_swap_extents(struct swap_info_struct *sis,
-			      struct file *swap_file, sector_t *span)
+			      struct file *swap_file)
 {
 	struct address_space *mapping = swap_file->f_mapping;
 	struct inode *inode = mapping->host;
 	int ret;
 
-	if (S_ISBLK(inode->i_mode)) {
-		ret = add_swap_extent(sis, 0, sis->max, 0);
-		*span = sis->pages;
-		return ret;
-	}
+	if (S_ISBLK(inode->i_mode))
+		return add_swap_extent(sis, sis->max, 0);
 
 	if (mapping->a_ops->swap_activate) {
-		ret = mapping->a_ops->swap_activate(sis, swap_file, span);
+		ret = mapping->a_ops->swap_activate(sis, swap_file);
 		if (ret < 0)
 			return ret;
 		sis->flags |= SWP_ACTIVATED;
@@ -2800,7 +2803,7 @@ static int setup_swap_extents(struct swap_info_struct *sis,
 		return ret;
 	}
 
-	return generic_swapfile_activate(sis, swap_file, span);
+	return generic_swapfile_activate(sis, swap_file);
 }
 
 static void _enable_swap_info(struct swap_info_struct *si)
@@ -3428,6 +3431,40 @@ err:
 	return err;
 }
 
+static void swap_print_info(struct swap_info_struct *si, const char *name)
+{
+	unsigned int nr_extents = 0;
+	u64 lowest_ppage = (u64)-1;
+	u64 highest_ppage = 0;
+	struct swap_extent *se;
+
+	/*
+	 * Calculate how much swap space we're adding; the first page contains
+	 * the swap header and doesn't count.
+	 */
+	for (se = first_se(si); se; se = next_se(se)) {
+		u64 first_ppage = se->start_block;
+		u64 next_ppage = se->start_block + se->nr_pages;
+
+		if (se->start_page == 0)
+			first_ppage++;
+
+		if (lowest_ppage > first_ppage)
+			lowest_ppage = first_ppage;
+		if (highest_ppage < next_ppage - 1)
+			highest_ppage = next_ppage - 1;
+		nr_extents++;
+	}
+
+	pr_info("Adding %uk swap on %s.  Priority:%d extents:%d across:%lluk %s%s%s%s\n",
+		K(si->pages), name, si->prio, nr_extents,
+		K(highest_ppage - lowest_ppage),
+		(si->flags & SWP_SOLIDSTATE) ? "SS" : "",
+		(si->flags & SWP_DISCARDABLE) ? "D" : "",
+		(si->flags & SWP_AREA_DISCARD) ? "s" : "",
+		(si->flags & SWP_PAGE_DISCARD) ? "c" : "");
+}
+
 SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 {
 	struct swap_info_struct *si;
@@ -3437,8 +3474,6 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	int prio;
 	int error;
 	union swap_header *swap_header;
-	int nr_extents;
-	sector_t span;
 	struct folio *folio = NULL;
 	struct inode *inode = NULL;
 	bool inced_nr_rotate_swap = false;
@@ -3510,23 +3545,24 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	}
 	swap_header = kmap_local_folio(folio, 0);
 
+	si->pages = 0;
 	si->max = read_swap_header(si, swap_header, inode);
 	if (unlikely(!si->max)) {
 		error = -EINVAL;
 		goto bad_swap_unlock_inode;
 	}
 
-	si->pages = si->max - 1;
-	nr_extents = setup_swap_extents(si, swap_file, &span);
-	if (nr_extents < 0) {
-		error = nr_extents;
+	error = setup_swap_extents(si, swap_file);
+	if (error < 0)
 		goto bad_swap_unlock_inode;
-	}
-	if (si->pages != si->max - 1) {
-		pr_err("swap:%u != (max:%u - 1)\n", si->pages, si->max);
+	if (si->pages != si->max) {
+		pr_err("swap:%u != (max:%u)\n", si->pages, si->max);
 		error = -EINVAL;
 		goto bad_swap_unlock_inode;
 	}
+
+	/* Remove the first page countaining the swap header. */
+	si->pages--;
 
 	/* Set up the swap cluster info */
 	error = setup_swap_clusters_info(si, swap_header);
@@ -3624,13 +3660,7 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	/* Sets SWP_WRITEOK, resurrect the percpu ref, expose the swap device */
 	enable_swap_info(si);
 
-	pr_info("Adding %uk swap on %s.  Priority:%d extents:%d across:%lluk %s%s%s%s\n",
-		K(si->pages), name->name, si->prio, nr_extents,
-		K((unsigned long long)span),
-		(si->flags & SWP_SOLIDSTATE) ? "SS" : "",
-		(si->flags & SWP_DISCARDABLE) ? "D" : "",
-		(si->flags & SWP_AREA_DISCARD) ? "s" : "",
-		(si->flags & SWP_PAGE_DISCARD) ? "c" : "");
+	swap_print_info(si, name->name);
 
 	mutex_unlock(&swapon_mutex);
 	atomic_inc(&proc_poll_event);

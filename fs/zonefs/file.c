@@ -168,7 +168,7 @@ static int zonefs_writepages(struct address_space *mapping,
 }
 
 static int zonefs_swap_activate(struct swap_info_struct *sis,
-				struct file *swap_file, sector_t *span)
+				struct file *swap_file)
 {
 	struct inode *inode = file_inode(swap_file);
 
@@ -178,8 +178,7 @@ static int zonefs_swap_activate(struct swap_info_struct *sis,
 		return -EINVAL;
 	}
 
-	return iomap_swapfile_activate(sis, swap_file, span,
-				       &zonefs_read_iomap_ops);
+	return iomap_swapfile_activate(sis, swap_file, &zonefs_read_iomap_ops);
 }
 
 const struct address_space_operations zonefs_file_aops = {

@@ -3940,10 +3940,9 @@ static bool ext4_dirty_folio(struct address_space *mapping, struct folio *folio)
 }
 
 static int ext4_iomap_swap_activate(struct swap_info_struct *sis,
-				    struct file *file, sector_t *span)
+				    struct file *file)
 {
-	return iomap_swapfile_activate(sis, file, span,
-				       &ext4_iomap_report_ops);
+	return iomap_swapfile_activate(sis, file, &ext4_iomap_report_ops);
 }
 
 static const struct address_space_operations ext4_aops = {

@@ -4249,7 +4249,7 @@ done:
 }
 
 static int check_swap_activate(struct swap_info_struct *sis,
-				struct file *swap_file, sector_t *span)
+				struct file *swap_file)
 {
 	struct address_space *mapping = swap_file->f_mapping;
 	struct inode *inode = mapping->host;
@@ -4257,9 +4257,6 @@ static int check_swap_activate(struct swap_info_struct *sis,
 	block_t cur_lblock;
 	block_t last_lblock;
 	block_t pblock;
-	block_t lowest_pblock = -1;
-	block_t highest_pblock = 0;
-	int nr_extents = 0;
 	unsigned int nr_pblocks;
 	unsigned int blks_per_sec = BLKS_PER_SEC(sbi);
 	unsigned int not_aligned = 0;
@@ -4272,7 +4269,7 @@ static int check_swap_activate(struct swap_info_struct *sis,
 	cur_lblock = 0;
 	last_lblock = F2FS_BYTES_TO_BLK(i_size_read(inode));
 
-	while (cur_lblock < last_lblock && cur_lblock < sis->max) {
+	while (cur_lblock < last_lblock) {
 		struct f2fs_map_blocks map;
 		bool last_extent = false;
 retry:
@@ -4307,8 +4304,6 @@ retry:
 			not_aligned++;
 
 			nr_pblocks = roundup(nr_pblocks, blks_per_sec);
-			if (cur_lblock + nr_pblocks > sis->max)
-				nr_pblocks -= blks_per_sec;
 
 			/* this extent is last one */
 			if (!nr_pblocks) {
@@ -4328,31 +4323,14 @@ retry:
 			goto retry;
 		}
 
-		if (cur_lblock + nr_pblocks >= sis->max)
-			nr_pblocks = sis->max - cur_lblock;
-
-		if (cur_lblock) {	/* exclude the header page */
-			if (pblock < lowest_pblock)
-				lowest_pblock = pblock;
-			if (pblock + nr_pblocks - 1 > highest_pblock)
-				highest_pblock = pblock + nr_pblocks - 1;
-		}
-
 		/*
 		 * We found a PAGE_SIZE-length, PAGE_SIZE-aligned run of blocks
 		 */
-		ret = add_swap_extent(sis, cur_lblock, nr_pblocks, pblock);
+		ret = add_swap_extent(sis, nr_pblocks, pblock);
 		if (ret < 0)
 			goto out;
-		nr_extents += ret;
 		cur_lblock += nr_pblocks;
 	}
-	ret = nr_extents;
-	*span = 1 + highest_pblock - lowest_pblock;
-	if (cur_lblock == 0)
-		cur_lblock = 1;	/* force Empty message */
-	sis->max = cur_lblock;
-	sis->pages = cur_lblock - 1;
 out:
 	if (not_aligned)
 		f2fs_warn(sbi, "Swapfile (%u) is not align to section: 1) creat(), 2) ioctl(F2FS_IOC_SET_PIN_FILE), 3) fallocate(%lu * N)",
@@ -4360,8 +4338,7 @@ out:
 	return ret;
 }
 
-static int f2fs_swap_activate(struct swap_info_struct *sis, struct file *file,
-				sector_t *span)
+static int f2fs_swap_activate(struct swap_info_struct *sis, struct file *file)
 {
 	struct inode *inode = file_inode(file);
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
@@ -4391,14 +4368,14 @@ static int f2fs_swap_activate(struct swap_info_struct *sis, struct file *file,
 
 	f2fs_precache_extents(inode);
 
-	ret = check_swap_activate(sis, file, span);
+	ret = check_swap_activate(sis, file);
 	if (ret < 0)
 		return ret;
 
 	stat_inc_swapfile_inode(inode);
 	set_inode_flag(inode, FI_PIN_FILE);
 	f2fs_update_time(sbi, REQ_TIME);
-	return ret;
+	return 0;
 }
 
 static void f2fs_swap_deactivate(struct file *file)
@@ -4409,8 +4386,7 @@ static void f2fs_swap_deactivate(struct file *file)
 	clear_inode_flag(inode, FI_PIN_FILE);
 }
 #else
-static int f2fs_swap_activate(struct swap_info_struct *sis, struct file *file,
-				sector_t *span)
+static int f2fs_swap_activate(struct swap_info_struct *sis, struct file *file)
 {
 	return -EOPNOTSUPP;
 }

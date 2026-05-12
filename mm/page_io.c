@@ -76,19 +76,14 @@ static void end_swap_bio_read(struct bio *bio)
 }
 
 int generic_swapfile_activate(struct swap_info_struct *sis,
-				struct file *swap_file,
-				sector_t *span)
+				struct file *swap_file)
 {
 	struct address_space *mapping = swap_file->f_mapping;
 	struct inode *inode = mapping->host;
 	unsigned blocks_per_page;
-	unsigned long page_no;
 	unsigned blkbits;
 	sector_t probe_block;
 	sector_t last_block;
-	sector_t lowest_block = -1;
-	sector_t highest_block = 0;
-	int nr_extents = 0;
 	int ret;
 
 	blkbits = inode->i_blkbits;
@@ -99,10 +94,8 @@ int generic_swapfile_activate(struct swap_info_struct *sis,
 	 * to be very smart.
 	 */
 	probe_block = 0;
-	page_no = 0;
 	last_block = i_size_read(inode) >> blkbits;
-	while ((probe_block + blocks_per_page) <= last_block &&
-			page_no < sis->max) {
+	while ((probe_block + blocks_per_page) <= last_block) {
 		unsigned block_in_page;
 		sector_t first_block;
 
@@ -137,38 +130,22 @@ int generic_swapfile_activate(struct swap_info_struct *sis,
 			}
 		}
 
-		first_block >>= (PAGE_SHIFT - blkbits);
-		if (page_no) {	/* exclude the header page */
-			if (first_block < lowest_block)
-				lowest_block = first_block;
-			if (first_block > highest_block)
-				highest_block = first_block;
-		}
-
 		/*
 		 * We found a PAGE_SIZE-length, PAGE_SIZE-aligned run of blocks
 		 */
-		ret = add_swap_extent(sis, page_no, 1, first_block);
+		ret = add_swap_extent(sis, 1,
+				first_block >> (PAGE_SHIFT - blkbits));
 		if (ret < 0)
-			goto out;
-		nr_extents += ret;
-		page_no++;
+			return ret;
 		probe_block += blocks_per_page;
 reprobe:
 		continue;
 	}
-	ret = nr_extents;
-	*span = 1 + highest_block - lowest_block;
-	if (page_no == 0)
-		page_no = 1;	/* force Empty message */
-	sis->max = page_no;
-	sis->pages = page_no - 1;
-out:
-	return ret;
+	return 0;
+
 bad_bmap:
 	pr_err("swapon: swapfile has holes\n");
-	ret = -EINVAL;
-	goto out;
+	return -EINVAL;
 }
 
 static bool is_folio_zero_filled(struct folio *folio)

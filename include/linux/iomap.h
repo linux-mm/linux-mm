@@ -611,10 +611,9 @@ struct file;
 struct swap_info_struct;
 
 int iomap_swapfile_activate(struct swap_info_struct *sis,
-		struct file *swap_file, sector_t *pagespan,
-		const struct iomap_ops *ops);
+		struct file *swap_file, const struct iomap_ops *ops);
 #else
-# define iomap_swapfile_activate(sis, swapfile, pagespan, ops)	(-EIO)
+# define iomap_swapfile_activate(sis, swapfile, ops)	(-EIO)
 #endif /* CONFIG_SWAP */
 
 extern struct bio_set iomap_ioend_bioset;

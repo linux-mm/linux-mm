@@ -810,8 +810,7 @@ xfs_vm_readahead(
 static int
 xfs_vm_swap_activate(
 	struct swap_info_struct		*sis,
-	struct file			*swap_file,
-	sector_t			*span)
+	struct file			*swap_file)
 {
 	struct xfs_inode		*ip = XFS_I(file_inode(swap_file));
 
@@ -849,8 +848,7 @@ xfs_vm_swap_activate(
 	 */
 	sis->bdev = xfs_inode_buftarg(ip)->bt_bdev;
 
-	return iomap_swapfile_activate(sis, swap_file, span,
-			&xfs_read_iomap_ops);
+	return iomap_swapfile_activate(sis, swap_file, &xfs_read_iomap_ops);
 }
 
 const struct address_space_operations xfs_address_space_operations = {

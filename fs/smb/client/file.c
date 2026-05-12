@@ -3292,7 +3292,7 @@ out:
 }
 
 static int cifs_swap_activate(struct swap_info_struct *sis,
-			      struct file *swap_file, sector_t *span)
+			      struct file *swap_file)
 {
 	struct cifsFileInfo *cfile = swap_file->private_data;
 	struct inode *inode = swap_file->f_mapping->host;
@@ -3313,7 +3313,6 @@ static int cifs_swap_activate(struct swap_info_struct *sis,
 		pr_warn("swap activate: swapfile has holes\n");
 		return -EINVAL;
 	}
-	*span = sis->pages;
 
 	pr_warn_once("Swap support over SMB3 is experimental\n");
 
@@ -3334,7 +3333,7 @@ static int cifs_swap_activate(struct swap_info_struct *sis,
 	 */
 
 	sis->flags |= SWP_FS_OPS;
-	return add_swap_extent(sis, 0, sis->max, 0);
+	return add_swap_extent(sis, sis->max, 0);
 }
 
 static void cifs_swap_deactivate(struct file *file)
