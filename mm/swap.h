@@ -8,6 +8,79 @@ struct swap_iocb;
 
 extern int page_cluster;
 
+/*
+ * We keep using same cluster for rotational device so IO will be sequential.
+ * The purpose is to optimize SWAP throughput on these device.
+ */
+struct swap_sequential_cluster {
+	unsigned int next[SWAP_NR_ORDERS]; /* Likely next allocation offset */
+};
+
+/*
+ * The in-memory structure used to track swap areas.
+ */
+struct swap_info_struct {
+	struct percpu_ref users;	/* indicate and keep swap device valid. */
+	unsigned long	flags;		/* SWP_USED etc: see above */
+	signed short	prio;		/* swap priority of this type */
+	struct plist_node list;		/* entry in swap_active_head */
+	signed char	type;		/* strange name for an index */
+	unsigned int	max;		/* size of this swap device */
+	unsigned long *zeromap;		/* kvmalloc'ed bitmap to track zero pages */
+	struct swap_cluster_info *cluster_info; /* cluster info. Only for SSD */
+	struct list_head free_clusters; /* free clusters list */
+	struct list_head full_clusters; /* full clusters list */
+	struct list_head nonfull_clusters[SWAP_NR_ORDERS];
+					/* list of cluster that contains at least one free slot */
+	struct list_head frag_clusters[SWAP_NR_ORDERS];
+					/* list of cluster that are fragmented or contented */
+	unsigned int pages;		/* total of usable pages of swap */
+	atomic_long_t inuse_pages;	/* number of those currently in use */
+	struct swap_sequential_cluster *global_cluster; /* Use one global cluster for rotating device */
+	spinlock_t global_cluster_lock;	/* Serialize usage of global cluster */
+	struct rb_root swap_extent_root;/* root of the swap extent rbtree */
+	struct block_device *bdev;	/* swap device or bdev of swap file */
+	struct file *swap_file;		/* seldom referenced */
+	struct completion comp;		/* seldom referenced */
+	spinlock_t lock;		/*
+					 * protect map scan related fields like
+					 * inuse_pages and all cluster lists.
+					 * Other fields are only changed
+					 * at swapon/swapoff, so are protected
+					 * by swap_lock. changing flags need
+					 * hold this lock and swap_lock. If
+					 * both locks need hold, hold swap_lock
+					 * first.
+					 */
+	struct work_struct discard_work; /* discard worker */
+	struct work_struct reclaim_work; /* reclaim worker */
+	struct list_head discard_clusters; /* discard clusters list */
+	struct plist_node avail_list;   /* entry in swap_avail_head */
+};
+
+/*
+ * Max bad pages in the new format..
+ */
+#define MAX_SWAP_BADPAGES \
+	((offsetof(union swap_header, magic.magic) - \
+	  offsetof(union swap_header, info.badpages)) / sizeof(int))
+
+enum {
+	SWP_USED	= (1 << 0),	/* is slot in swap_info[] used? */
+	SWP_WRITEOK	= (1 << 1),	/* ok to write to this swap?	*/
+	SWP_DISCARDABLE = (1 << 2),	/* blkdev support discard */
+	SWP_DISCARDING	= (1 << 3),	/* now discarding a free cluster */
+	SWP_SOLIDSTATE	= (1 << 4),	/* blkdev seeks are cheap */
+	SWP_BLKDEV	= (1 << 6),	/* its a block device */
+	SWP_ACTIVATED	= (1 << 7),	/* set after swap_activate success */
+	SWP_FS_OPS	= (1 << 8),	/* swapfile operations go through fs */
+	SWP_AREA_DISCARD = (1 << 9),	/* single-time swap area discards */
+	SWP_PAGE_DISCARD = (1 << 10),	/* freed swap page-cluster discards */
+	SWP_STABLE_WRITES = (1 << 11),	/* no overwrite PG_writeback pages */
+	SWP_SYNCHRONOUS_IO = (1 << 12),	/* synchronous IO is efficient */
+					/* add others here before... */
+};
+
 #ifdef CONFIG_THP_SWAP
 #define SWAPFILE_CLUSTER	HPAGE_PMD_NR
 #define swap_entry_order(order)	(order)
@@ -352,6 +425,13 @@ static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 	return i;
 }
 
+bool swap_entry_swapped(struct swap_info_struct *si, swp_entry_t entry);
+struct swap_info_struct *get_swap_device(swp_entry_t entry);
+static inline void put_swap_device(struct swap_info_struct *si)
+{
+	percpu_ref_put(&si->users);
+}
+
 #else /* CONFIG_SWAP */
 struct swap_iocb;
 static inline struct swap_cluster_info *swap_cluster_lock(
@@ -497,6 +577,18 @@ static inline int swap_zeromap_batch(swp_entry_t entry, int max_nr,
 static inline int non_swapcache_batch(swp_entry_t entry, int max_nr)
 {
 	return 0;
+}
+static inline bool swap_entry_swapped(struct swap_info_struct *si,
+		swp_entry_t entry)
+{
+	return false;
+}
+static inline struct swap_info_struct *get_swap_device(swp_entry_t entry)
+{
+	return NULL;
+}
+static inline void put_swap_device(struct swap_info_struct *si)
+{
 }
 #endif /* CONFIG_SWAP */
 #endif /* _MM_SWAP_H */
