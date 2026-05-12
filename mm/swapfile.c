@@ -2783,25 +2783,24 @@ static int setup_swap_extents(struct swap_info_struct *sis,
 {
 	struct address_space *mapping = swap_file->f_mapping;
 	struct inode *inode = mapping->host;
-	int ret;
+	int ret, error = 0;
 
 	if (S_ISBLK(inode->i_mode))
 		return add_swap_extent(sis, sis->max, 0);
 
-	if (swap_file->f_op->swap_activate) {
+	if (swap_file->f_op->swap_activate)
 		ret = swap_file->f_op->swap_activate(swap_file, sis);
-		if (ret < 0)
-			return ret;
-		sis->flags |= SWP_ACTIVATED;
-		if ((sis->flags & SWP_FS_OPS) &&
-		    sio_pool_init() != 0) {
-			destroy_swap_extents(sis, swap_file);
-			return -ENOMEM;
-		}
+	else
+		ret = generic_swap_activate(swap_file, sis);
+	if (ret < 0)
 		return ret;
-	}
 
-	return generic_swap_activate(swap_file, sis);
+	sis->flags |= SWP_ACTIVATED;
+	if (sis->flags & SWP_FS_OPS)
+		error = sio_pool_init();
+	if (error)
+		destroy_swap_extents(sis, swap_file);
+	return error;
 }
 
 static void _enable_swap_info(struct swap_info_struct *si)
