@@ -10048,7 +10048,7 @@ static int btrfs_add_swap_extent(struct swap_info_struct *sis,
 	return add_swap_extent(sis, next_ppage - first_ppage, first_ppage);
 }
 
-static void btrfs_swap_deactivate(struct file *file)
+void btrfs_swap_deactivate(struct file *file)
 {
 	struct inode *inode = file_inode(file);
 
@@ -10056,7 +10056,7 @@ static void btrfs_swap_deactivate(struct file *file)
 	atomic_dec(&BTRFS_I(inode)->root->nr_swapfiles);
 }
 
-static int btrfs_swap_activate(struct swap_info_struct *sis, struct file *file)
+int btrfs_swap_activate(struct file *file, struct swap_info_struct *sis)
 {
 	struct inode *inode = file_inode(file);
 	struct btrfs_root *root = BTRFS_I(inode)->root;
@@ -10368,15 +10368,6 @@ out_unlock_mmap:
 		sis->bdev = device->bdev;
 	return ret;
 }
-#else
-static void btrfs_swap_deactivate(struct file *file)
-{
-}
-
-static int btrfs_swap_activate(struct swap_info_struct *sis, struct file *file)
-{
-	return -EOPNOTSUPP;
-}
 #endif
 
 /*
@@ -10525,8 +10516,6 @@ static const struct address_space_operations btrfs_aops = {
 	.migrate_folio	= btrfs_migrate_folio,
 	.dirty_folio	= filemap_dirty_folio,
 	.error_remove_folio = generic_error_remove_folio,
-	.swap_activate	= btrfs_swap_activate,
-	.swap_deactivate = btrfs_swap_deactivate,
 };
 
 static const struct inode_operations btrfs_file_inode_operations = {

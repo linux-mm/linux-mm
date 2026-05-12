@@ -118,6 +118,9 @@ int cifs_file_mmap_prepare(struct vm_area_desc *desc);
 int cifs_file_strict_mmap_prepare(struct vm_area_desc *desc);
 extern const struct file_operations cifs_dir_ops;
 int cifs_readdir(struct file *file, struct dir_context *ctx);
+int cifs_swap_activate(struct file *swap_file, struct swap_info_struct *sis);
+void cifs_swap_deactivate(struct file *file);
+int cifs_swap_rw(struct kiocb *iocb, struct iov_iter *iter);
 
 /* Functions related to dir entries */
 extern const struct dentry_operations cifs_dentry_ops;

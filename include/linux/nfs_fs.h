@@ -538,6 +538,9 @@ extern __be32 root_nfs_parse_addr(char *name); /*__init*/
 /*
  * linux/fs/nfs/file.c
  */
+int nfs_swap_activate(struct file *file, struct swap_info_struct *sis);
+void nfs_swap_deactivate(struct file *file);
+
 extern const struct file_operations nfs_file_operations;
 #if IS_ENABLED(CONFIG_NFS_V4)
 extern const struct file_operations nfs4_file_operations;

@@ -4338,7 +4338,7 @@ out:
 	return ret;
 }
 
-static int f2fs_swap_activate(struct swap_info_struct *sis, struct file *file)
+int f2fs_swap_activate(struct file *file, struct swap_info_struct *sis)
 {
 	struct inode *inode = file_inode(file);
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
@@ -4378,21 +4378,12 @@ static int f2fs_swap_activate(struct swap_info_struct *sis, struct file *file)
 	return 0;
 }
 
-static void f2fs_swap_deactivate(struct file *file)
+void f2fs_swap_deactivate(struct file *file)
 {
 	struct inode *inode = file_inode(file);
 
 	stat_dec_swapfile_inode(inode);
 	clear_inode_flag(inode, FI_PIN_FILE);
-}
-#else
-static int f2fs_swap_activate(struct swap_info_struct *sis, struct file *file)
-{
-	return -EOPNOTSUPP;
-}
-
-static void f2fs_swap_deactivate(struct file *file)
-{
 }
 #endif
 
@@ -4407,8 +4398,6 @@ const struct address_space_operations f2fs_dblock_aops = {
 	.invalidate_folio = f2fs_invalidate_folio,
 	.release_folio	= f2fs_release_folio,
 	.bmap		= f2fs_bmap,
-	.swap_activate  = f2fs_swap_activate,
-	.swap_deactivate = f2fs_swap_deactivate,
 };
 
 void f2fs_clear_page_cache_dirty_tag(struct folio *folio)

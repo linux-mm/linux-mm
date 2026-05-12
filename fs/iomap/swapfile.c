@@ -100,10 +100,10 @@ static int iomap_swapfile_iter(struct iomap_iter *iter,
  * Iterate a swap file's iomaps to construct physical extents that can be
  * passed to the swapfile subsystem.
  */
-int iomap_swapfile_activate(struct swap_info_struct *sis,
-		struct file *swap_file, const struct iomap_ops *ops)
+int iomap_swap_activate(struct file *file, struct swap_info_struct *sis,
+		const struct iomap_ops *ops)
 {
-	struct inode *inode = swap_file->f_mapping->host;
+	struct inode *inode = file->f_mapping->host;
 	struct iomap_iter iter = {
 		.inode	= inode,
 		.pos	= 0,
@@ -112,7 +112,7 @@ int iomap_swapfile_activate(struct swap_info_struct *sis,
 	};
 	struct iomap_swapfile_info isi = {
 		.sis = sis,
-		.file = swap_file,
+		.file = file,
 	};
 	int ret;
 
@@ -120,7 +120,7 @@ int iomap_swapfile_activate(struct swap_info_struct *sis,
 	 * Persist all file mapping metadata so that we won't have any
 	 * IOMAP_F_DIRTY iomaps.
 	 */
-	ret = vfs_fsync(swap_file, 1);
+	ret = vfs_fsync(file, 1);
 	if (ret)
 		return ret;
 
@@ -137,4 +137,4 @@ int iomap_swapfile_activate(struct swap_info_struct *sis,
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(iomap_swapfile_activate);
+EXPORT_SYMBOL_GPL(iomap_swap_activate);

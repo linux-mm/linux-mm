@@ -971,6 +971,11 @@ loff_t ext4_llseek(struct file *file, loff_t offset, int whence)
 	return vfs_setpos(file, offset, maxbytes);
 }
 
+static int ext4_swap_activate(struct file *file, struct swap_info_struct *sis)
+{
+	return iomap_swap_activate(file, sis, &ext4_iomap_report_ops);
+}
+
 const struct file_operations ext4_file_operations = {
 	.llseek		= ext4_llseek,
 	.read_iter	= ext4_file_read_iter,
@@ -992,6 +997,7 @@ const struct file_operations ext4_file_operations = {
 			  FOP_DIO_PARALLEL_WRITE |
 			  FOP_DONTCACHE,
 	.setlease	= generic_setlease,
+	.swap_activate	= ext4_swap_activate,
 };
 
 const struct inode_operations ext4_file_inode_operations = {

@@ -270,12 +270,6 @@ static int ntfs_writepages(struct address_space *mapping,
 	return iomap_writepages(&wpc);
 }
 
-static int ntfs_swap_activate(struct swap_info_struct *sis,
-		struct file *swap_file)
-{
-	return iomap_swapfile_activate(sis, swap_file, &ntfs_read_iomap_ops);
-}
-
 const struct address_space_operations ntfs_aops = {
 	.read_folio		= ntfs_read_folio,
 	.readahead		= ntfs_readahead,
@@ -287,7 +281,6 @@ const struct address_space_operations ntfs_aops = {
 	.error_remove_folio	= generic_error_remove_folio,
 	.release_folio		= iomap_release_folio,
 	.invalidate_folio	= iomap_invalidate_folio,
-	.swap_activate          = ntfs_swap_activate,
 };
 
 const struct address_space_operations ntfs_mft_aops = {

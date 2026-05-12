@@ -1114,6 +1114,11 @@ out:
 	return err;
 }
 
+static int ntfs_swap_activate(struct file *file, struct swap_info_struct *sis)
+{
+	return iomap_swap_activate(file, sis, &ntfs_read_iomap_ops);
+}
+
 const struct file_operations ntfs_file_ops = {
 	.llseek		= ntfs_file_llseek,
 	.read_iter	= ntfs_file_read_iter,
@@ -1130,6 +1135,7 @@ const struct file_operations ntfs_file_ops = {
 #endif
 	.fallocate	= ntfs_fallocate,
 	.setlease	= generic_setlease,
+	.swap_activate	= ntfs_swap_activate,
 };
 
 const struct inode_operations ntfs_file_inode_ops = {

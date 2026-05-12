@@ -637,4 +637,7 @@ struct extent_map *btrfs_create_io_em(struct btrfs_inode *inode, u64 start,
 				      const struct btrfs_file_extent *file_extent,
 				      int type);
 
+int btrfs_swap_activate(struct file *file, struct swap_info_struct *sis);
+void btrfs_swap_deactivate(struct file *file);
+
 #endif

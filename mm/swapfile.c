@@ -2692,11 +2692,9 @@ static void destroy_swap_extents(struct swap_info_struct *sis,
 	}
 
 	if (sis->flags & SWP_ACTIVATED) {
-		struct address_space *mapping = swap_file->f_mapping;
-
 		sis->flags &= ~SWP_ACTIVATED;
-		if (mapping->a_ops->swap_deactivate)
-			mapping->a_ops->swap_deactivate(swap_file);
+		if (swap_file->f_op->swap_deactivate)
+			swap_file->f_op->swap_deactivate(swap_file);
 	}
 }
 
@@ -2790,8 +2788,8 @@ static int setup_swap_extents(struct swap_info_struct *sis,
 	if (S_ISBLK(inode->i_mode))
 		return add_swap_extent(sis, sis->max, 0);
 
-	if (mapping->a_ops->swap_activate) {
-		ret = mapping->a_ops->swap_activate(sis, swap_file);
+	if (swap_file->f_op->swap_activate) {
+		ret = swap_file->f_op->swap_activate(swap_file, sis);
 		if (ret < 0)
 			return ret;
 		sis->flags |= SWP_ACTIVATED;
@@ -2803,7 +2801,7 @@ static int setup_swap_extents(struct swap_info_struct *sis,
 		return ret;
 	}
 
-	return generic_swapfile_activate(sis, swap_file);
+	return generic_swap_activate(swap_file, sis);
 }
 
 static void _enable_swap_info(struct swap_info_struct *si)

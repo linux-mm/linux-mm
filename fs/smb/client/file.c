@@ -3291,8 +3291,7 @@ out:
 	cifs_done_oplock_break(cinode);
 }
 
-static int cifs_swap_activate(struct swap_info_struct *sis,
-			      struct file *swap_file)
+int cifs_swap_activate(struct file *swap_file, struct swap_info_struct *sis)
 {
 	struct cifsFileInfo *cfile = swap_file->private_data;
 	struct inode *inode = swap_file->f_mapping->host;
@@ -3301,7 +3300,7 @@ static int cifs_swap_activate(struct swap_info_struct *sis,
 
 	cifs_dbg(FYI, "swap activate\n");
 
-	if (!swap_file->f_mapping->a_ops->swap_rw)
+	if (!swap_file->f_op->swap_rw)
 		/* Cannot support swap */
 		return -EINVAL;
 
@@ -3336,7 +3335,7 @@ static int cifs_swap_activate(struct swap_info_struct *sis,
 	return add_swap_extent(sis, sis->max, 0);
 }
 
-static void cifs_swap_deactivate(struct file *file)
+void cifs_swap_deactivate(struct file *file)
 {
 	struct cifsFileInfo *cfile = file->private_data;
 
@@ -3357,7 +3356,7 @@ static void cifs_swap_deactivate(struct file *file)
  *
  * Perform IO to the swap-file.  This is much like direct IO.
  */
-static int cifs_swap_rw(struct kiocb *iocb, struct iov_iter *iter)
+int cifs_swap_rw(struct kiocb *iocb, struct iov_iter *iter)
 {
 	ssize_t ret;
 
@@ -3383,9 +3382,6 @@ const struct address_space_operations cifs_addr_ops = {
 	 * TODO: investigate and if useful we could add an is_dirty_writeback
 	 * helper if needed
 	 */
-	.swap_activate	= cifs_swap_activate,
-	.swap_deactivate = cifs_swap_deactivate,
-	.swap_rw = cifs_swap_rw,
 };
 
 /*

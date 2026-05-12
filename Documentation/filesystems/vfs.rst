@@ -774,9 +774,6 @@ cache in your filesystem.  The following members are defined:
 					       size_t count);
 		void (*is_dirty_writeback)(struct folio *, bool *, bool *);
 		int (*error_remove_folio)(struct mapping *mapping, struct folio *);
-		int (*swap_activate)(struct swap_info_struct *sis, struct file *f);
-		int (*swap_deactivate)(struct file *);
-		int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 	};
 
 ``read_folio``
@@ -970,23 +967,6 @@ cache in your filesystem.  The following members are defined:
 	Setting this implies you deal with pages going away under you,
 	unless you have them locked or reference counts increased.
 
-``swap_activate``
-
-	Called to prepare the given file for swap.  It should perform
-	any validation and preparation necessary to ensure that writes
-	can be performed with minimal memory allocation.  It should call
-	add_swap_extent(), or the helper iomap_swapfile_activate(), and
-	return the number of extents added.  If IO should be submitted
-	through ->swap_rw(), it should set SWP_FS_OPS, otherwise IO will
-	be submitted directly to the block device ``sis->bdev``.
-
-``swap_deactivate``
-	Called during swapoff on files where swap_activate was
-	successful.
-
-``swap_rw``
-	Called to read or write swap pages when SWP_FS_OPS is set.
-
 The File Object
 ===============
 
@@ -1046,6 +1026,9 @@ This describes how the VFS can manipulate an open file.  As of kernel
 		int (*uring_cmd_iopoll)(struct io_uring_cmd *, struct io_comp_batch *,
 					unsigned int poll_flags);
 		int (*mmap_prepare)(struct vm_area_desc *);
+		int (*swap_activate)(struct file *file, struct swap_info_struct *sis);
+		int (*swap_deactivate)(struct file *);
+		int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 	};
 
 Again, all methods are called without any locks being held, unless
@@ -1174,6 +1157,23 @@ otherwise noted.
 	If further action such as pre-population of page tables is required,
 	this can be specified by the vm_area_desc->action field and related
 	parameters.
+
+``swap_activate``
+
+	Called to prepare the given file for swap.  It should perform
+	any validation and preparation necessary to ensure that writes
+	can be performed with minimal memory allocation.  It should call
+	add_swap_extent(), or the helper iomap_swap_activate(), and
+	return the number of extents added.  If IO should be submitted
+	through ->swap_rw(), it should set SWP_FS_OPS, otherwise IO will
+	be submitted directly to the block device ``sis->bdev``.
+
+``swap_deactivate``
+	Called during swapoff on files where swap_activate was
+	successful.
+
+``swap_rw``
+	Called to read or write swap pages when SWP_FS_OPS is set.
 
 Note that the file operations are implemented by the specific
 filesystem in which the inode resides.  When opening a device node

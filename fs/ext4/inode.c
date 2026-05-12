@@ -3939,12 +3939,6 @@ static bool ext4_dirty_folio(struct address_space *mapping, struct folio *folio)
 	return block_dirty_folio(mapping, folio);
 }
 
-static int ext4_iomap_swap_activate(struct swap_info_struct *sis,
-				    struct file *file)
-{
-	return iomap_swapfile_activate(sis, file, &ext4_iomap_report_ops);
-}
-
 static const struct address_space_operations ext4_aops = {
 	.read_folio		= ext4_read_folio,
 	.readahead		= ext4_readahead,
@@ -3958,7 +3952,6 @@ static const struct address_space_operations ext4_aops = {
 	.migrate_folio		= buffer_migrate_folio,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 	.error_remove_folio	= generic_error_remove_folio,
-	.swap_activate		= ext4_iomap_swap_activate,
 };
 
 static const struct address_space_operations ext4_journalled_aops = {
@@ -3974,7 +3967,6 @@ static const struct address_space_operations ext4_journalled_aops = {
 	.migrate_folio		= buffer_migrate_folio_norefs,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 	.error_remove_folio	= generic_error_remove_folio,
-	.swap_activate		= ext4_iomap_swap_activate,
 };
 
 static const struct address_space_operations ext4_da_aops = {
@@ -3990,14 +3982,12 @@ static const struct address_space_operations ext4_da_aops = {
 	.migrate_folio		= buffer_migrate_folio,
 	.is_partially_uptodate  = block_is_partially_uptodate,
 	.error_remove_folio	= generic_error_remove_folio,
-	.swap_activate		= ext4_iomap_swap_activate,
 };
 
 static const struct address_space_operations ext4_dax_aops = {
 	.writepages		= ext4_dax_writepages,
 	.dirty_folio		= noop_dirty_folio,
 	.bmap			= ext4_bmap,
-	.swap_activate		= ext4_iomap_swap_activate,
 };
 
 void ext4_set_aops(struct inode *inode)

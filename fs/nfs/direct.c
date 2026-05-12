@@ -164,6 +164,7 @@ int nfs_swap_rw(struct kiocb *iocb, struct iov_iter *iter)
 		return ret;
 	return 0;
 }
+EXPORT_SYMBOL_GPL(nfs_swap_rw);
 
 static void nfs_direct_release_pages(struct page **pages, unsigned int npages)
 {

@@ -455,5 +455,8 @@ const struct file_operations nfs4_file_operations = {
 #else
 	.llseek		= nfs_file_llseek,
 #endif
+	.swap_activate	= nfs_swap_activate,
+	.swap_deactivate = nfs_swap_deactivate,
+	.swap_rw	= nfs_swap_rw,
 	.fop_flags	= FOP_DONTCACHE,
 };

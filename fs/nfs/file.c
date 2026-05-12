@@ -567,7 +567,7 @@ static int nfs_launder_folio(struct folio *folio)
 	return ret;
 }
 
-static int nfs_swap_activate(struct swap_info_struct *sis, struct file *file)
+int nfs_swap_activate(struct file *file, struct swap_info_struct *sis)
 {
 	unsigned long blocks;
 	long long isize;
@@ -600,8 +600,9 @@ static int nfs_swap_activate(struct swap_info_struct *sis, struct file *file)
 	sis->flags |= SWP_FS_OPS;
 	return 0;
 }
+EXPORT_SYMBOL_GPL(nfs_swap_activate);
 
-static void nfs_swap_deactivate(struct file *file)
+void nfs_swap_deactivate(struct file *file)
 {
 	struct inode *inode = file_inode(file);
 	struct rpc_clnt *clnt = NFS_CLIENT(inode);
@@ -611,6 +612,7 @@ static void nfs_swap_deactivate(struct file *file)
 	if (cl->rpc_ops->disable_swap)
 		cl->rpc_ops->disable_swap(file_inode(file));
 }
+EXPORT_SYMBOL_GPL(nfs_swap_deactivate);
 
 const struct address_space_operations nfs_file_aops = {
 	.read_folio = nfs_read_folio,
@@ -625,9 +627,6 @@ const struct address_space_operations nfs_file_aops = {
 	.launder_folio = nfs_launder_folio,
 	.is_dirty_writeback = nfs_check_dirty_writeback,
 	.error_remove_folio = generic_error_remove_folio,
-	.swap_activate = nfs_swap_activate,
-	.swap_deactivate = nfs_swap_deactivate,
-	.swap_rw = nfs_swap_rw,
 };
 
 /*
@@ -960,6 +959,9 @@ const struct file_operations nfs_file_operations = {
 	.splice_read	= nfs_file_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.check_flags	= nfs_check_flags,
+	.swap_activate	= nfs_swap_activate,
+	.swap_deactivate = nfs_swap_deactivate,
+	.swap_rw	= nfs_swap_rw,
 	.fop_flags	= FOP_DONTCACHE,
 };
 EXPORT_SYMBOL_GPL(nfs_file_operations);

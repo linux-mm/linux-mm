@@ -3860,6 +3860,10 @@ const struct file_operations btrfs_file_operations = {
 	.uring_cmd	= btrfs_uring_cmd,
 	.fop_flags	= FOP_BUFFER_RASYNC | FOP_BUFFER_WASYNC,
 	.setlease	= generic_setlease,
+#ifdef CONFIG_SWAP
+	.swap_activate	= btrfs_swap_activate,
+	.swap_deactivate = btrfs_swap_deactivate,
+#endif
 };
 
 int btrfs_fdatawrite_range(struct btrfs_inode *inode, loff_t start, loff_t end)

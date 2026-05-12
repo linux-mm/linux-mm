@@ -433,11 +433,6 @@ struct address_space_operations {
 			size_t count);
 	void (*is_dirty_writeback) (struct folio *, bool *dirty, bool *wb);
 	int (*error_remove_folio)(struct address_space *, struct folio *);
-
-	/* swapfile support */
-	int (*swap_activate)(struct swap_info_struct *sis, struct file *file);
-	void (*swap_deactivate)(struct file *file);
-	int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 };
 
 extern const struct address_space_operations empty_aops;
@@ -1966,6 +1961,11 @@ struct file_operations {
 	int (*uring_cmd_iopoll)(struct io_uring_cmd *, struct io_comp_batch *,
 				unsigned int poll_flags);
 	int (*mmap_prepare)(struct vm_area_desc *);
+
+	/* swapfile support */
+	int (*swap_activate)(struct file *file, struct swap_info_struct *sis);
+	void (*swap_deactivate)(struct file *file);
+	int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 } __randomize_layout;
 
 /* Supports async buffered reads */

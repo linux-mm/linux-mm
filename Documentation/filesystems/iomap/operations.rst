@@ -55,7 +55,6 @@ The following address space operations can be wrapped easily:
  * ``readahead``
  * ``writepages``
  * ``bmap``
- * ``swap_activate``
 
 ``struct iomap_write_ops``
 --------------------------
@@ -747,7 +746,7 @@ function.
 Swap File Activation
 ====================
 
-The ``iomap_swapfile_activate`` function finds all the base-page aligned
+The ``iomap_swap_activate`` function finds all the base-page aligned
 regions in a file and sets them up as swap space.
 The file will be ``fsync()``'d before activation.
 ``IOMAP_REPORT`` will be passed as the ``flags`` argument to

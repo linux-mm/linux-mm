@@ -75,8 +75,7 @@ static void end_swap_bio_read(struct bio *bio)
 	bio_put(bio);
 }
 
-int generic_swapfile_activate(struct swap_info_struct *sis,
-				struct file *swap_file)
+int generic_swap_activate(struct file *swap_file, struct swap_info_struct *sis)
 {
 	struct address_space *mapping = swap_file->f_mapping;
 	struct inode *inode = mapping->host;
@@ -451,11 +450,10 @@ void __swap_writepage(struct folio *folio, struct swap_iocb **swap_plug)
 void swap_write_unplug(struct swap_iocb *sio)
 {
 	struct iov_iter from;
-	struct address_space *mapping = sio->iocb.ki_filp->f_mapping;
 	int ret;
 
 	iov_iter_bvec(&from, ITER_SOURCE, sio->bvec, sio->pages, sio->len);
-	ret = mapping->a_ops->swap_rw(&sio->iocb, &from);
+	ret = sio->iocb.ki_filp->f_op->swap_rw(&sio->iocb, &from);
 	if (ret != -EIOCBQUEUED)
 		sio_write_complete(&sio->iocb, ret);
 }
@@ -640,11 +638,10 @@ finish:
 void __swap_read_unplug(struct swap_iocb *sio)
 {
 	struct iov_iter from;
-	struct address_space *mapping = sio->iocb.ki_filp->f_mapping;
 	int ret;
 
 	iov_iter_bvec(&from, ITER_DEST, sio->bvec, sio->pages, sio->len);
-	ret = mapping->a_ops->swap_rw(&sio->iocb, &from);
+	ret = sio->iocb.ki_filp->f_op->swap_rw(&sio->iocb, &from);
 	if (ret != -EIOCBQUEUED)
 		sio_read_complete(&sio->iocb, ret);
 }

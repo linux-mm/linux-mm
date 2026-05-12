@@ -167,20 +167,6 @@ static int zonefs_writepages(struct address_space *mapping,
 	return iomap_writepages(&wpc);
 }
 
-static int zonefs_swap_activate(struct swap_info_struct *sis,
-				struct file *swap_file)
-{
-	struct inode *inode = file_inode(swap_file);
-
-	if (zonefs_inode_is_seq(inode)) {
-		zonefs_err(inode->i_sb,
-			   "swap file: not a conventional zone file\n");
-		return -EINVAL;
-	}
-
-	return iomap_swapfile_activate(sis, swap_file, &zonefs_read_iomap_ops);
-}
-
 const struct address_space_operations zonefs_file_aops = {
 	.read_folio		= zonefs_read_folio,
 	.readahead		= zonefs_readahead,
@@ -191,7 +177,6 @@ const struct address_space_operations zonefs_file_aops = {
 	.migrate_folio		= filemap_migrate_folio,
 	.is_partially_uptodate	= iomap_is_partially_uptodate,
 	.error_remove_folio	= generic_error_remove_folio,
-	.swap_activate		= zonefs_swap_activate,
 };
 
 int zonefs_file_truncate(struct inode *inode, loff_t isize)
@@ -858,6 +843,19 @@ static int zonefs_file_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+static int zonefs_swap_activate(struct file *file, struct swap_info_struct *sis)
+{
+	struct inode *inode = file_inode(file);
+
+	if (zonefs_inode_is_seq(inode)) {
+		zonefs_err(inode->i_sb,
+			   "swap file: not a conventional zone file\n");
+		return -EINVAL;
+	}
+
+	return iomap_swap_activate(file, sis, &zonefs_read_iomap_ops);
+}
+
 const struct file_operations zonefs_file_operations = {
 	.open		= zonefs_file_open,
 	.release	= zonefs_file_release,
@@ -869,4 +867,5 @@ const struct file_operations zonefs_file_operations = {
 	.splice_read	= zonefs_file_splice_read,
 	.splice_write	= iter_file_splice_write,
 	.iopoll		= iocb_bio_iopoll,
+	.swap_activate	= zonefs_swap_activate,
 };

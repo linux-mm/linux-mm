@@ -2081,6 +2081,50 @@ xfs_file_mmap_prepare(
 	return 0;
 }
 
+static int
+xfs_file_swap_activate(
+	struct file			*file,
+	struct swap_info_struct		*sis)
+{
+	struct xfs_inode		*ip = XFS_I(file_inode(file));
+
+	if (xfs_is_zoned_inode(ip))
+		return -EINVAL;
+
+	/*
+	 * Swap file activation can race against concurrent shared extent
+	 * removal in files that have been cloned.  If this happens,
+	 * iomap_swapfile_iter() can fail because it encountered a shared
+	 * extent even though an operation is in progress to remove those
+	 * shared extents.
+	 *
+	 * This race becomes problematic when we defer extent removal
+	 * operations beyond the end of a syscall (i.e. use async background
+	 * processing algorithms).  Users think the extents are no longer
+	 * shared, but iomap_swapfile_iter() still sees them as shared
+	 * because the refcountbt entries for the extents being removed have
+	 * not yet been updated.  Hence the swapon call fails unexpectedly.
+	 *
+	 * The race condition is currently most obvious from the unlink()
+	 * operation as extent removal is deferred until after the last
+	 * reference to the inode goes away.  We then process the extent
+	 * removal asynchronously, hence triggers the "syscall completed but
+	 * work not done" condition mentioned above.  To close this race
+	 * window, we need to flush any pending inodegc operations to ensure
+	 * they have updated the refcountbt records before we try to map the
+	 * swapfile.
+	 */
+	xfs_inodegc_flush(ip->i_mount);
+
+	/*
+	 * Direct the swap code to the correct block device when this file
+	 * sits on the RT device.
+	 */
+	sis->bdev = xfs_inode_buftarg(ip)->bt_bdev;
+
+	return iomap_swap_activate(file, sis, &xfs_read_iomap_ops);
+}
+
 const struct file_operations xfs_file_operations = {
 	.llseek		= xfs_file_llseek,
 	.read_iter	= xfs_file_read_iter,
@@ -2104,6 +2148,7 @@ const struct file_operations xfs_file_operations = {
 			  FOP_BUFFER_WASYNC | FOP_DIO_PARALLEL_WRITE |
 			  FOP_DONTCACHE,
 	.setlease	= generic_setlease,
+	.swap_activate	= xfs_file_swap_activate,
 };
 
 const struct file_operations xfs_dir_file_operations = {

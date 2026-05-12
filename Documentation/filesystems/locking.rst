@@ -264,9 +264,6 @@ prototypes::
 	int (*launder_folio)(struct folio *);
 	bool (*is_partially_uptodate)(struct folio *, size_t from, size_t count);
 	int (*error_remove_folio)(struct address_space *, struct folio *);
-	int (*swap_activate)(struct swap_info_struct *sis, struct file *f)
-	int (*swap_deactivate)(struct file *);
-	int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 
 locking rules:
 	All except dirty_folio and free_folio may block
@@ -289,9 +286,6 @@ migrate_folio:		yes (both)
 launder_folio:		yes
 is_partially_uptodate:	yes
 error_remove_folio:	yes
-swap_activate:		no
-swap_deactivate:	no
-swap_rw:		yes, unlocks
 ======================	======================== =========	===============
 
 ->write_begin(), ->write_end() and ->read_folio() may be called from
@@ -349,19 +343,6 @@ it is still found to be dirty. It returns zero if the folio was successfully
 cleaned, or an error value if not. Note that in order to prevent the folio
 getting mapped back in and redirtied, it needs to be kept locked
 across the entire operation.
-
-->swap_activate() will be called to prepare the given file for swap.  It
-should perform any validation and preparation necessary to ensure that
-writes can be performed with minimal memory allocation.  It should call
-add_swap_extent(), or the helper iomap_swapfile_activate(), and return
-the number of extents added.  If IO should be submitted through
-->swap_rw(), it should set SWP_FS_OPS, otherwise IO will be submitted
-directly to the block device ``sis->bdev``.
-
-->swap_deactivate() will be called in the sys_swapoff()
-path after ->swap_activate() returned success.
-
-->swap_rw will be called for swap IO if SWP_FS_OPS was set by ->swap_activate().
 
 file_lock_operations
 ====================
@@ -489,6 +470,9 @@ prototypes::
 			struct file *file_out, loff_t pos_out,
 			loff_t len, unsigned int remap_flags);
 	int (*fadvise)(struct file *, loff_t, loff_t, int);
+	int (*swap_activate)(struct file *file, struct swap_info_struct *sis);
+	int (*swap_deactivate)(struct file *);
+	int (*swap_rw)(struct kiocb *iocb, struct iov_iter *iter);
 
 locking rules:
 	All may block.
@@ -540,6 +524,19 @@ blocking changes through write(2) and similar operations inode->i_rwsem can be
 used. To block changes to file contents via a memory mapping during the
 operation, the filesystem must take mapping->invalidate_lock to coordinate
 with ->page_mkwrite.
+
+->swap_activate() is called to prepare the given file for swap.  It should
+perform any validation and preparation necessary to ensure that writes can be
+performed with minimal memory allocation.  It should call add_swap_extent(),
+or the helper iomap_swap_activate(), and return the number of extents added.
+If IO should be submitted through ->swap_rw(), the file system must set
+SWP_FS_OPS from ->swap_activate(), otherwise IO will be submitted directly to
+the block device ``sis->bdev``.
+
+->swap_deactivate() is called from the swapoff path to disable a swapfile
+successfully activated using ->swap_activate().
+
+->swap_rw will be called for swap IO if SWP_FS_OPS was set by ->swap_activate().
 
 dquot_operations
 ================

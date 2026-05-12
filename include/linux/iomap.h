@@ -610,10 +610,10 @@ void iomap_dio_bio_end_io(struct bio *bio);
 struct file;
 struct swap_info_struct;
 
-int iomap_swapfile_activate(struct swap_info_struct *sis,
-		struct file *swap_file, const struct iomap_ops *ops);
+int iomap_swap_activate(struct file *file, struct swap_info_struct *sis,
+		const struct iomap_ops *ops);
 #else
-# define iomap_swapfile_activate(sis, swapfile, ops)	(-EIO)
+# define iomap_swap_activate(file, sis, ops)	(-EIO)
 #endif /* CONFIG_SWAP */
 
 extern struct bio_set iomap_ioend_bioset;

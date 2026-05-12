@@ -405,7 +405,7 @@ extern void __meminit kswapd_stop(int nid);
 
 int add_swap_extent(struct swap_info_struct *sis, unsigned long nr_pages,
 		sector_t start_block);
-int generic_swapfile_activate(struct swap_info_struct *, struct file *);
+int generic_swap_activate(struct file *swap_file, struct swap_info_struct *sis);
 
 static inline unsigned long total_swapcache_pages(void)
 {

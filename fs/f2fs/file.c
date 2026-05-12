@@ -5488,4 +5488,8 @@ const struct file_operations f2fs_file_operations = {
 	.fadvise	= f2fs_file_fadvise,
 	.fop_flags	= FOP_BUFFER_RASYNC,
 	.setlease	= generic_setlease,
+#ifdef CONFIG_SWAP
+	.swap_activate  = f2fs_swap_activate,
+	.swap_deactivate = f2fs_swap_deactivate,
+#endif
 };
