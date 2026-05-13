@@ -521,7 +521,7 @@ static bool is_bad_page_map_ratelimited(void)
 
 static void __print_bad_page_map_pgtable(struct mm_struct *mm, unsigned long addr)
 {
-	unsigned long long pgdv, p4dv, pudv, pmdv;
+	pxdval_t pgdv, p4dv, pudv, pmdv;
 	p4d_t p4d, *p4dp;
 	pud_t pud, *pudp;
 	pmd_t pmd, *pmdp;
@@ -535,7 +535,7 @@ static void __print_bad_page_map_pgtable(struct mm_struct *mm, unsigned long add
 	pgdv = pgd_val(*pgdp);
 
 	if (!pgd_present(*pgdp) || pgd_leaf(*pgdp)) {
-		pr_alert("pgd:%08llx\n", pgdv);
+		pr_alert("pgd:%" __PRIpxx "\n", __PRIpxx_args(pgdv));
 		return;
 	}
 
@@ -544,7 +544,8 @@ static void __print_bad_page_map_pgtable(struct mm_struct *mm, unsigned long add
 	p4dv = p4d_val(p4d);
 
 	if (!p4d_present(p4d) || p4d_leaf(p4d)) {
-		pr_alert("pgd:%08llx p4d:%08llx\n", pgdv, p4dv);
+		pr_alert("pgd:%" __PRIpxx " p4d:%" __PRIpxx "\n",
+			 __PRIpxx_args(pgdv), __PRIpxx_args(p4dv));
 		return;
 	}
 
@@ -553,7 +554,8 @@ static void __print_bad_page_map_pgtable(struct mm_struct *mm, unsigned long add
 	pudv = pud_val(pud);
 
 	if (!pud_present(pud) || pud_leaf(pud)) {
-		pr_alert("pgd:%08llx p4d:%08llx pud:%08llx\n", pgdv, p4dv, pudv);
+		pr_alert("pgd:%" __PRIpxx " p4d:%" __PRIpxx " pud:%" __PRIpxx "\n",
+			 __PRIpxx_args(pgdv), __PRIpxx_args(p4dv), __PRIpxx_args(pudv));
 		return;
 	}
 
@@ -567,8 +569,9 @@ static void __print_bad_page_map_pgtable(struct mm_struct *mm, unsigned long add
 	 * doing another map would be bad. print_bad_page_map() should
 	 * already take care of printing the PTE.
 	 */
-	pr_alert("pgd:%08llx p4d:%08llx pud:%08llx pmd:%08llx\n", pgdv,
-		 p4dv, pudv, pmdv);
+	pr_alert("pgd:%" __PRIpxx " p4d:%" __PRIpxx " pud:%" __PRIpxx " pmd:%" __PRIpxx "\n",
+		 __PRIpxx_args(pgdv), __PRIpxx_args(p4dv),
+		 __PRIpxx_args(pudv), __PRIpxx_args(pmdv));
 }
 
 /*
@@ -584,7 +587,7 @@ static void __print_bad_page_map_pgtable(struct mm_struct *mm, unsigned long add
  * page table lock.
  */
 static void print_bad_page_map(struct vm_area_struct *vma,
-		unsigned long addr, unsigned long long entry, struct page *page,
+		unsigned long addr, pxdval_t entry, struct page *page,
 		enum pgtable_level level)
 {
 	struct address_space *mapping;
@@ -596,8 +599,8 @@ static void print_bad_page_map(struct vm_area_struct *vma,
 	mapping = vma->vm_file ? vma->vm_file->f_mapping : NULL;
 	index = linear_page_index(vma, addr);
 
-	pr_alert("BUG: Bad page map in process %s  %s:%08llx", current->comm,
-		 pgtable_level_to_str(level), entry);
+	pr_alert("BUG: Bad page map in process %s  %s:%" __PRIpxx, current->comm,
+		 pgtable_level_to_str(level), __PRIpxx_args(entry));
 	__print_bad_page_map_pgtable(vma->vm_mm, addr);
 	if (page)
 		dump_page(page, "bad page map");
@@ -697,7 +700,7 @@ static inline bool pgtable_level_has_pxx_special(enum pgtable_level level)
  */
 static inline struct page *__vm_normal_page(struct vm_area_struct *vma,
 		unsigned long addr, unsigned long pfn, bool special,
-		unsigned long long entry, enum pgtable_level level)
+		pxdval_t entry, enum pgtable_level level)
 {
 	if (pgtable_level_has_pxx_special(level)) {
 		if (unlikely(special)) {

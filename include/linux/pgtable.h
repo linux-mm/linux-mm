@@ -17,6 +17,17 @@
 #include <asm-generic/pgtable_uffd.h>
 #include <linux/page_table_check.h>
 
+#ifdef __SIZEOF_INT128__
+typedef u128 pxdval_t;
+#else
+typedef unsigned long long pxdval_t;
+#endif
+
+#ifndef __PRIpxx
+#define __PRIpxx		"016llx"
+#define __PRIpxx_args(val)	((u64)val)
+#endif
+
 #if 5 - defined(__PAGETABLE_P4D_FOLDED) - defined(__PAGETABLE_PUD_FOLDED) - \
 	defined(__PAGETABLE_PMD_FOLDED) != CONFIG_PGTABLE_LEVELS
 #error CONFIG_PGTABLE_LEVELS is not consistent with __PAGETABLE_{P4D,PUD,PMD}_FOLDED
