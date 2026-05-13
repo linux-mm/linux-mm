@@ -146,7 +146,7 @@ static inline pgd_t pgdp_get(pgd_t *pgdp)
 			  TLBF_NOBROADCAST | TLBF_NONOTIFY | TLBF_NOWALKCACHE)
 
 #define pte_ERROR(e)	\
-	pr_err("%s:%d: bad pte %016llx.\n", __FILE__, __LINE__, pte_val(e))
+	pr_err("%s:%d: bad pte %" __PRIpxx ".\n", __FILE__, __LINE__, __PRIpxx_args(pte_val(e)))
 
 #ifdef CONFIG_ARM64_PA_BITS_52
 static inline phys_addr_t __pte_to_phys(pte_t pte)
@@ -461,14 +461,14 @@ static inline void __check_safe_pte_update(struct mm_struct *mm, pte_t *ptep,
 	 * through an invalid entry).
 	 */
 	VM_WARN_ONCE(!pte_young(pte),
-		     "%s: racy access flag clearing: 0x%016llx -> 0x%016llx",
-		     __func__, pte_val(old_pte), pte_val(pte));
+		     "%s: racy access flag clearing: 0x%" __PRIpxx " -> 0x%" __PRIpxx,
+		     __func__, __PRIpxx_args(pte_val(old_pte)), __PRIpxx_args(pte_val(pte)));
 	VM_WARN_ONCE(pte_write(old_pte) && !pte_dirty(pte),
-		     "%s: racy dirty state clearing: 0x%016llx -> 0x%016llx",
-		     __func__, pte_val(old_pte), pte_val(pte));
+		     "%s: racy dirty state clearing: 0x%" __PRIpxx " -> 0x%" __PRIpxx,
+		     __func__, __PRIpxx_args(pte_val(old_pte)), __PRIpxx_args(pte_val(pte)));
 	VM_WARN_ONCE(!pgattr_change_is_safe(pte_val(old_pte), pte_val(pte)),
-		     "%s: unsafe attribute change: 0x%016llx -> 0x%016llx",
-		     __func__, pte_val(old_pte), pte_val(pte));
+		     "%s: unsafe attribute change: 0x%" __PRIpxx " -> 0x%" __PRIpxx,
+		     __func__, __PRIpxx_args(pte_val(old_pte)), __PRIpxx_args(pte_val(pte)));
 }
 
 static inline void __sync_cache_and_tags(pte_t pte, unsigned int nr_pages)
@@ -905,7 +905,7 @@ static inline unsigned long pmd_page_vaddr(pmd_t pmd)
 #if CONFIG_PGTABLE_LEVELS > 2
 
 #define pmd_ERROR(e)	\
-	pr_err("%s:%d: bad pmd %016llx.\n", __FILE__, __LINE__, pmd_val(e))
+	pr_err("%s:%d: bad pmd %" __PRIpxx ".\n", __FILE__, __LINE__, __PRIpxx_args(pmd_val(e)))
 
 #define pud_none(pud)		(!pud_val(pud))
 #define pud_bad(pud)		((pud_val(pud) & PUD_TYPE_MASK) != \
@@ -1000,7 +1000,7 @@ static inline bool mm_pud_folded(const struct mm_struct *mm)
 #define mm_pud_folded  mm_pud_folded
 
 #define pud_ERROR(e)	\
-	pr_err("%s:%d: bad pud %016llx.\n", __FILE__, __LINE__, pud_val(e))
+	pr_err("%s:%d: bad pud %" __PRIpxx ".\n", __FILE__, __LINE__, __PRIpxx_args(pud_val(e)))
 
 #define p4d_none(p4d)		(pgtable_l4_enabled() && !p4d_val(p4d))
 #define p4d_bad(p4d)		(pgtable_l4_enabled() && \
@@ -1128,7 +1128,7 @@ static inline bool mm_p4d_folded(const struct mm_struct *mm)
 #define mm_p4d_folded  mm_p4d_folded
 
 #define p4d_ERROR(e)	\
-	pr_err("%s:%d: bad p4d %016llx.\n", __FILE__, __LINE__, p4d_val(e))
+	pr_err("%s:%d: bad p4d %" __PRIpxx ".\n", __FILE__, __LINE__, __PRIpxx_args(p4d_val(e)))
 
 #define pgd_none(pgd)		(pgtable_l5_enabled() && !pgd_val(pgd))
 #define pgd_bad(pgd)		(pgtable_l5_enabled() && \
@@ -1257,7 +1257,7 @@ p4d_t *p4d_offset_lockless_folded(pgd_t *pgdp, pgd_t pgd, unsigned long addr)
 #endif  /* CONFIG_PGTABLE_LEVELS > 4 */
 
 #define pgd_ERROR(e)	\
-	pr_err("%s:%d: bad pgd %016llx.\n", __FILE__, __LINE__, pgd_val(e))
+	pr_err("%s:%d: bad pgd %" __PRIpxx ".\n", __FILE__, __LINE__, __PRIpxx_args(pgd_val(e)))
 
 #define pgd_set_fixmap(addr)	((pgd_t *)set_fixmap_offset(FIX_PGD, addr))
 #define pgd_clear_fixmap()	clear_fixmap(FIX_PGD)

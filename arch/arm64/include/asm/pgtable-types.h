@@ -11,6 +11,9 @@
 
 #include <asm/types.h>
 
+#define __PRIpxx		"016llx"
+#define __PRIpxx_args(val)	((u64)val)
+
 /*
  * Page Table Descriptor
  *
