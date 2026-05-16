@@ -818,6 +818,7 @@ static noinline void lkdtm_CORRUPT_PAC(void)
 }
 
 static struct crashtype crashtypes[] = {
+
 	CRASHTYPE(PANIC),
 	CRASHTYPE(PANIC_STOP_IRQOFF),
 	CRASHTYPE(PANIC_IN_HARDIRQ),
