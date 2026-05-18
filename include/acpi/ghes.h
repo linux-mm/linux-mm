@@ -33,10 +33,12 @@ struct ghes {
 	void __iomem *error_status_vaddr;
 };
 
+enum context {NO_USE = -1, IN_KERNEL = 0, IN_USER = 1};
 struct ghes_estatus_node {
 	struct llist_node llnode;
 	struct acpi_hest_generic *generic;
 	struct ghes *ghes;
+	enum context context;
 };
 
 struct ghes_estatus_cache {
@@ -135,9 +137,9 @@ static inline void *acpi_hest_get_next(struct acpi_hest_generic_data *gdata)
 	     section = acpi_hest_get_next(section))
 
 #ifdef CONFIG_ACPI_APEI_SEA
-int ghes_notify_sea(void);
+int ghes_notify_sea(enum context context);
 #else
-static inline int ghes_notify_sea(void) { return -ENOENT; }
+static inline int ghes_notify_sea(enum context context) { return -ENOENT; }
 #endif
 
 struct notifier_block;
