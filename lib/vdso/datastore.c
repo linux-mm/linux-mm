@@ -76,22 +76,20 @@ static vm_fault_t vvar_fault(const struct vm_special_mapping *sm,
 
 	switch (vmf->pgoff) {
 	case VDSO_TIME_PAGE_OFFSET:
-		if (!IS_ENABLED(CONFIG_GENERIC_GETTIMEOFDAY))
+		if (!IS_ENABLED(CONFIG_GENERIC_GETTIMEOFDAY) || !timens_page)
 			break;
-		if (timens_page) {
-			/*
-			 * Fault in VVAR page too, since it will be accessed
-			 * to get clock data anyway.
-			 */
-			unsigned long addr;
-			vm_fault_t err;
+		/*
+		 * Fault in VVAR page too, since it will be accessed
+		 * to get clock data anyway.
+		 */
+		unsigned long addr;
+		vm_fault_t err;
 
-			addr = vmf->address + VDSO_TIMENS_PAGE_OFFSET * PAGE_SIZE;
-			err = vmf_insert_page(vma, addr, page);
-			if (unlikely(err & VM_FAULT_ERROR))
-				return err;
-			page = timens_page;
-		}
+		addr = vmf->address + VDSO_TIMENS_PAGE_OFFSET * PAGE_SIZE;
+		err = vmf_insert_page(vma, addr, page);
+		if (unlikely(err & VM_FAULT_ERROR))
+			return err;
+		page = timens_page;
 		break;
 	case VDSO_TIMENS_PAGE_OFFSET:
 		/*
