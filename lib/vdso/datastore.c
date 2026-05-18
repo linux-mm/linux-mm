@@ -68,6 +68,9 @@ static vm_fault_t vvar_fault(const struct vm_special_mapping *sm,
 {
 	struct page *page, *timens_page;
 
+	if (unlikely(vmf->flags & FAULT_FLAG_REMOTE))
+		return VM_FAULT_SIGBUS;
+
 	page = vdso_data_pages + vmf->pgoff;
 	timens_page = find_timens_vvar_page(vma);
 
