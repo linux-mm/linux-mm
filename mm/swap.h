@@ -334,6 +334,13 @@ static inline unsigned int folio_swap_flags(struct folio *folio)
 	return __swap_entry_to_info(folio->swap)->flags;
 }
 
+static inline bool swap_skip_zero_check(struct folio *folio)
+{
+	struct swap_info_struct *si = __swap_entry_to_info(folio->swap);
+
+	return (si->flags & SWP_SKIP_ZERO_CHECK) ? true : false;
+}
+
 #else /* CONFIG_SWAP */
 struct swap_iocb;
 static inline struct swap_cluster_info *swap_cluster_lock(
@@ -470,6 +477,11 @@ static inline void __swap_cache_replace_folio(struct swap_cluster_info *ci,
 static inline unsigned int folio_swap_flags(struct folio *folio)
 {
 	return 0;
+}
+
+static inline bool swap_zero_check_skip(struct folio *folio)
+{
+	return false;
 }
 #endif /* CONFIG_SWAP */
 #endif /* _MM_SWAP_H */

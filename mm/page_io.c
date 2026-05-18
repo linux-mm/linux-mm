@@ -265,6 +265,9 @@ int swap_writeout(struct folio *folio, struct swap_iocb **swap_plug)
 		goto out_unlock;
 	}
 
+	if (swap_skip_zero_check(folio))
+		goto skip_zerocheck;
+
 	/*
 	 * Use the swap table zero mark to avoid doing IO for zero-filled
 	 * pages. The zero mark is protected by the cluster lock, which is
@@ -282,6 +285,7 @@ int swap_writeout(struct folio *folio, struct swap_iocb **swap_plug)
 	 */
 	swap_zeromap_folio_clear(folio);
 
+skip_zerocheck:
 	if (zswap_store(folio)) {
 		count_mthp_stat(folio_order(folio), MTHP_STAT_ZSWPOUT);
 		goto out_unlock;
@@ -563,7 +567,8 @@ static bool swap_read_folio_zeromap(struct folio *folio)
 	 * that an IO error is emitted (e.g. do_swap_page() will sigbus).
 	 * Folio lock stabilizes the cluster and map, so the check is safe.
 	 */
-	if (WARN_ON_ONCE(swap_zeromap_batch(folio->swap, nr_pages,
+	if (!swap_skip_zero_check(folio) &&
+		WARN_ON_ONCE(swap_zeromap_batch(folio->swap, nr_pages,
 			 &is_zeromap) != nr_pages))
 		return true;
 

@@ -25,10 +25,11 @@ struct bio;
 #define SWAP_FLAG_DISCARD	0x10000 /* enable discard for swap */
 #define SWAP_FLAG_DISCARD_ONCE	0x20000 /* discard swap area at swapon-time */
 #define SWAP_FLAG_DISCARD_PAGES 0x40000 /* discard page-clusters after use */
+#define SWAP_FLAG_SKIP_ZERO_CHECK 0x80000
 
 #define SWAP_FLAGS_VALID	(SWAP_FLAG_PRIO_MASK | SWAP_FLAG_PREFER | \
 				 SWAP_FLAG_DISCARD | SWAP_FLAG_DISCARD_ONCE | \
-				 SWAP_FLAG_DISCARD_PAGES)
+				 SWAP_FLAG_DISCARD_PAGES | SWAP_FLAG_SKIP_ZERO_CHECK)
 #define SWAP_BATCH 64
 
 static inline int current_is_kswapd(void)
@@ -215,6 +216,7 @@ enum {
 	SWP_SYNCHRONOUS_IO = (1 << 12),	/* synchronous IO is efficient */
 	SWP_HIBERNATION = (1 << 13),	/* pinned for hibernation */
 					/* add others here before... */
+	SWP_SKIP_ZERO_CHECK = (1 << 14), /* skip zero-filled page check */
 };
 
 #define SWAP_CLUSTER_MAX 32UL

@@ -3683,6 +3683,9 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 	if (IS_ERR(si))
 		return PTR_ERR(si);
 
+	if (swap_flags & SWAP_FLAG_SKIP_ZERO_CHECK)
+		si->flags |= SWP_SKIP_ZERO_CHECK;
+
 	INIT_WORK(&si->discard_work, swap_discard_work);
 	INIT_WORK(&si->reclaim_work, swap_reclaim_work);
 
