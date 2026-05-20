@@ -360,16 +360,23 @@ int sframe_find(unsigned long ip, struct unwind_user_frame *frame)
 		return -ENOENT;
 
 	if (!user_read_access_begin((void __user *)sec->sframe_start,
-				    sec->sframe_end - sec->sframe_start))
-		return -EFAULT;
+				    sec->sframe_end - sec->sframe_start)) {
+		ret = -EFAULT;
+		goto end;
+	}
 
 	ret = __find_fde(sec, ip, &fde);
 	if (ret)
-		goto end;
+		goto end_uaccess;
 
 	ret = __find_fre(sec, &fde, ip, frame);
-end:
+end_uaccess:
 	user_read_access_end();
+
+end:
+	if (ret && ret != -ENOENT)
+		WARN_ON_ONCE(sframe_remove_section(sec->sframe_start));
+
 	return ret;
 }
 
