@@ -48,6 +48,12 @@ static inline void dbg_init(struct sframe_section *sec)
 		sec->filename = kstrdup("(anonymous)", GFP_KERNEL_ACCOUNT);
 }
 
+static inline void dbg_dup(struct sframe_section *sec, struct sframe_section *oldsec)
+{
+	if (oldsec->filename)
+		sec->filename = kstrdup(oldsec->filename, GFP_KERNEL_ACCOUNT);
+}
+
 static inline void dbg_free(struct sframe_section *sec)
 {
 	kfree(sec->filename);
@@ -61,6 +67,7 @@ static inline void dbg_free(struct sframe_section *sec)
 static inline void dbg_print_header(struct sframe_section *sec) {}
 
 static inline void dbg_init(struct sframe_section *sec) {}
+static inline void dbg_dup(struct sframe_section *sec, struct sframe_section *oldsec) {}
 static inline void dbg_free(struct sframe_section *sec) {}
 
 #endif /* !CONFIG_DYNAMIC_DEBUG */

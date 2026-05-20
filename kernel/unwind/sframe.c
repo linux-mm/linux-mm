@@ -886,6 +886,54 @@ int sframe_remove_section(unsigned long sframe_start)
 	return 0;
 }
 
+static void __sframe_dup_section(struct sframe_section *sec, struct sframe_section *oldsec)
+{
+	sec->sframe_start	= oldsec->sframe_start;
+	sec->sframe_end		= oldsec->sframe_end;
+	sec->text_start		= oldsec->text_start;
+	sec->text_end		= oldsec->text_end;
+
+	sec->fdes_start		= oldsec->fdes_start;
+	sec->fres_start		= oldsec->fres_start;
+	sec->fres_end		= oldsec->fres_end;
+	sec->num_fdes		= oldsec->num_fdes;
+
+	sec->ra_off		= oldsec->ra_off;
+	sec->fp_off		= oldsec->fp_off;
+
+	dbg_dup(sec, oldsec);
+}
+
+int sframe_dup_mm(struct mm_struct *mm, struct mm_struct *oldmm)
+{
+	struct sframe_section *sec, *oldsec;
+	unsigned long index = 0;
+	int ret;
+
+	guard(srcu)(&sframe_srcu);
+
+	mt_for_each(&oldmm->sframe_mt, oldsec, index, ULONG_MAX) {
+		sec = kzalloc(sizeof(*sec), GFP_KERNEL_ACCOUNT);
+		if (!sec)
+			return -ENOMEM;
+
+		__sframe_dup_section(sec, oldsec);
+
+		ret = mtree_insert_range(&mm->sframe_mt,
+					 sec->text_start,
+					 sec->text_end - 1,
+					 sec, GFP_KERNEL_ACCOUNT);
+		if (ret)
+			goto err_free;
+	}
+
+	return 0;
+
+err_free:
+	free_section(sec);
+	return ret;
+}
+
 void sframe_free_mm(struct mm_struct *mm)
 {
 	struct sframe_section *sec;

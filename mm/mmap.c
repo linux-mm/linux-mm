@@ -48,6 +48,7 @@
 #include <linux/sched/mm.h>
 #include <linux/ksm.h>
 #include <linux/memfd.h>
+#include <linux/sframe.h>
 
 #include <linux/uaccess.h>
 #include <asm/cacheflush.h>
@@ -1846,6 +1847,11 @@ __latent_entropy int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	}
 	/* a new mm has just been created */
 	retval = arch_dup_mmap(oldmm, mm);
+#ifdef CONFIG_HAVE_UNWIND_USER_SFRAME
+	if (!retval) {
+		retval = sframe_dup_mm(mm, oldmm);
+	}
+#endif
 loop_out:
 	vma_iter_free(&vmi);
 	if (!retval) {
@@ -1893,6 +1899,9 @@ loop_out:
 			vm_unacct_memory(charge);
 		}
 		__mt_destroy(&mm->mm_mt);
+#ifdef CONFIG_HAVE_UNWIND_USER_SFRAME
+		sframe_free_mm(mm);
+#endif
 		/*
 		 * The mm_struct is going to exit, but the locks will be dropped
 		 * first.  Set the mm_struct as unstable is advisable as it is
