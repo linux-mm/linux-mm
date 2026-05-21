@@ -2175,8 +2175,6 @@ __latent_entropy struct task_struct *copy_process(
 	retval = -EAGAIN;
 #endif
 
-	p->default_timer_slack_ns = current->timer_slack_ns;
-
 #ifdef CONFIG_PSI
 	p->psi_flags = 0;
 #endif
