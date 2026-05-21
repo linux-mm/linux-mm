@@ -371,10 +371,15 @@ int sframe_find(unsigned long ip, struct unwind_user_frame *frame)
 			ret = __find_fre(sec, &fde, ip, frame);
 	}
 
+end:
+	if (ret && ret != -ENOENT)
+		WARN_ON_ONCE(sframe_remove_section(sec->sframe_start));
+
 	return ret;
 
 Efault:
-	return -EFAULT;
+	ret = -EFAULT;
+	goto end;
 }
 
 static void free_section(struct sframe_section *sec)
