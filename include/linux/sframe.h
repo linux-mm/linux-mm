@@ -28,6 +28,7 @@ struct sframe_section {
 };
 
 #define INIT_MM_SFRAME .sframe_mt = MTREE_INIT(sframe_mt, 0),
+extern int sframe_dup_mm(struct mm_struct *mm, struct mm_struct *oldmm);
 extern void sframe_free_mm(struct mm_struct *mm);
 
 extern int sframe_add_section(unsigned long sframe_start, unsigned long sframe_end,
@@ -45,6 +46,10 @@ static inline bool current_has_sframe(void)
 #else /* !CONFIG_HAVE_UNWIND_USER_SFRAME */
 
 #define INIT_MM_SFRAME
+static inline int sframe_dup_mm(struct mm_struct *mm, struct mm_struct *oldmm)
+{
+	return 0;
+}
 static inline void sframe_free_mm(struct mm_struct *mm) {}
 static inline int sframe_add_section(unsigned long sframe_start, unsigned long sframe_end,
 				     unsigned long text_start, unsigned long text_end)
