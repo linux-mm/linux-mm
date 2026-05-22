@@ -1,0 +1,24 @@
+name: MM VM Tests
+
+on:
+  # push:
+  #   branches: ['**']
+  # pull_request:
+  #   branches: ['**']
+  workflow_dispatch:
+
+jobs:
+  vm-tests:
+    # Don't run in the mm-ci repository, since it doesn't actually have the
+    # kernel code.
+    if: github.repository == 'linux-mm/linux-mm'
+
+    name: Run MM VM tests
+    runs-on: self-hosted
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run VM tests
+        run: bash .github/scripts/run-vm-tests.sh
