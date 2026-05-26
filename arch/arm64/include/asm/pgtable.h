@@ -511,16 +511,6 @@ static inline pmd_t pte_pmd(pte_t pte)
 	return __pmd(pte_val(pte));
 }
 
-static inline pgprot_t mk_pud_sect_prot(pgprot_t prot)
-{
-	return __pgprot((pgprot_val(prot) & ~PUD_TYPE_MASK) | PUD_TYPE_SECT);
-}
-
-static inline pgprot_t mk_pmd_sect_prot(pgprot_t prot)
-{
-	return __pgprot((pgprot_val(prot) & ~PMD_TYPE_MASK) | PMD_TYPE_SECT);
-}
-
 static inline pte_t pte_swp_mkexclusive(pte_t pte)
 {
 	return set_pte_bit(pte, __pgprot(PTE_SWP_EXCLUSIVE));
@@ -628,7 +618,13 @@ static inline pmd_t pmd_mkspecial(pmd_t pmd)
 #define __pmd_to_phys(pmd)	__pte_to_phys(pmd_pte(pmd))
 #define __phys_to_pmd_val(phys)	__phys_to_pte_val(phys)
 #define pmd_pfn(pmd)		((__pmd_to_phys(pmd) & PMD_MASK) >> PAGE_SHIFT)
-#define pfn_pmd(pfn,prot)	__pmd(__phys_to_pmd_val((phys_addr_t)(pfn) << PAGE_SHIFT) | pgprot_val(prot))
+static inline pmd_t pfn_pmd(unsigned long pfn, pgprot_t prot)
+{
+	pmd_t pmd = __pmd(__phys_to_pmd_val((phys_addr_t)pfn << PAGE_SHIFT) |
+			  pgprot_val(prot));
+
+	return pmd_mkhuge(pmd);
+}
 
 #define pud_young(pud)		pte_young(pud_pte(pud))
 #define pud_mkyoung(pud)	pte_pud(pte_mkyoung(pud_pte(pud)))
@@ -652,22 +648,46 @@ static inline pud_t pud_mkhuge(pud_t pud)
 #define __pud_to_phys(pud)	__pte_to_phys(pud_pte(pud))
 #define __phys_to_pud_val(phys)	__phys_to_pte_val(phys)
 #define pud_pfn(pud)		((__pud_to_phys(pud) & PUD_MASK) >> PAGE_SHIFT)
-#define pfn_pud(pfn,prot)	__pud(__phys_to_pud_val((phys_addr_t)(pfn) << PAGE_SHIFT) | pgprot_val(prot))
+static inline pud_t pfn_pud(unsigned long pfn, pgprot_t prot)
+{
+	pud_t pud = __pud(__phys_to_pud_val((phys_addr_t)pfn << PAGE_SHIFT) |
+			  pgprot_val(prot));
+
+	return pud_mkhuge(pud);
+}
 
 #define pmd_pgprot pmd_pgprot
 static inline pgprot_t pmd_pgprot(pmd_t pmd)
 {
 	unsigned long pfn = pmd_pfn(pmd);
+	pmdval_t protval = pmd_val(pmd) ^
+		__phys_to_pmd_val((phys_addr_t)pfn << PAGE_SHIFT);
 
-	return __pgprot(pmd_val(pfn_pmd(pfn, __pgprot(0))) ^ pmd_val(pmd));
+	/*
+	 * pgprot_t represents PTE-level attributes. Convert the PMD
+	 * block descriptor type into a PTE page descriptor type.
+	 */
+	pmdval_t mask = PMD_TYPE_MASK & ~PTE_VALID;
+	pmdval_t val = PTE_TYPE_PAGE & ~PTE_VALID;
+
+	return __pgprot((protval & ~mask) | val);
 }
 
 #define pud_pgprot pud_pgprot
 static inline pgprot_t pud_pgprot(pud_t pud)
 {
 	unsigned long pfn = pud_pfn(pud);
+	pudval_t protval = pud_val(pud) ^
+		__phys_to_pud_val((phys_addr_t)pfn << PAGE_SHIFT);
 
-	return __pgprot(pud_val(pfn_pud(pfn, __pgprot(0))) ^ pud_val(pud));
+	/*
+	 * pgprot_t represents PTE-level attributes. Convert the PUD
+	 * block descriptor type into a PTE page descriptor type.
+	 */
+	pudval_t mask = PUD_TYPE_MASK & ~PTE_VALID;
+	pudval_t val = PTE_TYPE_PAGE & ~PTE_VALID;
+
+	return __pgprot((protval & ~mask) | val);
 }
 
 static inline void __set_ptes_anysz(struct mm_struct *mm, unsigned long addr,
