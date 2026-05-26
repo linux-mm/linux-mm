@@ -1805,6 +1805,8 @@ bool touch_pmd(struct vm_area_struct *vma, unsigned long addr,
 	return false;
 }
 
+static bool has_deposited_pgtable(struct vm_area_struct *vma, pmd_t pmdval,
+		struct folio *folio);
 static int copy_present_huge_pmd(
 		struct mm_struct *dst_mm, struct mm_struct *src_mm,
 		pmd_t *dst_pmd, pmd_t *src_pmd, unsigned long addr,
@@ -1838,8 +1840,12 @@ static int copy_present_huge_pmd(
 		 * able to wrongly write to the backend MMIO.
 		 */
 		VM_WARN_ON_ONCE(is_cow_mapping(src_vma->vm_flags) && pmd_write(pmd));
-		pte_free(dst_mm, pgtable);
-		pgtable = NULL;
+
+		if (!has_deposited_pgtable(dst_vma, pmd, NULL)) {
+			pte_free(dst_mm, pgtable);
+			pgtable = NULL;
+		}
+
 		wrprotect = false;
 		goto set_pmd;
 	}
@@ -2422,10 +2428,18 @@ static bool has_deposited_pgtable(struct vm_area_struct *vma, pmd_t pmdval,
 		return !vma_is_dax(vma);
 
 	/*
+	 * PMD-sized PFNMAP mappings installed without fault handlers cannot be
+	 * refaulted after the PMD is cleared, so they carry a deposited page
+	 * table for later partial unmap/mprotect.
+	 */
+	if (!folio)
+		return pmd_present(pmdval) && vma_pfnmap_has_deposited_pgtable(vma);
+
+	/*
 	 * Otherwise, only anonymous folios are deposited, see
 	 * __do_huge_pmd_anonymous_page().
 	 */
-	return folio && folio_test_anon(folio);
+	return folio_test_anon(folio);
 }
 
 /**
@@ -3046,6 +3060,32 @@ static void __split_huge_zero_page_pmd(struct vm_area_struct *vma,
 	pmd_populate(mm, pmd, pgtable);
 }
 
+static void __split_huge_pfnmap_pmd(struct vm_area_struct *vma,
+		unsigned long haddr, pmd_t *pmd)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	pgtable_t pgtable;
+	pmd_t old_pmd, _pmd;
+	pte_t *pte, entry;
+
+	old_pmd = pmdp_huge_clear_flush(vma, haddr, pmd);
+	if (!has_deposited_pgtable(vma, old_pmd, NULL))
+		return;
+
+	pgtable = pgtable_trans_huge_withdraw(mm, pmd);
+	pmd_populate(mm, &_pmd, pgtable);
+
+	pte = pte_offset_map(&_pmd, haddr);
+	VM_BUG_ON(!pte);
+
+	entry = pfn_pte(pmd_pfn(old_pmd), pmd_pgprot(old_pmd));
+	set_ptes(mm, haddr, pte, entry, HPAGE_PMD_NR);
+	pte_unmap(pte);
+
+	smp_wmb(); /* make pte visible before pmd */
+	pmd_populate(mm, pmd, pgtable);
+}
+
 static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 		unsigned long haddr, bool freeze)
 {
@@ -3085,11 +3125,12 @@ static void __split_huge_pmd_locked(struct vm_area_struct *vma, pmd_t *pmd,
 				return __split_huge_zero_page_pmd(vma, haddr, pmd);
 			}
 
-			/* Present but not a normal folio: drop the PMD. */
-			old_pmd = pmdp_huge_clear_flush(vma, haddr, pmd);
-			if (arch_needs_pgtable_deposit())
-				zap_deposited_table(mm, pmd);
-			return;
+			/*
+			 * Present PMDs without a normal folio are special mappings. Huge zero PMDs
+			 * are handled above; the remaining PMD-level special mappings are PFNMAP
+			 * mappings.
+			 */
+			return __split_huge_pfnmap_pmd(vma, haddr, pmd);
 		}
 
 		if (unlikely(!folio_test_anon(folio))) {

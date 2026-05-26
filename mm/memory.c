@@ -2934,9 +2934,66 @@ static int remap_pte_range(struct mm_struct *mm, pmd_t *pmd,
 	return err;
 }
 
-static inline int remap_pmd_range(struct mm_struct *mm, pud_t *pud,
-			unsigned long addr, unsigned long end,
-			unsigned long pfn, pgprot_t prot)
+static int remap_try_install_pmd_leaf(struct mm_struct *mm,
+		pmd_t *pmd, struct vm_area_struct *vma, unsigned long addr,
+		unsigned long end, unsigned long pfn, pgprot_t prot)
+{
+	pgtable_t pgtable;
+	spinlock_t *ptl;
+	unsigned long i;
+	pmd_t entry;
+
+	if (!pgtable_level_has_pxx_special(PGTABLE_LEVEL_PMD))
+		return 0;
+
+	if (!pgtable_has_pmd_leaves())
+		return 0;
+
+	/*
+	 * Do not install PMD leaves through remap_pfn_range() for VMAs that have
+	 * a fault handler. With this restriction, a PFNMAP PMD in a VMA without
+	 * a fault handler is known to have been installed by remap_pfn_range()
+	 * and to have a deposited page table for later split; see
+	 * vma_pfnmap_has_deposited_pgtable().
+	 */
+	if (vma_has_fault_handler(vma))
+		return 0;
+
+	if (!IS_ALIGNED(addr | end, PMD_SIZE))
+		return 0;
+
+	if (!IS_ALIGNED(PFN_PHYS(pfn), PMD_SIZE))
+		return 0;
+
+	for (i = 0; i < PFN_DOWN(PMD_SIZE); i++) {
+		if (!pfn_modify_allowed(pfn + i, prot))
+			return -EACCES;
+	}
+
+	pgtable = pte_alloc_one(mm);
+	if (unlikely(!pgtable))
+		return 0;
+
+	ptl = pmd_lock(mm, pmd);
+	if (!pmd_none(*pmd)) {
+		spin_unlock(ptl);
+		pte_free(mm, pgtable);
+		return 0;
+	}
+
+	entry = pfn_pmd(pfn, prot);
+	entry = pmd_mkspecial(entry);
+	pgtable_trans_huge_deposit(mm, pmd, pgtable);
+	mm_inc_nr_ptes(mm);
+	set_pmd_at(mm, addr, pmd, entry);
+	spin_unlock(ptl);
+
+	return 1;
+}
+
+static inline int remap_pmd_range(struct mm_struct *mm,
+		struct vm_area_struct *vma, pud_t *pud, unsigned long addr,
+		unsigned long end, unsigned long pfn, pgprot_t prot)
 {
 	pmd_t *pmd;
 	unsigned long next;
@@ -2949,6 +3006,12 @@ static inline int remap_pmd_range(struct mm_struct *mm, pud_t *pud,
 	VM_BUG_ON(pmd_trans_huge(*pmd));
 	do {
 		next = pmd_addr_end(addr, end);
+		err = remap_try_install_pmd_leaf(mm, pmd, vma, addr, next,
+				pfn + (addr >> PAGE_SHIFT), prot);
+		if (err < 0)
+			return err;
+		if (err > 0)
+			continue;
 		err = remap_pte_range(mm, pmd, addr, next,
 				pfn + (addr >> PAGE_SHIFT), prot);
 		if (err)
@@ -2957,9 +3020,9 @@ static inline int remap_pmd_range(struct mm_struct *mm, pud_t *pud,
 	return 0;
 }
 
-static inline int remap_pud_range(struct mm_struct *mm, p4d_t *p4d,
-			unsigned long addr, unsigned long end,
-			unsigned long pfn, pgprot_t prot)
+static inline int remap_pud_range(struct mm_struct *mm,
+		struct vm_area_struct *vma, p4d_t *p4d, unsigned long addr,
+		unsigned long end, unsigned long pfn, pgprot_t prot)
 {
 	pud_t *pud;
 	unsigned long next;
@@ -2971,7 +3034,7 @@ static inline int remap_pud_range(struct mm_struct *mm, p4d_t *p4d,
 		return -ENOMEM;
 	do {
 		next = pud_addr_end(addr, end);
-		err = remap_pmd_range(mm, pud, addr, next,
+		err = remap_pmd_range(mm, vma, pud, addr, next,
 				pfn + (addr >> PAGE_SHIFT), prot);
 		if (err)
 			return err;
@@ -2979,9 +3042,9 @@ static inline int remap_pud_range(struct mm_struct *mm, p4d_t *p4d,
 	return 0;
 }
 
-static inline int remap_p4d_range(struct mm_struct *mm, pgd_t *pgd,
-			unsigned long addr, unsigned long end,
-			unsigned long pfn, pgprot_t prot)
+static inline int remap_p4d_range(struct mm_struct *mm,
+		struct vm_area_struct *vma, pgd_t *pgd, unsigned long addr,
+		unsigned long end, unsigned long pfn, pgprot_t prot)
 {
 	p4d_t *p4d;
 	unsigned long next;
@@ -2993,7 +3056,7 @@ static inline int remap_p4d_range(struct mm_struct *mm, pgd_t *pgd,
 		return -ENOMEM;
 	do {
 		next = p4d_addr_end(addr, end);
-		err = remap_pud_range(mm, p4d, addr, next,
+		err = remap_pud_range(mm, vma, p4d, addr, next,
 				pfn + (addr >> PAGE_SHIFT), prot);
 		if (err)
 			return err;
@@ -3040,7 +3103,7 @@ static int remap_pfn_range_internal(struct vm_area_struct *vma, unsigned long ad
 	flush_cache_range(vma, addr, end);
 	do {
 		next = pgd_addr_end(addr, end);
-		err = remap_p4d_range(mm, pgd, addr, next,
+		err = remap_p4d_range(mm, vma, pgd, addr, next,
 				pfn + (addr >> PAGE_SHIFT), prot);
 		if (err)
 			return err;

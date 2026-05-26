@@ -197,6 +197,27 @@ static inline void vma_close(struct vm_area_struct *vma)
 	}
 }
 
+static inline bool vma_has_fault_handler(const struct vm_area_struct *vma)
+{
+	const struct vm_operations_struct *vm_ops = vma->vm_ops;
+
+	return vm_ops && (vm_ops->fault || vm_ops->huge_fault);
+}
+
+/*
+ * PMD-sized PFNMAP mappings installed without fault handlers cannot be
+ * recreated after the PMD is cleared. Such mappings need a deposited page
+ * table so they can be split into PTEs for partial unmap/mprotect.
+ *
+ * Faultable PFNMAP VMAs can drop the PMD and refault it later, so they do
+ * not need a deposited page table.
+ */
+static inline bool
+vma_pfnmap_has_deposited_pgtable(const struct vm_area_struct *vma)
+{
+	return vma_test(vma, VMA_PFNMAP_BIT) && !vma_has_fault_handler(vma);
+}
+
 /* unmap_vmas is in mm/memory.c */
 void unmap_vmas(struct mmu_gather *tlb, struct unmap_desc *unmap);
 
