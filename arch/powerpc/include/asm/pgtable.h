@@ -67,7 +67,16 @@ static inline pgprot_t pte_pgprot(pte_t pte)
 #define pmd_pgprot pmd_pgprot
 static inline pgprot_t pmd_pgprot(pmd_t pmd)
 {
-	return pte_pgprot(pmd_pte(pmd));
+	pgprot_t prot = pte_pgprot(pmd_pte(pmd));
+
+	/*
+	 * pmd_pgprot() returns PTE-level pgprot_t. H_PAGE_THP_HUGE is specific
+	 * to huge PMDs.
+	 */
+#ifdef H_PAGE_THP_HUGE
+	prot = __pgprot(pgprot_val(prot) & ~H_PAGE_THP_HUGE);
+#endif
+	return prot;
 }
 
 #define pud_pgprot pud_pgprot
