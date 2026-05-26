@@ -2478,17 +2478,14 @@ bool zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 }
 
 #ifndef pmd_move_must_withdraw
-static inline int pmd_move_must_withdraw(spinlock_t *new_pmd_ptl,
-					 spinlock_t *old_pmd_ptl,
-					 struct vm_area_struct *vma)
+static inline bool pmd_move_must_withdraw(spinlock_t *new_pmd_ptl,
+		spinlock_t *old_pmd_ptl, bool has_deposit)
 {
 	/*
 	 * With split pmd lock we also need to move preallocated
 	 * PTE page table if new_pmd is on different PMD page table.
-	 *
-	 * We also don't deposit and withdraw tables for file pages.
 	 */
-	return (new_pmd_ptl != old_pmd_ptl) && vma_is_anonymous(vma);
+	return (new_pmd_ptl != old_pmd_ptl) && has_deposit;
 }
 #endif
 
@@ -2521,8 +2518,11 @@ bool move_huge_pmd(struct vm_area_struct *vma, unsigned long old_addr,
 {
 	spinlock_t *old_ptl, *new_ptl;
 	pmd_t pmd;
+	struct folio *folio = NULL;
 	struct mm_struct *mm = vma->vm_mm;
 	bool force_flush = false;
+	bool has_deposit;
+	bool is_present;
 
 	/*
 	 * The destination pmd shouldn't be established, free_pgtables()
@@ -2544,11 +2544,15 @@ bool move_huge_pmd(struct vm_area_struct *vma, unsigned long old_addr,
 		if (new_ptl != old_ptl)
 			spin_lock_nested(new_ptl, SINGLE_DEPTH_NESTING);
 		pmd = pmdp_huge_get_and_clear(mm, old_addr, old_pmd);
-		if (pmd_present(pmd))
+		is_present = pmd_present(pmd);
+		if (is_present)
 			force_flush = true;
 		VM_BUG_ON(!pmd_none(*new_pmd));
 
-		if (pmd_move_must_withdraw(new_ptl, old_ptl, vma)) {
+		folio = normal_or_softleaf_folio_pmd(vma, old_addr, pmd, is_present);
+		has_deposit = has_deposited_pgtable(vma, pmd, folio);
+
+		if (pmd_move_must_withdraw(new_ptl, old_ptl, has_deposit)) {
 			pgtable_t pgtable;
 			pgtable = pgtable_trans_huge_withdraw(mm, old_pmd);
 			pgtable_trans_huge_deposit(mm, new_pmd, pgtable);

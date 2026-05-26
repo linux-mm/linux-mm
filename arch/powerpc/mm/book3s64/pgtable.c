@@ -548,15 +548,14 @@ void ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr,
  * pmd page. Hence if we have different pmd page we need to withdraw during pmd
  * move.
  *
- * With hash we use deposited table always irrespective of anon or not.
- * With radix we use deposited table only for anonymous mapping.
+ * With hash we use deposited table always irrespective of has_deposit or not.
+ * With radix we use the same rule as the generic implementation.
  */
-int pmd_move_must_withdraw(struct spinlock *new_pmd_ptl,
-			   struct spinlock *old_pmd_ptl,
-			   struct vm_area_struct *vma)
+bool pmd_move_must_withdraw(struct spinlock *new_pmd_ptl,
+		struct spinlock *old_pmd_ptl, bool has_deposit)
 {
 	if (radix_enabled())
-		return (new_pmd_ptl != old_pmd_ptl) && vma_is_anonymous(vma);
+		return (new_pmd_ptl != old_pmd_ptl) && has_deposit;
 
 	return true;
 }

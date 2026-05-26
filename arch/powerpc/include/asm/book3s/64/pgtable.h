@@ -1424,9 +1424,8 @@ extern pud_t pudp_invalidate(struct vm_area_struct *vma, unsigned long address,
 
 #define pmd_move_must_withdraw pmd_move_must_withdraw
 struct spinlock;
-extern int pmd_move_must_withdraw(struct spinlock *new_pmd_ptl,
-				  struct spinlock *old_pmd_ptl,
-				  struct vm_area_struct *vma);
+extern bool pmd_move_must_withdraw(struct spinlock *new_pmd_ptl,
+		struct spinlock *old_pmd_ptl, bool has_deposit);
 /*
  * Hash translation mode use the deposited table to store hash pte
  * slot information.
