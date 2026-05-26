@@ -90,13 +90,6 @@ DEFINE_ENTRY(pud, pud, init)
 DEFINE_ENTRY(pmd, pmd, init)
 DEFINE_ENTRY(pte, pte, init)
 
-static inline pgprot_t prot_sethuge(pgprot_t prot)
-{
-	WARN_ON_ONCE(pgprot_val(prot) & _PAGE_PAT);
-
-	return __pgprot(pgprot_val(prot) | _PAGE_PSE);
-}
-
 /*
  * NOTE: pagetable_init alloc all the fixmap pagetables contiguous on the
  * physical space so we can cache the place of the first one and move
@@ -390,8 +383,7 @@ static void __init __init_extra_mapping(unsigned long phys, unsigned long size,
 	pmd_t *pmd;
 	pgprot_t prot;
 
-	pgprot_val(prot) = pgprot_val(PAGE_KERNEL_LARGE) |
-		protval_4k_2_large(cachemode2protval(cache));
+	pgprot_val(prot) = pgprot_val(PAGE_KERNEL) | cachemode2protval(cache);
 	BUG_ON((phys & ~PMD_MASK) || (size & ~PMD_MASK));
 	for (; size; phys += PMD_SIZE, size -= PMD_SIZE) {
 		pgd = pgd_offset_k((unsigned long)__va(phys));
@@ -414,7 +406,7 @@ static void __init __init_extra_mapping(unsigned long phys, unsigned long size,
 		}
 		pmd = pmd_offset(pud, phys);
 		BUG_ON(!pmd_none(*pmd));
-		set_pmd(pmd, __pmd(phys | pgprot_val(prot)));
+		set_pmd(pmd, pfn_pmd(phys >> PAGE_SHIFT, prot));
 	}
 }
 
@@ -572,15 +564,13 @@ phys_pmd_init(pmd_t *pmd_page, unsigned long paddr, unsigned long paddr_end,
 				paddr_last = paddr_next;
 				continue;
 			}
-			new_prot = pte_pgprot(pte_clrhuge(*(pte_t *)pmd));
+			new_prot = pmd_pgprot(*pmd);
 		}
 
 		if (page_size_mask & (1<<PG_LEVEL_2M)) {
 			pages++;
 			spin_lock(&init_mm.page_table_lock);
-			set_pmd_init(pmd,
-				     pfn_pmd(paddr >> PAGE_SHIFT, prot_sethuge(prot)),
-				     init);
+			set_pmd_init(pmd, pfn_pmd(paddr >> PAGE_SHIFT, prot), init);
 			spin_unlock(&init_mm.page_table_lock);
 			paddr_last = paddr_next;
 			continue;
@@ -658,15 +648,13 @@ phys_pud_init(pud_t *pud_page, unsigned long paddr, unsigned long paddr_end,
 				paddr_last = paddr_next;
 				continue;
 			}
-			prot = pte_pgprot(pte_clrhuge(*(pte_t *)pud));
+			prot = pud_pgprot(*pud);
 		}
 
 		if (page_size_mask & (1<<PG_LEVEL_1G)) {
 			pages++;
 			spin_lock(&init_mm.page_table_lock);
-			set_pud_init(pud,
-				     pfn_pud(paddr >> PAGE_SHIFT, prot_sethuge(prot)),
-				     init);
+			set_pud_init(pud, pfn_pud(paddr >> PAGE_SHIFT, prot), init);
 			spin_unlock(&init_mm.page_table_lock);
 			paddr_last = paddr_next;
 			continue;
@@ -1519,11 +1507,9 @@ static int __meminitdata node_start;
 void __meminit vmemmap_set_pmd(pmd_t *pmd, void *p, int node,
 			       unsigned long addr, unsigned long next)
 {
-	pte_t entry;
+	pmd_t entry = pfn_pmd(__pa(p) >> PAGE_SHIFT, PAGE_KERNEL);
 
-	entry = pfn_pte(__pa(p) >> PAGE_SHIFT,
-			PAGE_KERNEL_LARGE);
-	set_pmd(pmd, __pmd(pte_val(entry)));
+	set_pmd(pmd, entry);
 
 	/* check to see if we have contiguous blocks */
 	if (p_end != p || node_start != node) {

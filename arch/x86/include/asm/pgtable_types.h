@@ -251,8 +251,6 @@ enum page_cache_mode {
 #define PAGE_KERNEL_EXEC_NOENC	__pgprot_mask(__PAGE_KERNEL_EXEC       |    0)
 #define PAGE_KERNEL_ROX		__pgprot_mask(__PAGE_KERNEL_ROX        | _ENC)
 #define PAGE_KERNEL_NOCACHE	__pgprot_mask(__PAGE_KERNEL_NOCACHE    | _ENC)
-#define PAGE_KERNEL_LARGE	__pgprot_mask(__PAGE_KERNEL_LARGE      | _ENC)
-#define PAGE_KERNEL_LARGE_EXEC	__pgprot_mask(__PAGE_KERNEL_LARGE_EXEC | _ENC)
 #define PAGE_KERNEL_VVAR	__pgprot_mask(__PAGE_KERNEL_VVAR       | _ENC)
 
 #define PAGE_KERNEL_IO		__pgprot_mask(__PAGE_KERNEL_IO)
@@ -497,21 +495,13 @@ static inline pgprotval_t protval_4k_2_large(pgprotval_t val)
 	return (val & ~(_PAGE_PAT | _PAGE_PAT_LARGE)) |
 		((val & _PAGE_PAT) << (_PAGE_BIT_PAT_LARGE - _PAGE_BIT_PAT));
 }
-static inline pgprot_t pgprot_4k_2_large(pgprot_t pgprot)
-{
-	return __pgprot(protval_4k_2_large(pgprot_val(pgprot)));
-}
+
 static inline pgprotval_t protval_large_2_4k(pgprotval_t val)
 {
 	return (val & ~(_PAGE_PAT | _PAGE_PAT_LARGE)) |
 		((val & _PAGE_PAT_LARGE) >>
 		 (_PAGE_BIT_PAT_LARGE - _PAGE_BIT_PAT));
 }
-static inline pgprot_t pgprot_large_2_4k(pgprot_t pgprot)
-{
-	return __pgprot(protval_large_2_4k(pgprot_val(pgprot)));
-}
-
 
 typedef struct page *pgtable_t;
 

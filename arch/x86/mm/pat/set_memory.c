@@ -971,25 +971,16 @@ static int __should_split_large_page(pte_t *kpte, unsigned long address,
 
 	/*
 	 * We are safe now. Check whether the new pgprot is the same:
-	 * Convert protection attributes to 4k-format, as cpa->mask* are set
-	 * up accordingly.
+	 * Note that old_prot is already in the ideal 4k-format, so we can
+	 * directly apply cpa->mask* to it.
 	 */
 
-	/* Clear PSE (aka _PAGE_PAT) and move PAT bit to correct position */
-	req_prot = pgprot_large_2_4k(old_prot);
+	req_prot = old_prot;
 
 	pgprot_val(req_prot) &= ~pgprot_val(cpa->mask_clr);
 	pgprot_val(req_prot) |= pgprot_val(cpa->mask_set);
 
-	/*
-	 * req_prot is in format of 4k pages. It must be converted to large
-	 * page format: the caching mode includes the PAT bit located at
-	 * different bit positions in the two formats.
-	 */
-	req_prot = pgprot_4k_2_large(req_prot);
 	req_prot = pgprot_clear_protnone_bits(req_prot);
-	if (pgprot_val(req_prot) & _PAGE_PRESENT)
-		pgprot_val(req_prot) |= _PAGE_PSE;
 
 	/*
 	 * old_pfn points to the large page base pfn. So we need to add the
@@ -1065,7 +1056,10 @@ static int __should_split_large_page(pte_t *kpte, unsigned long address,
 		return 1;
 
 	/* All checks passed. Update the large page mapping. */
-	new_pte = pfn_pte(old_pfn, new_prot);
+	if (level == PG_LEVEL_2M)
+		new_pte = __pte(pmd_val(pfn_pmd(old_pfn, new_prot)));
+	else
+		new_pte = __pte(pud_val(pfn_pud(old_pfn, new_prot)));
 	__set_pmd_pte(kpte, address, new_pte);
 	cpa->flags |= CPA_FLUSHTLB;
 	cpa_inc_lp_preserved(level);
@@ -1120,7 +1114,10 @@ static void split_set_pte(struct cpa_data *cpa, pte_t *pte, unsigned long pfn,
 	else
 		pr_warn_once("CPA: Cannot fixup static protections for PUD split\n");
 set:
-	set_pte(pte, pfn_pte(pfn, ref_prot));
+	if (size == PMD_SIZE)
+		set_pmd((pmd_t *)pte, pfn_pmd(pfn, ref_prot));
+	else
+		set_pte(pte, pfn_pte(pfn, ref_prot));
 }
 
 static int
@@ -1151,11 +1148,6 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
 	switch (level) {
 	case PG_LEVEL_2M:
 		ref_prot = pmd_pgprot(*(pmd_t *)kpte);
-		/*
-		 * Clear PSE (aka _PAGE_PAT) and move
-		 * PAT bit to correct position.
-		 */
-		ref_prot = pgprot_large_2_4k(ref_prot);
 		ref_pfn = pmd_pfn(*(pmd_t *)kpte);
 		lpaddr = address & PMD_MASK;
 		lpinc = PAGE_SIZE;
@@ -1167,13 +1159,6 @@ __split_large_page(struct cpa_data *cpa, pte_t *kpte, unsigned long address,
 		pfninc = PMD_SIZE >> PAGE_SHIFT;
 		lpaddr = address & PUD_MASK;
 		lpinc = PMD_SIZE;
-		/*
-		 * Clear the PSE flags if the PRESENT flag is not set
-		 * otherwise pmd_present() will return true even on a non
-		 * present pmd.
-		 */
-		if (!(pgprot_val(ref_prot) & _PAGE_PRESENT))
-			pgprot_val(ref_prot) &= ~_PAGE_PSE;
 		break;
 
 	default:
@@ -1289,8 +1274,7 @@ static int collapse_pmd_page(pmd_t *pmd, unsigned long addr,
 	old_pmd = *pmd;
 
 	/* Success: set up a large page */
-	pgprot = pgprot_4k_2_large(pte_pgprot(first));
-	pgprot_val(pgprot) |= _PAGE_PSE;
+	pgprot = pte_pgprot(first);
 	_pmd = pfn_pmd(pfn, pgprot);
 	set_pmd(pmd, _pmd);
 
@@ -1593,7 +1577,6 @@ static long populate_pmd(struct cpa_data *cpa,
 {
 	long cur_pages = 0;
 	pmd_t *pmd;
-	pgprot_t pmd_pgprot;
 
 	/*
 	 * Not on a 2M boundary?
@@ -1625,8 +1608,6 @@ static long populate_pmd(struct cpa_data *cpa,
 	if (num_pages == cur_pages)
 		return cur_pages;
 
-	pmd_pgprot = pgprot_4k_2_large(pgprot);
-
 	while (end - start >= PMD_SIZE) {
 
 		/*
@@ -1638,8 +1619,7 @@ static long populate_pmd(struct cpa_data *cpa,
 
 		pmd = pmd_offset(pud, start);
 
-		set_pmd(pmd, pmd_mkhuge(pfn_pmd(cpa->pfn,
-					canon_pgprot(pmd_pgprot))));
+		set_pmd(pmd, pfn_pmd(cpa->pfn, canon_pgprot(pgprot)));
 
 		start	  += PMD_SIZE;
 		cpa->pfn  += PMD_SIZE >> PAGE_SHIFT;
@@ -1667,7 +1647,6 @@ static int populate_pud(struct cpa_data *cpa, unsigned long start, p4d_t *p4d,
 	pud_t *pud;
 	unsigned long end;
 	long cur_pages = 0;
-	pgprot_t pud_pgprot;
 
 	end = start + (cpa->numpages << PAGE_SHIFT);
 
@@ -1705,14 +1684,12 @@ static int populate_pud(struct cpa_data *cpa, unsigned long start, p4d_t *p4d,
 		return cur_pages;
 
 	pud = pud_offset(p4d, start);
-	pud_pgprot = pgprot_4k_2_large(pgprot);
 
 	/*
 	 * Map everything starting from the Gb boundary, possibly with 1G pages
 	 */
 	while (boot_cpu_has(X86_FEATURE_GBPAGES) && end - start >= PUD_SIZE) {
-		set_pud(pud, pud_mkhuge(pfn_pud(cpa->pfn,
-				   canon_pgprot(pud_pgprot))));
+		set_pud(pud, pfn_pud(cpa->pfn, canon_pgprot(pgprot)));
 
 		start	  += PUD_SIZE;
 		cpa->pfn  += PUD_SIZE >> PAGE_SHIFT;

@@ -475,11 +475,6 @@ static inline pte_t pte_mkhuge(pte_t pte)
 	return pte_set_flags(pte, _PAGE_PSE);
 }
 
-static inline pte_t pte_clrhuge(pte_t pte)
-{
-	return pte_clear_flags(pte, _PAGE_PSE);
-}
-
 static inline pte_t pte_mkglobal(pte_t pte)
 {
 	return pte_set_flags(pte, _PAGE_GLOBAL);
@@ -741,29 +736,31 @@ static inline pte_t pfn_pte(unsigned long page_nr, pgprot_t pgprot)
 static inline pmd_t pfn_pmd(unsigned long page_nr, pgprot_t pgprot)
 {
 	phys_addr_t pfn = (phys_addr_t)page_nr << PAGE_SHIFT;
-	pfn ^= protnone_mask(pgprot_val(pgprot));
+	pgprotval_t protval = protval_4k_2_large(pgprot_val(pgprot));
+
+	protval = check_pgprot(__pgprot(protval));
+	if (protval)
+		protval |= _PAGE_PSE;
+
+	pfn ^= protnone_mask(protval);
 	pfn &= PHYSICAL_PMD_PAGE_MASK;
-	return __pmd(pfn | check_pgprot(pgprot));
+
+	return __pmd(pfn | protval);
 }
 
 static inline pud_t pfn_pud(unsigned long page_nr, pgprot_t pgprot)
 {
 	phys_addr_t pfn = (phys_addr_t)page_nr << PAGE_SHIFT;
-	pfn ^= protnone_mask(pgprot_val(pgprot));
+	pgprotval_t protval = protval_4k_2_large(pgprot_val(pgprot));
+
+	protval = check_pgprot(__pgprot(protval));
+	if (protval)
+		protval |= _PAGE_PSE;
+
+	pfn ^= protnone_mask(protval);
 	pfn &= PHYSICAL_PUD_PAGE_MASK;
-	return __pud(pfn | check_pgprot(pgprot));
-}
 
-static inline pmd_t pmd_mkinvalid(pmd_t pmd)
-{
-	return pfn_pmd(pmd_pfn(pmd),
-		      __pgprot(pmd_flags(pmd) & ~(_PAGE_PRESENT|_PAGE_PROTNONE)));
-}
-
-static inline pud_t pud_mkinvalid(pud_t pud)
-{
-	return pfn_pud(pud_pfn(pud),
-		       __pgprot(pud_flags(pud) & ~(_PAGE_PRESENT|_PAGE_PROTNONE)));
+	return __pud(pfn | protval);
 }
 
 static inline u64 flip_protnone_guard(u64 oldval, u64 val, u64 mask);
@@ -860,9 +857,36 @@ static inline pgprot_t pgprot_modify(pgprot_t oldprot, pgprot_t newprot)
 }
 
 #define pte_pgprot(x) __pgprot(pte_flags(x))
-#define pmd_pgprot(x) __pgprot(pmd_flags(x))
-#define pud_pgprot(x) __pgprot(pud_flags(x))
+static inline pgprot_t pmd_pgprot(pmd_t pmd)
+{
+	return __pgprot(protval_large_2_4k(pmd_flags(pmd)));
+}
+
+#define pmd_pgprot pmd_pgprot
+
+static inline pgprot_t pud_pgprot(pud_t pud)
+{
+	return __pgprot(protval_large_2_4k(pud_flags(pud)));
+}
+
+#define pud_pgprot pud_pgprot
 #define p4d_pgprot(x) __pgprot(p4d_flags(x))
+
+static inline pmd_t pmd_mkinvalid(pmd_t pmd)
+{
+	pgprot_t prot = pmd_pgprot(pmd);
+
+	pgprot_val(prot) &= ~(_PAGE_PRESENT | _PAGE_PROTNONE);
+	return pfn_pmd(pmd_pfn(pmd), prot);
+}
+
+static inline pud_t pud_mkinvalid(pud_t pud)
+{
+	pgprot_t prot = pud_pgprot(pud);
+
+	pgprot_val(prot) &= ~(_PAGE_PRESENT | _PAGE_PROTNONE);
+	return pfn_pud(pud_pfn(pud), prot);
+}
 
 #define canon_pgprot(p) __pgprot(massage_pgprot(p))
 

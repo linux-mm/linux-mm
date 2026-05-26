@@ -107,7 +107,7 @@ static int resume_physical_mapping_init(pgd_t *pgd_base)
 			 * NOTE: We can mark everything as executable here
 			 */
 			if (boot_cpu_has(X86_FEATURE_PSE)) {
-				set_pmd(pmd, pfn_pmd(pfn, PAGE_KERNEL_LARGE_EXEC));
+				set_pmd(pmd, pfn_pmd(pfn, PAGE_KERNEL_EXEC));
 				pfn += PTRS_PER_PTE;
 			} else {
 				pte_t *max_pte;
@@ -156,13 +156,13 @@ static int set_up_temporary_text_mapping(pgd_t *pgd_base)
 
 	if (boot_cpu_has(X86_FEATURE_PSE)) {
 		set_pmd(pmd + pmd_index(restore_jump_address),
-		__pmd((jump_address_phys & PMD_MASK) | pgprot_val(PAGE_KERNEL_LARGE_EXEC)));
+			pfn_pmd(jump_address_phys >> PAGE_SHIFT, PAGE_KERNEL_EXEC));
 	} else {
 		pte = resume_one_page_table_init(pmd);
 		if (!pte)
 			return -ENOMEM;
 		set_pte(pte + pte_index(restore_jump_address),
-		__pte((jump_address_phys & PAGE_MASK) | pgprot_val(PAGE_KERNEL_EXEC)));
+			pfn_pte(jump_address_phys >> PAGE_SHIFT, PAGE_KERNEL_EXEC));
 	}
 
 	return 0;
