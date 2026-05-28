@@ -25,6 +25,7 @@
 #include "internal.h"
 #include "swap_table.h"
 #include "swap.h"
+#include "vswap.h"
 
 /*
  * swapper_space is a fiction, retained to simplify the path through
@@ -701,6 +702,13 @@ struct folio *swapin_sync(swp_entry_t entry, gfp_t gfp, unsigned long orders,
 
 	if (IS_ERR(folio))
 		return folio;
+
+	if (folio_test_large(folio) && swap_is_vswap(__swap_entry_to_info(folio->swap)) &&
+	    !vswap_can_swapin_thp(folio->swap, folio_nr_pages(folio))) {
+		folio_unlock(folio);
+		folio_put(folio);
+		return NULL;
+	}
 
 	swap_read_folio(folio, NULL);
 	return folio;

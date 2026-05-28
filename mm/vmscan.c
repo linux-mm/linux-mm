@@ -350,6 +350,9 @@ static inline bool can_reclaim_anon_pages(struct mem_cgroup *memcg,
 		 */
 		if (get_nr_swap_pages() > 0)
 			return true;
+		/* vswap doesn't contribute to nr_swap_pages */
+		if (IS_ENABLED(CONFIG_VSWAP) && zswap_is_enabled())
+			return true;
 	} else {
 		/* Is the memcg below its swap limit? */
 		if (mem_cgroup_get_nr_swap_pages(memcg) > 0)
@@ -2614,7 +2617,7 @@ static bool can_age_anon_pages(struct lruvec *lruvec,
 			       struct scan_control *sc)
 {
 	/* Aging the anon LRU is valuable if swap is present: */
-	if (total_swap_pages > 0)
+	if (total_swap_pages > 0 || (IS_ENABLED(CONFIG_VSWAP) && zswap_is_enabled()))
 		return true;
 
 	/* Also valuable if anon pages can be demoted: */

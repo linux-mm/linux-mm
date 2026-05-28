@@ -16,6 +16,7 @@
 #include <linux/pagewalk.h>
 #include <linux/rmap.h>
 #include <linux/swap.h>
+#include "vswap.h"
 #include <linux/leafops.h>
 #include <linux/tracepoint-defs.h>
 
@@ -436,6 +437,9 @@ static inline pte_t pte_next_swp_offset(pte_t pte)
  * @start_ptep: Page table pointer for the first entry.
  * @max_nr: The maximum number of table entries to consider.
  * @pte: Page table entry for the first entry.
+ * @free_batch: True when the batch is for a free path. Skips the
+ *              vswap uniform-backing check (which is only relevant
+ *              for swapin batches).
  *
  * Detect a batch of contiguous swap entries: consecutive (non-present) PTEs
  * containing swap entries all with consecutive offsets and targeting the same
@@ -446,11 +450,14 @@ static inline pte_t pte_next_swp_offset(pte_t pte)
  *
  * Return: the number of table entries in the batch.
  */
-static inline int swap_pte_batch(pte_t *start_ptep, int max_nr, pte_t pte)
+static inline int swap_pte_batch(pte_t *start_ptep, int max_nr, pte_t pte,
+				 bool free_batch)
 {
 	pte_t expected_pte = pte_next_swp_offset(pte);
 	const pte_t *end_ptep = start_ptep + max_nr;
 	pte_t *ptep = start_ptep + 1;
+	swp_entry_t entry __maybe_unused;
+	int nr;
 
 	VM_WARN_ON(max_nr < 1);
 	VM_WARN_ON(!softleaf_is_swap(softleaf_from_pte(pte)));
@@ -464,7 +471,16 @@ static inline int swap_pte_batch(pte_t *start_ptep, int max_nr, pte_t pte)
 		ptep++;
 	}
 
-	return ptep - start_ptep;
+	nr = ptep - start_ptep;
+#ifdef CONFIG_VSWAP
+	if (!free_batch) {
+		entry = softleaf_from_pte(ptep_get(start_ptep));
+		if (nr > 1 && swap_is_vswap(__swap_entry_to_info(entry)) &&
+		    !vswap_can_swapin_thp(entry, nr))
+			return 1;
+	}
+#endif
+	return nr;
 }
 #endif /* CONFIG_MMU */
 

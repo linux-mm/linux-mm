@@ -6,6 +6,8 @@
 #include <linux/atomic.h>
 #include "swap.h"
 
+struct zswap_entry;
+
 /* A typical flat array in each cluster as swap table */
 struct swap_table {
 	atomic_long_t entries[SWAPFILE_CLUSTER];
@@ -367,5 +369,56 @@ static inline unsigned short __swap_cgroup_clear(struct swap_cluster_info *ci,
 	return 0;
 }
 #endif
+
+/*
+ * Pointer-tagged swap table entry: rmap for vswap-backing physical slots.
+ *
+ * On physical clusters, a Pointer-tagged entry stores the vswap entry
+ * that owns this physical slot (the reverse map). The top bit is reserved
+ * as a cache-only flag, set when vswap swap_count drops to 0 but the
+ * folio is still in swap cache.
+ *
+ *   Pointer:  |C|--- vswap entry ---|100|
+ *             C = SWP_RMAP_CACHE_ONLY (bit 63)
+ */
+#ifdef CONFIG_VSWAP
+#define SWP_TB_PTR_MARK		0b100UL
+#define SWP_TB_PTR_MARK_MASK	0b111UL
+#define SWP_RMAP_CACHE_ONLY	(1UL << (BITS_PER_LONG - 1))
+#define SWP_RMAP_ENTRY_MASK	(~(SWP_RMAP_CACHE_ONLY | SWP_TB_PTR_MARK_MASK))
+
+static inline bool swp_tb_is_pointer(unsigned long swp_tb)
+{
+	return (swp_tb & SWP_TB_PTR_MARK_MASK) == SWP_TB_PTR_MARK;
+}
+
+static inline unsigned long swp_entry_to_swp_tb_ptr(swp_entry_t entry)
+{
+	return (entry.val << 3) | SWP_TB_PTR_MARK;
+}
+
+static inline swp_entry_t swp_tb_ptr_to_swp_entry(unsigned long swp_tb)
+{
+	swp_entry_t entry;
+
+	VM_WARN_ON(!swp_tb_is_pointer(swp_tb));
+	entry.val = (swp_tb & SWP_RMAP_ENTRY_MASK) >> 3;
+	return entry;
+}
+#else
+static inline bool swp_tb_is_pointer(unsigned long swp_tb)
+{
+	return false;
+}
+static inline unsigned long swp_entry_to_swp_tb_ptr(swp_entry_t entry)
+{
+	return 0;
+}
+static inline swp_entry_t swp_tb_ptr_to_swp_entry(unsigned long swp_tb)
+{
+	return (swp_entry_t){};
+}
+
+#endif /* CONFIG_VSWAP */
 
 #endif

@@ -1764,7 +1764,7 @@ static inline int zap_nonpresent_ptes(struct mmu_gather *tlb,
 		if (!should_zap_cows(details))
 			return 1;
 
-		nr = swap_pte_batch(pte, max_nr, ptent);
+		nr = swap_pte_batch(pte, max_nr, ptent, true);
 		rss[MM_SWAPENTS] -= nr;
 		swap_put_entries_direct(entry, nr);
 	} else if (softleaf_is_migration(entry)) {
@@ -4630,7 +4630,7 @@ static bool can_swapin_thp(struct vm_fault *vmf, pte_t *ptep, int nr_pages)
 	 * from different backends. And they are likely corner cases. Similar
 	 * things might be added once zswap support large folios.
 	 */
-	if (swap_pte_batch(ptep, nr_pages, pte) != nr_pages)
+	if (swap_pte_batch(ptep, nr_pages, pte, false) != nr_pages)
 		return false;
 	return true;
 }
@@ -4675,15 +4675,19 @@ static unsigned long thp_swapin_suitable_orders(struct vm_fault *vmf)
 	if (unlikely(userfaultfd_armed(vma)))
 		return 0;
 
+	entry = softleaf_from_pte(vmf->orig_pte);
+
 	/*
-	 * A large swapped out folio could be partially or fully in zswap. We
-	 * lack handling for such cases, so fallback to swapping in order-0
-	 * folio.
+	 * A large swapped out folio could be partially or fully in zswap.
+	 * With vswap, vswap_can_swapin_thp() (via swap_pte_batch) lets
+	 * THP swapin through only for backings that don't need per-page
+	 * decompression. For non-vswap entries we still need the
+	 * zswap_never_enabled() bail — zswap_load rejects large folios
+	 * with -EINVAL, which would SIGBUS the fault.
 	 */
-	if (!zswap_never_enabled())
+	if (!swap_is_vswap(__swap_entry_to_info(entry)) && !zswap_never_enabled())
 		return 0;
 
-	entry = softleaf_from_pte(vmf->orig_pte);
 	/*
 	 * Get a list of all the (large) orders below PMD_ORDER that are enabled
 	 * and suitable for swapping THP.
@@ -4942,7 +4946,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 		folio_ptep = vmf->pte - idx;
 		folio_pte = ptep_get(folio_ptep);
 		if (!pte_same(folio_pte, pte_move_swp_offset(vmf->orig_pte, -idx)) ||
-		    swap_pte_batch(folio_ptep, nr, folio_pte) != nr)
+		    swap_pte_batch(folio_ptep, nr, folio_pte, false) != nr)
 			goto check_folio;
 
 		page_idx = idx;
