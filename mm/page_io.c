@@ -355,6 +355,23 @@ int sio_pool_init(void)
 	return 0;
 }
 
+static bool swap_can_merge_memcg(struct swap_iocb *sio, struct folio *folio)
+{
+	struct folio *prev_folio =
+		page_folio(sio->bvecs[sio->nr_bvecs - 1].bv_page);
+
+	if (folio_memcg_charged(folio)) {
+		rcu_read_lock();
+		if (folio_memcg_css(folio) != folio_memcg_css(prev_folio)) {
+			rcu_read_unlock();
+			return false;
+		}
+		rcu_read_unlock();
+	}
+
+	return true;
+}
+
 static void sio_write_complete(struct kiocb *iocb, long ret)
 {
 	struct swap_iocb *sio = container_of(iocb, struct swap_iocb, iocb);
@@ -397,7 +414,8 @@ static void swap_writepage_fs(struct folio *folio, struct swap_iocb **swap_plug)
 	folio_unlock(folio);
 	if (sio) {
 		if (sio->iocb.ki_filp != swap_file ||
-		    sio->iocb.ki_pos + sio->len != pos) {
+		    sio->iocb.ki_pos + sio->len != pos ||
+		    !swap_can_merge_memcg(sio, folio)) {
 			swap_write_unplug(sio);
 			sio = NULL;
 		}
