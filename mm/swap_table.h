@@ -406,6 +406,7 @@ static inline swp_entry_t swp_tb_ptr_to_swp_entry(unsigned long swp_tb)
 	return entry;
 }
 #else
+#define SWP_RMAP_CACHE_ONLY	0UL
 static inline bool swp_tb_is_pointer(unsigned long swp_tb)
 {
 	return false;

@@ -5652,7 +5652,13 @@ long mem_cgroup_get_nr_swap_pages(struct mem_cgroup *memcg)
 {
 	long nr_swap_pages;
 
-	/* vswap provides unbounded virtual swap when zswap is enabled */
+	/*
+	 * vswap provides unbounded virtual swap when zswap is enabled.
+	 * (No per-memcg may_zswap check — mem_cgroup_may_zswap can sleep
+	 * via __mem_cgroup_flush_stats, but this is callable from
+	 * rcu_read_lock contexts like cachestat(2) → workingset_test_recent.
+	 * The per-memcg swap.max is still enforced at charge time.)
+	 */
 	if (IS_ENABLED(CONFIG_VSWAP) && zswap_is_enabled())
 		return PAGE_COUNTER_MAX;
 
