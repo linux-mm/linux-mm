@@ -318,16 +318,11 @@ static inline void count_swpout_vm_event(struct folio *folio)
 #if defined(CONFIG_MEMCG) && defined(CONFIG_BLK_CGROUP)
 static void bio_associate_blkg_from_page(struct bio *bio, struct folio *folio)
 {
-	struct cgroup_subsys_state *css;
-	struct mem_cgroup *memcg;
-
 	if (!folio_memcg_charged(folio))
 		return;
 
 	rcu_read_lock();
-	memcg = folio_memcg(folio);
-	css = cgroup_e_css(memcg->css.cgroup, &io_cgrp_subsys);
-	bio_associate_blkg_from_css(bio, css);
+	bio_associate_blkg_from_css(bio, folio_memcg_css(folio));
 	rcu_read_unlock();
 }
 #else

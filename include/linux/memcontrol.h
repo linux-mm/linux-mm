@@ -1767,6 +1767,11 @@ static inline bool memcg_is_dying(struct mem_cgroup *memcg)
 	return memcg ? css_is_dying(&memcg->css) : false;
 }
 
+static inline struct cgroup_subsys_state *folio_memcg_css(struct folio *folio)
+{
+	return cgroup_e_css(folio_memcg(folio)->css.cgroup, &io_cgrp_subsys);
+}
+
 #else
 static inline bool mem_cgroup_kmem_disabled(void)
 {
@@ -1841,6 +1846,11 @@ static inline void mem_cgroup_show_protected_memory(struct mem_cgroup *memcg)
 static inline bool memcg_is_dying(struct mem_cgroup *memcg)
 {
 	return false;
+}
+
+static inline struct cgroup_subsys_state *folio_memcg_css(struct folio *folio)
+{
+	return NULL;
 }
 #endif /* CONFIG_MEMCG */
 
