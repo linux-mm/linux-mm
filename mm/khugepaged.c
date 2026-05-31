@@ -98,6 +98,7 @@ static unsigned int khugepaged_max_ptes_shared __read_mostly;
 static DEFINE_READ_MOSTLY_HASHTABLE(mm_slots_hash, MM_SLOTS_HASH_BITS);
 
 static struct kmem_cache *mm_slot_cache __ro_after_init;
+static struct kmem_cache *collapse_hint_cache __ro_after_init;
 
 #define KHUGEPAGED_PRIORITY_QUEUE_MAX_FAIL 10
 
@@ -530,6 +531,13 @@ int __init khugepaged_init(void)
 	if (!mm_slot_cache)
 		return -ENOMEM;
 
+	collapse_hint_cache = KMEM_CACHE(khugepaged_collapse_hint, 0);
+	if (!collapse_hint_cache) {
+		kmem_cache_destroy(mm_slot_cache);
+		mm_slot_cache = NULL;
+		return -ENOMEM;
+	}
+
 	for (i = 0; i < NR_KHUGEPAGED_PRIORITY_LEVEL; i++)
 		INIT_LIST_HEAD(&khugepaged_priority_queue[i]);
 
@@ -544,6 +552,7 @@ int __init khugepaged_init(void)
 void __init khugepaged_destroy(void)
 {
 	kmem_cache_destroy(mm_slot_cache);
+	kmem_cache_destroy(collapse_hint_cache);
 }
 
 static inline int collapse_test_exit(struct mm_struct *mm)
@@ -670,7 +679,7 @@ static void khugepaged_release_collapse_hints(
 
 	list_for_each_entry_safe(hint, tmp, &req->hints, node) {
 		list_del(&hint->node);
-		kfree(hint);
+		kmem_cache_free(collapse_hint_cache, hint);
 	}
 }
 
@@ -3004,7 +3013,7 @@ void khugepaged_add_collapse_hint(struct mm_struct *mm,
 	if (!mm_flags_test(MMF_VM_HUGEPAGE, mm))
 		return;
 
-	hint = kmalloc_obj(struct khugepaged_collapse_hint);
+	hint = kmem_cache_alloc(collapse_hint_cache, GFP_KERNEL);
 	if (!hint)
 		return;
 
@@ -3016,14 +3025,14 @@ void khugepaged_add_collapse_hint(struct mm_struct *mm,
 	 * just "best-effort" optimization.
 	 */
 	if (!spin_trylock(&khugepaged_mm_lock)) {
-		kfree(hint);
+		kmem_cache_free(collapse_hint_cache, hint);
 		return;
 	}
 
 	slot = mm_slot_lookup(mm_slots_hash, mm);
 	if (!slot) {
 		spin_unlock(&khugepaged_mm_lock);
-		kfree(hint);
+		kmem_cache_free(collapse_hint_cache, hint);
 		return;
 	}
 	khp_mm_slot = mm_slot_entry(slot, struct khugepaged_mm_slot, slot);
@@ -3116,7 +3125,7 @@ static int collapse_scan_one_priority_entry(unsigned int progress_max,
 		addr = hint->address;
 
 		if (unlikely(collapse_test_exit_or_disable(mm))) {
-			kfree(hint);
+			kmem_cache_free(collapse_hint_cache, hint);
 			break;
 		}
 
@@ -3140,7 +3149,7 @@ static int collapse_scan_one_priority_entry(unsigned int progress_max,
 		if (*result != SCAN_SUCCEED)
 			(*fail_count)++;
 skip_hint:
-		kfree(hint);
+		kmem_cache_free(collapse_hint_cache, hint);
 	}
 
 	if (!lock_dropped)
