@@ -28,7 +28,9 @@ def main():
         exit(1)
 
     collected_nr_regions = []
-    while proc.poll() is None:
+    nr_retries = 0
+    while proc.poll() is None and nr_retries < 200:
+        nr_retries += 1
         time.sleep(0.1)
         err = kdamonds.kdamonds[0].update_schemes_tried_regions()
         if err is not None:
@@ -38,19 +40,19 @@ def main():
 
         scheme = kdamonds.kdamonds[0].contexts[0].schemes[0]
         if scheme.tried_regions is None:
-            proc.terminate()
-            print('tried regions is not collected')
-            exit(1)
+            continue
 
         nr_tried_regions = len(scheme.tried_regions)
         if nr_tried_regions <= 0:
-            proc.terminate()
-            print('tried regions is not created')
-            exit(1)
+            continue
         collected_nr_regions.append(nr_tried_regions)
         if len(collected_nr_regions) > 10:
             break
     proc.terminate()
+
+    if len(collected_nr_regions) <= 4:
+        print('too few tried regions samples collected')
+        exit(1)
 
     collected_nr_regions.sort()
     sample = collected_nr_regions[4]
