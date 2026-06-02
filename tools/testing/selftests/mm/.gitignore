@@ -23,6 +23,7 @@ transhuge-stress
 pagemap_ioctl
 pfnmap
 process_madv
+process_vm_readv
 *.tmp*
 protection_keys
 protection_keys_32
