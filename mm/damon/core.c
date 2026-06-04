@@ -1387,6 +1387,31 @@ static int damon_commit_target(
 	return 0;
 }
 
+/*
+ * damon_commit_target_fail() - handle damon_commit_target() failure.
+ * @dst:	Commit destination context
+ * @failed:	Commit failed destination target
+ * @src:	Commit source context
+ *
+ * This function is called by damon_commit_targets() for dammon_commit_target()
+ * failure for immediate states cleanups.
+ */
+static void damon_commit_target_fail(struct damon_ctx *dst,
+		struct damon_target *failed, struct damon_ctx *src)
+{
+	struct damon_target *target;
+
+	if (!damon_target_has_pid(src))
+		return;
+	if (damon_target_has_pid(dst))
+		return;
+	damon_for_each_target(target, dst) {
+		if (target == failed)
+			return;
+		put_pid(target->pid);
+	}
+}
+
 static int damon_commit_targets(
 		struct damon_ctx *dst, struct damon_ctx *src)
 {
@@ -1404,8 +1429,10 @@ static int damon_commit_targets(
 					dst_target, damon_target_has_pid(dst),
 					src_target, damon_target_has_pid(src),
 					src->min_region_sz);
-			if (err)
+			if (err) {
+				damon_commit_target_fail(dst, dst_target, src);
 				return err;
+			}
 		} else {
 			struct damos *s;
 
@@ -1432,6 +1459,7 @@ static int damon_commit_targets(
 				src_target, damon_target_has_pid(src),
 				src->min_region_sz);
 		if (err) {
+			damon_commit_target_fail(dst, NULL, src);
 			damon_destroy_target(new_target, NULL);
 			return err;
 		}
