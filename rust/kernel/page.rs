@@ -297,6 +297,38 @@ impl Page {
         })
     }
 
+    /// Maps the page and reads from it into the given memory region using byte-wise atomic memory
+    /// operations.
+    ///
+    /// This method will perform bounds checks on the page offset. If `offset .. offset+len` goes
+    /// outside of the page, then this call returns [`EINVAL`].
+    ///
+    /// This function is guaranteed to perform byte-wise atomic memory writes to `dst`, but it may
+    /// perform only normal (non-atomic) memory reads from the [`Page`] `self`. Accordingly, the
+    /// safety requirements below ask for byte-wise atomic discipline on `dst` and only for absence
+    /// of concurrent writes on the source page.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that:
+    ///
+    /// - `dst` is valid for atomic writes for `len` bytes for the duration of the call.
+    /// - This call does not race with a write to the source page that overlaps with this read.
+    pub unsafe fn read_bytewise_atomic(&self, dst: *mut u8, offset: usize, len: usize) -> Result {
+        self.with_pointer_into_page(offset, len, move |src| {
+            // SAFETY:
+            // - If `with_pointer_into_page` calls into this closure, then it has performed a
+            //   bounds check and guarantees that `src` is valid for `len` bytes.
+            // - By function safety requirements `dst` is valid for writes for `len` bytes.
+            // - By function safety requirements there are no other writes to `src` during this
+            //   call.
+            // - By function safety requirements all other access to `dst` during this call are
+            //   atomic.
+            unsafe { kernel::sync::atomic::atomic_per_byte_memcpy(src, dst, len) };
+            Ok(())
+        })
+    }
+
     /// Maps the page and writes into it from the given buffer.
     ///
     /// This method will perform bounds checks on the page offset. If `offset .. offset+len` goes
@@ -314,6 +346,44 @@ impl Page {
             //
             // There caller guarantees that there is no data race.
             unsafe { ptr::copy_nonoverlapping(src, dst, len) };
+            Ok(())
+        })
+    }
+
+    /// Maps the page and writes into it from the given memory region using byte-wise atomic memory
+    /// operations.
+    ///
+    /// This method will perform bounds checks on the page offset. If `offset .. offset+len` goes
+    /// outside of the page, then this call returns [`EINVAL`].
+    ///
+    /// This function is guaranteed to perform byte-wise atomic memory reads from `src`, but it may
+    /// perform only normal (non-atomic) memory writes to the [`Page`] `self`. Accordingly, the
+    /// safety requirements below ask for byte-wise atomic discipline on `src` and only for absence
+    /// of concurrent reads or writes on the destination page.
+    ///
+    /// # Safety
+    ///
+    /// Callers must ensure that:
+    ///
+    /// - `src` is valid for atomic reads for `len` bytes for the duration of the call.
+    /// - This call does not race with a read or write to the destination page that overlaps with
+    ///   this write.
+    pub unsafe fn write_bytewise_atomic(
+        &self,
+        src: *const u8,
+        offset: usize,
+        len: usize,
+    ) -> Result {
+        self.with_pointer_into_page(offset, len, move |dst| {
+            // SAFETY:
+            // - By function safety requirements `src` is valid for writes for `len` bytes.
+            // - If `with_pointer_into_page` calls into this closure, then it has performed a
+            //   bounds check and guarantees that `dst` is valid for `len` bytes.
+            // - By function safety requirements there are no other writes to `dst` during this
+            //   call.
+            // - By function safety requirements all other access to `src` during this call are
+            //   atomic.
+            unsafe { kernel::sync::atomic::atomic_per_byte_memcpy(src, dst, len) };
             Ok(())
         })
     }
