@@ -1502,7 +1502,8 @@ static void free_pcppages_bulk(struct zone *zone, int count,
 
 /* Split a multi-block free page into its individual pageblocks. */
 static void split_large_buddy(struct zone *zone, struct page *page,
-			      unsigned long pfn, int order, fpi_t fpi)
+			      unsigned long pfn, int order, fpi_t fpi,
+			      bool reported)
 {
 	unsigned long end = pfn + (1 << order);
 
@@ -1517,6 +1518,8 @@ static void split_large_buddy(struct zone *zone, struct page *page,
 		int mt = get_pfnblock_migratetype(page, pfn);
 
 		__free_one_page(page, pfn, zone, order, mt, fpi);
+		if (reported && PageBuddy(page) && buddy_order(page) == order)
+			__SetPageReported(page);
 		pfn += 1 << order;
 		if (pfn == end)
 			break;
@@ -1559,11 +1562,12 @@ static void free_one_page(struct zone *zone, struct page *page,
 		llist_for_each_entry_safe(p, tmp, llnode, pcp_llist) {
 			unsigned int p_order = p->private;
 
-			split_large_buddy(zone, p, page_to_pfn(p), p_order, fpi_flags);
+			split_large_buddy(zone, p, page_to_pfn(p), p_order,
+					  fpi_flags, false);
 			__count_vm_events(PGFREE, 1 << p_order);
 		}
 	}
-	split_large_buddy(zone, page, pfn, order, fpi_flags);
+	split_large_buddy(zone, page, pfn, order, fpi_flags, false);
 	spin_unlock_irqrestore(&zone->lock, flags);
 
 	__count_vm_events(PGFREE, 1 << order);
@@ -1694,7 +1698,7 @@ struct page *__pageblock_pfn_to_page(unsigned long start_pfn,
  * -- nyc
  */
 static inline unsigned int expand(struct zone *zone, struct page *page, int low,
-				  int high, int migratetype)
+				  int high, int migratetype, bool reported)
 {
 	unsigned int size = 1 << high;
 	unsigned int nr_added = 0;
@@ -1716,6 +1720,15 @@ static inline unsigned int expand(struct zone *zone, struct page *page, int low,
 		__add_to_free_list(&page[size], zone, high, migratetype, false);
 		set_buddy_order(&page[size], high);
 		nr_added += size;
+
+		/*
+		 * The parent page has been reported to the host.  The
+		 * sub-pages are part of the same reported block, so mark
+		 * them reported too.  This avoids re-reporting pages that
+		 * the host already knows about.
+		 */
+		if (reported)
+			__SetPageReported(&page[size]);
 	}
 
 	return nr_added;
@@ -1726,9 +1739,10 @@ static __always_inline void page_del_and_expand(struct zone *zone,
 						int high, int migratetype)
 {
 	int nr_pages = 1 << high;
+	bool was_reported = page_reported(page);
 
 	__del_page_from_free_list(page, zone, high, migratetype);
-	nr_pages -= expand(zone, page, low, high, migratetype);
+	nr_pages -= expand(zone, page, low, high, migratetype, was_reported);
 	account_freepages(zone, -nr_pages, migratetype);
 }
 
@@ -2116,11 +2130,13 @@ static bool __move_freepages_block_isolate(struct zone *zone,
 	/* We're a part of a larger buddy */
 	if (PageBuddy(buddy) && buddy_order(buddy) > pageblock_order) {
 		int order = buddy_order(buddy);
+		bool reported = PageReported(buddy);
 
 		del_page_from_free_list(buddy, zone, order,
 					get_pfnblock_migratetype(buddy, buddy_pfn));
 		toggle_pageblock_isolate(page, isolate);
-		split_large_buddy(zone, buddy, buddy_pfn, order, FPI_NONE);
+		split_large_buddy(zone, buddy, buddy_pfn, order, FPI_NONE,
+				  reported);
 		return true;
 	}
 
@@ -2283,10 +2299,12 @@ try_to_claim_block(struct zone *zone, struct page *page,
 	/* Take ownership for orders >= pageblock_order */
 	if (current_order >= pageblock_order) {
 		unsigned int nr_added;
+		bool was_reported = page_reported(page);
 
 		del_page_from_free_list(page, zone, current_order, block_type);
 		change_pageblock_range(page, current_order, start_type);
-		nr_added = expand(zone, page, order, current_order, start_type);
+		nr_added = expand(zone, page, order, current_order, start_type,
+				  was_reported);
 		account_freepages(zone, nr_added, start_type);
 		return page;
 	}
