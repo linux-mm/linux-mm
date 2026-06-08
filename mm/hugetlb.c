@@ -1458,7 +1458,8 @@ void add_hugetlb_folio(struct hstate *h, struct folio *folio,
 }
 
 static void __update_and_free_hugetlb_folio(struct hstate *h,
-						struct folio *folio)
+						struct folio *folio,
+						bool zeroed)
 {
 	bool clear_flag = folio_test_hugetlb_vmemmap_optimized(folio);
 
@@ -1509,6 +1510,8 @@ static void __update_and_free_hugetlb_folio(struct hstate *h,
 	VM_BUG_ON_FOLIO(folio_ref_count(folio), folio);
 	if (folio_test_hugetlb_cma(folio))
 		hugetlb_cma_free_frozen_folio(folio);
+	else if (zeroed)
+		free_frozen_pages_zeroed(&folio->page, folio_order(folio));
 	else
 		free_frozen_pages(&folio->page, folio_order(folio));
 }
@@ -1548,7 +1551,7 @@ static void free_hpage_workfn(struct work_struct *work)
 		 */
 		h = size_to_hstate(folio_size(folio));
 
-		__update_and_free_hugetlb_folio(h, folio);
+		__update_and_free_hugetlb_folio(h, folio, false);
 
 		cond_resched();
 	}
@@ -1562,10 +1565,10 @@ static inline void flush_free_hpage_work(struct hstate *h)
 }
 
 static void update_and_free_hugetlb_folio(struct hstate *h, struct folio *folio,
-				 bool atomic)
+				 bool atomic, bool zeroed)
 {
 	if (!folio_test_hugetlb_vmemmap_optimized(folio) || !atomic) {
-		__update_and_free_hugetlb_folio(h, folio);
+		__update_and_free_hugetlb_folio(h, folio, zeroed);
 		return;
 	}
 
@@ -1599,7 +1602,7 @@ static void bulk_vmemmap_restore_error(struct hstate *h,
 			spin_lock_irq(&hugetlb_lock);
 			__folio_clear_hugetlb(folio);
 			spin_unlock_irq(&hugetlb_lock);
-			update_and_free_hugetlb_folio(h, folio, false);
+			update_and_free_hugetlb_folio(h, folio, false, false);
 			cond_resched();
 		}
 	} else {
@@ -1624,7 +1627,7 @@ static void bulk_vmemmap_restore_error(struct hstate *h,
 				spin_lock_irq(&hugetlb_lock);
 				__folio_clear_hugetlb(folio);
 				spin_unlock_irq(&hugetlb_lock);
-				update_and_free_hugetlb_folio(h, folio, false);
+				update_and_free_hugetlb_folio(h, folio, false, false);
 				cond_resched();
 				break;
 			}
@@ -1667,7 +1670,7 @@ retry:
 	}
 
 	list_for_each_entry_safe(folio, t_folio, &non_hvo_folios, lru) {
-		update_and_free_hugetlb_folio(h, folio, false);
+		update_and_free_hugetlb_folio(h, folio, false, false);
 		cond_resched();
 	}
 }
@@ -1683,7 +1686,7 @@ struct hstate *size_to_hstate(unsigned long size)
 	return NULL;
 }
 
-void free_huge_folio(struct folio *folio)
+static void __free_huge_folio(struct folio *folio, bool zeroed)
 {
 	/*
 	 * Can't pass hstate in here because it is called from the
@@ -1694,6 +1697,9 @@ void free_huge_folio(struct folio *folio)
 	struct hugepage_subpool *spool = hugetlb_folio_subpool(folio);
 	bool restore_reserve;
 	unsigned long flags;
+
+	/* Page was mapped to userspace; no longer known-zero */
+	folio_clear_hugetlb_zeroed(folio);
 
 	VM_BUG_ON_FOLIO(folio_ref_count(folio), folio);
 	VM_BUG_ON_FOLIO(folio_mapcount(folio), folio);
@@ -1738,17 +1744,22 @@ void free_huge_folio(struct folio *folio)
 	if (folio_test_hugetlb_temporary(folio)) {
 		remove_hugetlb_folio(h, folio, false);
 		spin_unlock_irqrestore(&hugetlb_lock, flags);
-		update_and_free_hugetlb_folio(h, folio, true);
+		update_and_free_hugetlb_folio(h, folio, true, zeroed);
 	} else if (h->surplus_huge_pages_node[nid]) {
 		/* remove the page from active list */
 		remove_hugetlb_folio(h, folio, true);
 		spin_unlock_irqrestore(&hugetlb_lock, flags);
-		update_and_free_hugetlb_folio(h, folio, true);
+		update_and_free_hugetlb_folio(h, folio, true, zeroed);
 	} else {
 		arch_clear_hugetlb_flags(folio);
 		enqueue_hugetlb_folio(h, folio);
 		spin_unlock_irqrestore(&hugetlb_lock, flags);
 	}
+}
+
+void free_huge_folio(struct folio *folio)
+{
+	__free_huge_folio(folio, false);
 }
 
 /*
@@ -2034,7 +2045,7 @@ retry:
 			rc = 0;
 		}
 
-		update_and_free_hugetlb_folio(h, folio, false);
+		update_and_free_hugetlb_folio(h, folio, false, false);
 		return rc;
 	}
 out:
@@ -2095,6 +2106,10 @@ static struct folio *alloc_surplus_hugetlb_folio(struct hstate *h,
 	folio = alloc_fresh_hugetlb_folio(h, gfp_mask, nid, nmask, addr);
 	if (!folio)
 		return NULL;
+
+	/* Mark as known-zero only if __GFP_ZERO was requested */
+	if (gfp_mask & __GFP_ZERO)
+		folio_set_hugetlb_zeroed(folio);
 
 	spin_lock_irq(&hugetlb_lock);
 	/*
@@ -2159,11 +2174,11 @@ static struct folio *alloc_migrate_hugetlb_folio(struct hstate *h, gfp_t gfp_mas
  */
 static
 struct folio *alloc_buddy_hugetlb_folio_with_mpol(struct hstate *h,
-		struct vm_area_struct *vma, unsigned long addr)
+		struct vm_area_struct *vma, unsigned long addr, gfp_t gfp)
 {
 	struct folio *folio = NULL;
 	struct mempolicy *mpol;
-	gfp_t gfp_mask = htlb_alloc_mask(h);
+	gfp_t gfp_mask = htlb_alloc_mask(h) | gfp;
 	int nid;
 	nodemask_t *nodemask;
 
@@ -2718,7 +2733,7 @@ retry:
 		 * Folio has been replaced, we can safely free the old one.
 		 */
 		spin_unlock_irq(&hugetlb_lock);
-		update_and_free_hugetlb_folio(h, old_folio, false);
+		update_and_free_hugetlb_folio(h, old_folio, false, false);
 	}
 
 	return ret;
@@ -2726,7 +2741,7 @@ retry:
 free_new:
 	spin_unlock_irq(&hugetlb_lock);
 	if (new_folio)
-		update_and_free_hugetlb_folio(h, new_folio, false);
+		update_and_free_hugetlb_folio(h, new_folio, false, false);
 
 	return ret;
 }
@@ -2860,16 +2875,19 @@ typedef enum {
  * When it's set, the allocation will bypass all vma level reservations.
  */
 struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
-				    unsigned long addr, bool cow_from_owner)
+				    unsigned long user_addr, bool cow_from_owner,
+				    gfp_t gfp)
 {
 	struct hugepage_subpool *spool = subpool_vma(vma);
 	struct hstate *h = hstate_vma(vma);
+	unsigned long addr = user_addr & huge_page_mask(h);
 	struct folio *folio;
 	long retval, gbl_chg, gbl_reserve;
 	map_chg_state map_chg;
 	int ret, idx;
 	struct hugetlb_cgroup *h_cg = NULL;
-	gfp_t gfp = htlb_alloc_mask(h) | __GFP_RETRY_MAYFAIL;
+
+	gfp |= htlb_alloc_mask(h) | __GFP_RETRY_MAYFAIL;
 
 	idx = hstate_index(h);
 
@@ -2937,13 +2955,12 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 	folio = dequeue_hugetlb_folio_vma(h, vma, addr, gbl_chg);
 	if (!folio) {
 		spin_unlock_irq(&hugetlb_lock);
-		folio = alloc_buddy_hugetlb_folio_with_mpol(h, vma, addr);
+		folio = alloc_buddy_hugetlb_folio_with_mpol(h, vma, user_addr, gfp);
 		if (!folio)
 			goto out_uncharge_cgroup;
 		spin_lock_irq(&hugetlb_lock);
 		list_add(&folio->lru, &h->hugepage_activelist);
 		folio_ref_unfreeze(folio, 1);
-		/* Fall through */
 	}
 
 	/*
@@ -2965,6 +2982,10 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 	}
 
 	spin_unlock_irq(&hugetlb_lock);
+
+	if ((gfp & __GFP_ZERO) && !folio_test_hugetlb_zeroed(folio))
+		folio_zero_user(folio, user_addr);
+	folio_clear_hugetlb_zeroed(folio);
 
 	hugetlb_set_folio_subpool(folio, spool);
 
@@ -3002,7 +3023,7 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 	lruvec_stat_mod_folio(folio, NR_HUGETLB, pages_per_huge_page(h));
 
 	if (ret == -ENOMEM) {
-		free_huge_folio(folio);
+		__free_huge_folio(folio, !!(gfp & __GFP_ZERO));
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -4974,7 +4995,7 @@ again:
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
 				/* Do not use reserve as it's private owned */
-				new_folio = alloc_hugetlb_folio(dst_vma, addr, false);
+				new_folio = alloc_hugetlb_folio(dst_vma, addr, false, 0);
 				if (IS_ERR(new_folio)) {
 					folio_put(pte_folio);
 					ret = PTR_ERR(new_folio);
@@ -5504,7 +5525,7 @@ retry_avoidcopy:
 	 * be acquired again before returning to the caller, as expected.
 	 */
 	spin_unlock(vmf->ptl);
-	new_folio = alloc_hugetlb_folio(vma, vmf->address, cow_from_owner);
+	new_folio = alloc_hugetlb_folio(vma, vmf->address, cow_from_owner, 0);
 
 	if (IS_ERR(new_folio)) {
 		/*
@@ -5764,7 +5785,13 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 				goto out;
 		}
 
-		folio = alloc_hugetlb_folio(vma, vmf->address, false);
+		/*
+		 * Passing vmf->real_address would work just as well,
+		 * but PAGE_MASK helps make sure we never pass
+		 * USER_ADDR_NONE by mistake.
+		 */
+		folio = alloc_hugetlb_folio(vma, vmf->real_address & PAGE_MASK,
+					   false, __GFP_ZERO);
 		if (IS_ERR(folio)) {
 			/*
 			 * Returning error will result in faulting task being
@@ -5784,7 +5811,6 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 				ret = 0;
 			goto out;
 		}
-		folio_zero_user(folio, vmf->real_address);
 		__folio_mark_uptodate(folio);
 		new_folio = true;
 
@@ -6223,7 +6249,7 @@ int hugetlb_mfill_atomic_pte(pte_t *dst_pte,
 			goto out;
 		}
 
-		folio = alloc_hugetlb_folio(dst_vma, dst_addr, false);
+		folio = alloc_hugetlb_folio(dst_vma, dst_addr, false, 0);
 		if (IS_ERR(folio)) {
 			pte_t *actual_pte = hugetlb_walk(dst_vma, dst_addr, PMD_SIZE);
 			if (actual_pte) {
@@ -6270,7 +6296,7 @@ int hugetlb_mfill_atomic_pte(pte_t *dst_pte,
 			goto out;
 		}
 
-		folio = alloc_hugetlb_folio(dst_vma, dst_addr, false);
+		folio = alloc_hugetlb_folio(dst_vma, dst_addr, false, 0);
 		if (IS_ERR(folio)) {
 			folio_put(*foliop);
 			ret = -ENOMEM;
