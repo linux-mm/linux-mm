@@ -45,6 +45,17 @@ kernel/sched/rq-offsets.s: $(offsets-file)
 $(rq-offsets-file): kernel/sched/rq-offsets.s FORCE
 	$(call filechk,offsets,__RQ_OFFSETS_H__)
 
+# generate kmem_cache_size.h
+
+kmem_cache_size-file := include/generated/kmem_cache_size.h
+
+targets += mm/kmem_cache_size.s
+
+mm/kmem_cache_size.s: $(rq-offsets-file)
+
+$(kmem_cache_size-file): mm/kmem_cache_size.s FORCE
+	$(call filechk,offsets,__KMEM_CACHE_SIZE_H__)
+
 # Check for missing system calls
 
 missing-syscalls-file := .tmp_missing-syscalls$(missing_syscalls_instance)
@@ -58,7 +69,8 @@ $(missing-syscalls-file): scripts/checksyscalls.sh $(rq-offsets-file) FORCE
 	$(call if_changed_dep,syscalls)
 
 PHONY += missing-syscalls
-missing-syscalls: $(missing-syscalls-file)
+missing-syscalls: $(missing-syscalls-file) $(kmem_cache_size-file)
+	$(call cmd,syscalls)
 
 # Check the manual modification of atomic headers
 
