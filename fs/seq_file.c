@@ -20,11 +20,13 @@
 #include <linux/printk.h>
 #include <linux/string_helpers.h>
 #include <linux/uio.h>
+#include <linux/slab-static.h>
 
 #include <linux/uaccess.h>
 #include <asm/page.h>
 
-static struct kmem_cache *seq_file_cache __ro_after_init;
+static struct kmem_cache_opaque __seq_file_cache;
+#define seq_file_cache to_kmem_cache(&__seq_file_cache)
 
 static void seq_set_overflow(struct seq_file *m)
 {
@@ -1140,5 +1142,5 @@ EXPORT_SYMBOL(seq_hlist_next_percpu);
 
 void __init seq_file_init(void)
 {
-	seq_file_cache = KMEM_CACHE(seq_file, SLAB_ACCOUNT|SLAB_PANIC);
+	KMEM_CACHE_SETUP(seq_file_cache, seq_file, SLAB_ACCOUNT|SLAB_PANIC);
 }
