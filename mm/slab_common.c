@@ -234,33 +234,30 @@ static struct kmem_cache *create_cache(const char *name,
 				       struct kmem_cache_args *args,
 				       slab_flags_t flags)
 {
-	struct kmem_cache *s;
+	struct kmem_cache *s = args->preallocated;
 	int err;
 
 	/* If a custom freelist pointer is requested make sure it's sane. */
-	err = -EINVAL;
 	if (args->use_freeptr_offset &&
 	    (args->freeptr_offset >= object_size ||
 	     (!(flags & SLAB_TYPESAFE_BY_RCU) && !args->ctor) ||
 	     !IS_ALIGNED(args->freeptr_offset, __alignof__(freeptr_t))))
-		goto out;
+		return ERR_PTR(-EINVAL);
 
-	err = -ENOMEM;
-	s = kmem_cache_zalloc(kmem_cache, GFP_KERNEL);
-	if (!s)
-		goto out;
+	if (!s) {
+		s = kmem_cache_zalloc(kmem_cache, GFP_KERNEL);
+		if (!s)
+			return ERR_PTR(-ENOMEM);
+	}
 	err = do_kmem_cache_create(s, name, object_size, args, flags);
-	if (err)
-		goto out_free_cache;
-
+	if (unlikely(err)) {
+		if (!args->preallocated)
+			kmem_cache_free(kmem_cache, s);
+		return ERR_PTR(err);
+	}
 	s->refcount = 1;
 	list_add(&s->list, &slab_caches);
 	return s;
-
-out_free_cache:
-	kmem_cache_free(kmem_cache, s);
-out:
-	return ERR_PTR(err);
 }
 
 static struct kmem_cache *
@@ -268,6 +265,9 @@ __kmem_cache_alias(const char *name, unsigned int size, slab_flags_t flags,
 		   struct kmem_cache_args *args)
 {
 	struct kmem_cache *s;
+
+	if (flags & SLAB_PREALLOCATED)	// no aliases - we are using this one
+		return NULL;
 
 	s = find_mergeable(size, flags, name, args);
 	if (s) {
@@ -365,6 +365,9 @@ struct kmem_cache *__kmem_cache_create_args(const char *name,
 	    WARN_ON(object_size < args->usersize ||
 		    object_size - args->usersize < args->useroffset))
 		args->usersize = args->useroffset = 0;
+
+	if (args->preallocated)
+		flags |= SLAB_PREALLOCATED;
 
 	s = __kmem_cache_alias(name, object_size, flags, args);
 	if (s)

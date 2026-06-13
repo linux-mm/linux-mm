@@ -9593,18 +9593,16 @@ static int sysfs_slab_add(struct kmem_cache *s)
 	int err;
 	const char *name;
 	struct kset *kset = cache_kset(s);
-	int unmergeable = slab_unmergeable(s);
+	bool no_symlink = slab_unmergeable(s);
 
-	if (!unmergeable && disable_higher_order_debug &&
+	if (s->flags & SLAB_PREALLOCATED)
+		no_symlink = true;
+
+	if (!no_symlink && disable_higher_order_debug &&
 			(slub_debug & DEBUG_METADATA_FLAGS))
-		unmergeable = 1;
+		no_symlink = true;
 
-	if (unmergeable) {
-		/*
-		 * Slabcache can never be merged so we can use the name proper.
-		 * This is typically the case for debug situations. In that
-		 * case we can catch duplicate names easily.
-		 */
+	if (no_symlink) {
 		sysfs_remove_link(&slab_kset->kobj, s->name);
 		name = s->name;
 	} else {
@@ -9622,12 +9620,12 @@ static int sysfs_slab_add(struct kmem_cache *s)
 	if (err)
 		goto out;
 
-	if (!unmergeable) {
+	if (!no_symlink) {
 		/* Setup first alias */
 		sysfs_slab_alias(s, s->name);
 	}
 out:
-	if (!unmergeable)
+	if (!no_symlink)
 		kfree(name);
 	return err;
 }
