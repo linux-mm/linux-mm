@@ -27,10 +27,9 @@
 #include <linux/task_work.h>
 #include <linux/swap.h>
 #include <linux/kmemleak.h>
+#include <linux/slab-static.h>
 
 #include <linux/atomic.h>
-
-#include <asm/runtime-const.h>
 
 #include "internal.h"
 
@@ -40,10 +39,10 @@ static struct files_stat_struct files_stat = {
 };
 
 /* SLAB cache for file structures */
-static struct kmem_cache *__filp_cache __ro_after_init;
-#define filp_cache runtime_const_ptr(__filp_cache)
-static struct kmem_cache *__bfilp_cache __ro_after_init;
-#define bfilp_cache runtime_const_ptr(__bfilp_cache)
+static struct kmem_cache_opaque file_cache;
+static struct kmem_cache_opaque backing_file_cache;
+#define filp_cache to_kmem_cache(&file_cache)
+#define bfilp_cache to_kmem_cache(&backing_file_cache)
 
 static struct percpu_counter nr_files __cacheline_aligned_in_smp;
 
@@ -629,22 +628,19 @@ void fput_close(struct file *file)
 
 void __init files_init(void)
 {
-	struct kmem_cache_args args = {
-		.use_freeptr_offset = true,
-		.freeptr_offset = offsetof(struct file, f_freeptr),
-	};
+	__KMEM_CACHE_SETUP(filp_cache, "filp", sizeof(struct file),
+			   SLAB_HWCACHE_ALIGN | SLAB_PANIC |
+			   SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU,
+			   .use_freeptr_offset = true,
+			   .freeptr_offset = offsetof(struct file,
+						      f_freeptr));
 
-	__filp_cache = kmem_cache_create("filp", sizeof(struct file), &args,
-				SLAB_HWCACHE_ALIGN | SLAB_PANIC |
-				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
-	runtime_const_init(ptr, __filp_cache);
-
-	args.freeptr_offset = offsetof(struct backing_file, bf_freeptr);
-	__bfilp_cache = kmem_cache_create("bfilp", sizeof(struct backing_file),
-				&args, SLAB_HWCACHE_ALIGN | SLAB_PANIC |
-				SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU);
-	runtime_const_init(ptr, __bfilp_cache);
-
+	__KMEM_CACHE_SETUP(bfilp_cache, "bfilp", sizeof(struct backing_file),
+			   SLAB_HWCACHE_ALIGN | SLAB_PANIC |
+			   SLAB_ACCOUNT | SLAB_TYPESAFE_BY_RCU,
+			   .use_freeptr_offset = true,
+			   .freeptr_offset = offsetof(struct backing_file,
+						      bf_freeptr));
 	percpu_counter_init(&nr_files, 0, GFP_KERNEL);
 }
 

@@ -40,8 +40,7 @@
 #include <linux/bitops.h>
 #include <linux/init_task.h>
 #include <linux/uaccess.h>
-
-#include <asm/runtime-const.h>
+#include <linux/slab-static.h>
 
 #include "internal.h"
 #include "mount.h"
@@ -126,15 +125,16 @@
  */
 
 /* SLAB cache for struct filename instances */
-static struct kmem_cache *__names_cache __ro_after_init;
-#define names_cache	runtime_const_ptr(__names_cache)
+static struct kmem_cache_opaque __names_cache;
+#define names_cache	to_kmem_cache(&__names_cache)
 
 void __init filename_init(void)
 {
-	__names_cache = kmem_cache_create_usercopy("names_cache", sizeof(struct filename), 0,
-			 SLAB_HWCACHE_ALIGN|SLAB_PANIC, offsetof(struct filename, iname),
-			 EMBEDDED_NAME_MAX, NULL);
-	runtime_const_init(ptr, __names_cache);
+	kmem_cache_setup_usercopy(names_cache, "names_cache",
+				  sizeof(struct filename), 0,
+				  SLAB_HWCACHE_ALIGN|SLAB_PANIC,
+				  offsetof(struct filename, iname),
+				  EMBEDDED_NAME_MAX, NULL);
 }
 
 static inline struct filename *alloc_filename(void)
