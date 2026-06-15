@@ -4077,19 +4077,24 @@ static void flush_all(struct kmem_cache *s)
 
 struct deferred_percpu_work {
 	struct llist_head objects;
-	struct llist_head objects_by_rcu;
 	struct llist_head rcu_sheaves;
 	struct irq_work work;
 };
 
 static void deferred_percpu_work_fn(struct irq_work *work);
+static void deferred_irq_work_fn(struct irq_work *work);
+static void deferred_work_fn(struct work_struct *w);
 
 static DEFINE_PER_CPU(struct deferred_percpu_work, deferred_percpu_work) = {
 	.objects = LLIST_HEAD_INIT(objects),
-	.objects_by_rcu = LLIST_HEAD_INIT(objects_by_rcu),
 	.rcu_sheaves = LLIST_HEAD_INIT(rcu_sheaves),
 	.work = IRQ_WORK_INIT(deferred_percpu_work_fn),
 };
+
+static LLIST_HEAD(deferred_free_by_rcu);
+static struct workqueue_struct *deferred_wq;
+static DEFINE_IRQ_WORK(deferred_irq_work, deferred_irq_work_fn);
+static DECLARE_WORK(deferred_work, deferred_work_fn);
 
 static void flush_rcu_sheaf(struct work_struct *w)
 {
@@ -6397,13 +6402,12 @@ flush_remote:
 static void deferred_percpu_work_fn(struct irq_work *work)
 {
 	struct deferred_percpu_work *dpw;
-	struct llist_head *objs, *objs_by_rcu, *rcu_sheaves;
+	struct llist_head *objs, *rcu_sheaves;
 	struct llist_node *llnode, *pos, *t;
 
 	dpw = container_of(work, struct deferred_percpu_work, work);
 	rcu_sheaves = &dpw->rcu_sheaves;
 	objs = &dpw->objects;
-	objs_by_rcu = &dpw->objects_by_rcu;
 
 	llnode = llist_del_all(objs);
 	llist_for_each_safe(pos, t, llnode) {
@@ -6434,12 +6438,50 @@ static void deferred_percpu_work_fn(struct irq_work *work)
 
 		call_rcu(&rcu_sheaf->rcu_head, rcu_free_sheaf);
 	}
+}
 
-	llnode = llist_del_all(objs_by_rcu);
+static void deferred_irq_work_fn(struct irq_work *work)
+{
+	if (!deferred_wq)
+		return;
+
+	queue_work(deferred_wq, &deferred_work);
+}
+
+static inline void *object_start_address(void *ptr)
+{
+	void *obj;
+	struct slab *slab = virt_to_slab(ptr);
+	struct kmem_cache *s = slab->slab_cache;
+
+	VM_WARN_ON_ONCE(is_vmalloc_addr(ptr) || !slab);
+
+	if (is_kfence_address(ptr)) {
+		obj = kfence_object_start(ptr);
+	} else {
+		unsigned int idx = __obj_to_index(s, slab_address(slab), ptr);
+
+		obj = slab_address(slab) + s->size * idx;
+		obj = fixup_red_left(s, obj);
+	}
+
+	return obj;
+}
+
+static void deferred_work_fn(struct work_struct *w)
+{
+	struct llist_node *llnode, *pos, *t;
+
+	llnode = llist_del_all(&deferred_free_by_rcu);
+	if (!llnode)
+		return;
+
+	synchronize_rcu();
+
 	llist_for_each_safe(pos, t, llnode) {
-		struct rcu_head *head = (struct rcu_head *)pos;
+		void *obj = object_start_address(pos);
 
-		call_rcu(head, kvfree_rcu_cb);
+		kfree(obj);
 	}
 }
 
@@ -6456,15 +6498,10 @@ static void defer_free(struct kmem_cache *s, void *head)
 		irq_work_queue(&dpw->work);
 }
 
-void defer_kfree_rcu(struct rcu_head *head)
+void defer_kfree_rcu(struct kfree_rcu_head *head)
 {
-	struct deferred_percpu_work *dpw;
-
-	guard(preempt)();
-
-	dpw = this_cpu_ptr(&deferred_percpu_work);
-	if (llist_add((struct llist_node *)head, &dpw->objects_by_rcu))
-		irq_work_queue(&dpw->work);
+	if (llist_add((struct llist_node *)head, &deferred_free_by_rcu))
+		irq_work_queue(&deferred_irq_work);
 }
 
 void deferred_work_barrier(void)
@@ -6473,6 +6510,9 @@ void deferred_work_barrier(void)
 
 	for_each_possible_cpu(cpu)
 		irq_work_sync(&per_cpu_ptr(&deferred_percpu_work, cpu)->work);
+
+	irq_work_sync(&deferred_irq_work);
+	flush_work(&deferred_work);
 }
 
 static __fastpath_inline
@@ -6734,8 +6774,6 @@ void kvfree_rcu_cb(struct rcu_head *head)
 	void *obj = head;
 	struct page *page;
 	struct slab *slab;
-	struct kmem_cache *s;
-	void *slab_addr;
 
 	if (is_vmalloc_addr(obj)) {
 		obj = (void *) PAGE_ALIGN_DOWN((unsigned long)obj);
@@ -6755,19 +6793,8 @@ void kvfree_rcu_cb(struct rcu_head *head)
 		return;
 	}
 
-	s = slab->slab_cache;
-	slab_addr = slab_address(slab);
-
-	if (is_kfence_address(obj)) {
-		obj = kfence_object_start(obj);
-	} else {
-		unsigned int idx = __obj_to_index(s, slab_addr, obj);
-
-		obj = slab_addr + s->size * idx;
-		obj = fixup_red_left(s, obj);
-	}
-
-	slab_free(s, slab, obj, _RET_IP_);
+	obj = object_start_address(obj);
+	slab_free(slab->slab_cache, slab, obj, _RET_IP_);
 }
 
 /**
@@ -8701,6 +8728,11 @@ void __init kmem_cache_init_late(void)
 	flushwq = alloc_workqueue("slub_flushwq", WQ_MEM_RECLAIM | WQ_PERCPU,
 				  0);
 	WARN_ON(!flushwq);
+
+	deferred_wq = alloc_workqueue("slab_deferred_wq",
+				      WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+	WARN_ON(!deferred_wq);
+	queue_work(deferred_wq, &deferred_work);
 #ifdef CONFIG_SLAB_FREELIST_RANDOM
 	prandom_init_once(&slab_rnd_state);
 #endif

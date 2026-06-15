@@ -1263,7 +1263,7 @@ EXPORT_TRACEPOINT_SYMBOL(kmem_cache_alloc);
 EXPORT_TRACEPOINT_SYMBOL(kfree);
 EXPORT_TRACEPOINT_SYMBOL(kmem_cache_free);
 
-void kfree_call_rcu_nolock(struct rcu_head *head, void *ptr)
+void kfree_call_rcu_nolock(struct kfree_rcu_head *head, void *ptr)
 {
 	struct slab *slab;
 	struct kmem_cache *s;

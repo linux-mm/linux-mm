@@ -745,7 +745,7 @@ void __check_heap_object(const void *ptr, unsigned long n,
 			 const struct slab *slab, bool to_user);
 
 void deferred_work_barrier(void);
-void defer_kfree_rcu(struct rcu_head *head);
+void defer_kfree_rcu(struct kfree_rcu_head *head);
 
 static inline bool slub_debug_orig_size(struct kmem_cache *s)
 {
