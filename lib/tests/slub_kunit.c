@@ -303,6 +303,7 @@ struct test_nolock_context {
 	int alloc_ok;
 	int alloc_fail;
 	struct perf_event *event;
+	bool is_perf_type_hw;
 };
 
 static struct perf_event_attr hw_attr = {
@@ -315,9 +316,19 @@ static struct perf_event_attr hw_attr = {
 	.sample_freq = 100000,
 };
 
-static void overflow_handler_test_kmalloc_kfree_nolock(struct perf_event *event,
-						       struct perf_sample_data *data,
-						       struct pt_regs *regs)
+/* Fallback when hardware perf event is not available */
+static struct perf_event_attr sw_attr = {
+	.type = PERF_TYPE_SOFTWARE,
+	.config = PERF_COUNT_SW_CPU_CLOCK,
+	.size = sizeof(struct perf_event_attr),
+	.disabled = 1,
+	.freq = 1,
+	.sample_freq = 100000,
+};
+
+static void overflow_handler_test_nolock(struct perf_event *event,
+					 struct perf_sample_data *data,
+					 struct pt_regs *regs)
 {
 	void *objp;
 	gfp_t gfp;
@@ -336,20 +347,53 @@ static void overflow_handler_test_kmalloc_kfree_nolock(struct perf_event *event,
 	ctx->callback_count++;
 }
 
+static bool enable_perf_events(struct test_nolock_context *ctx)
+{
+	struct perf_event *event;
+
+	ctx->is_perf_type_hw = true;
+	event = perf_event_create_kernel_counter(&hw_attr, -1, current,
+						 overflow_handler_test_nolock,
+						 ctx);
+
+	if (!IS_ERR(event))
+		goto out;
+
+	ctx->is_perf_type_hw = false;
+	event = perf_event_create_kernel_counter(&sw_attr, -1, current,
+						 overflow_handler_test_nolock,
+						 ctx);
+	if (!IS_ERR(event))
+		goto out;
+
+	return false;
+out:
+	ctx->event = event;
+	perf_event_enable(ctx->event);
+	return true;
+}
+
+static void disable_perf_events(struct test_nolock_context *ctx)
+{
+	kunit_info(ctx->test, "%s perf events: callback_count: %d, alloc_ok: %d, alloc_fail: %d\n",
+		   ctx->is_perf_type_hw ? "HW" : "SW",
+		   ctx->callback_count, ctx->alloc_ok, ctx->alloc_fail);
+
+	perf_event_disable(ctx->event);
+	perf_event_release_kernel(ctx->event);
+}
+
 static void test_kmalloc_kfree_nolock(struct kunit *test)
 {
 	int i, j;
 	struct test_nolock_context ctx = { .test = test };
-	struct perf_event *event;
 	bool alloc_fail = false;
+	bool perf_events_enabled;
 
-	event = perf_event_create_kernel_counter(&hw_attr, -1, current,
-						 overflow_handler_test_kmalloc_kfree_nolock,
-						 &ctx);
-	if (IS_ERR(event))
+	perf_events_enabled = enable_perf_events(&ctx);
+	if (!perf_events_enabled)
 		kunit_skip(test, "Failed to create perf event");
-	ctx.event = event;
-	perf_event_enable(ctx.event);
+
 	for (i = 0; i < NR_ITERATIONS; i++) {
 		for (j = 0; j < NR_OBJECTS; j++) {
 			gfp_t gfp = (i % 2) ? GFP_KERNEL : GFP_KERNEL_ACCOUNT;
@@ -368,11 +412,7 @@ static void test_kmalloc_kfree_nolock(struct kunit *test)
 	}
 
 cleanup:
-	perf_event_disable(ctx.event);
-	perf_event_release_kernel(ctx.event);
-
-	kunit_info(test, "callback_count: %d, alloc_ok: %d, alloc_fail: %d\n",
-		   ctx.callback_count, ctx.alloc_ok, ctx.alloc_fail);
+	disable_perf_events(&ctx);
 
 	if (alloc_fail)
 		kunit_skip(test, "Allocation failed");
