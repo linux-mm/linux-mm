@@ -1099,6 +1099,7 @@ static inline void rcu_read_unlock_migrate(void)
  * In mm/slab_common.c, no suitable header to include here.
  */
 void kvfree_call_rcu(struct rcu_head *head, void *ptr);
+void kfree_call_rcu_nolock(struct rcu_head *head, void *ptr);
 
 /*
  * The BUILD_BUG_ON() makes sure the rcu_head offset can be handled. See the
@@ -1120,6 +1121,17 @@ do {								\
 								\
 	if (___p)						\
 		kvfree_call_rcu(NULL, (void *) (___p));		\
+} while (0)
+
+/* kfree_rcu_nolock() supports 2-arg variant only */
+#define kfree_rcu_nolock(ptr, krhf)					\
+do {									\
+	typeof (ptr) ___p = (ptr);					\
+									\
+	if (___p) {							\
+		BUILD_BUG_ON(offsetof(typeof(*(ptr)), krhf) >= 4096);	\
+		kfree_call_rcu_nolock(&((___p)->krhf), (void *) (___p));\
+	}								\
 } while (0)
 
 /*
