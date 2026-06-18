@@ -7,12 +7,11 @@
 
 #define EX_TYPE_NONE			0
 #define EX_TYPE_BPF			1
-#define EX_TYPE_UACCESS_ERR_ZERO	2
-#define EX_TYPE_KACCESS_ERR_ZERO	3
-#define EX_TYPE_UACCESS_CPY		4
-#define EX_TYPE_LOAD_UNALIGNED_ZEROPAD	5
+#define EX_TYPE_ACCESS_ERR_ZERO		2
+#define EX_TYPE_UACCESS_CPY		3
+#define EX_TYPE_LOAD_UNALIGNED_ZEROPAD	4
 
-/* Data fields for EX_TYPE_UACCESS_ERR_ZERO */
+/* Data fields for EX_TYPE_ACCESS_ERR_ZERO */
 #define EX_DATA_REG_ERR_SHIFT	0
 #define EX_DATA_REG_ERR		GENMASK(4, 0)
 #define EX_DATA_REG_ZERO_SHIFT	5
@@ -43,7 +42,7 @@
 
 #define _ASM_EXTABLE_UACCESS_ERR_ZERO(insn, fixup, err, zero)		\
 	__ASM_EXTABLE_RAW(insn, fixup, 					\
-			  EX_TYPE_UACCESS_ERR_ZERO,			\
+			  EX_TYPE_ACCESS_ERR_ZERO,			\
 			  (						\
 			    EX_DATA_REG(ERR, err) |			\
 			    EX_DATA_REG(ZERO, zero)			\
@@ -96,7 +95,7 @@
 #define _ASM_EXTABLE_UACCESS_ERR_ZERO(insn, fixup, err, zero)		\
 	__DEFINE_ASM_GPR_NUMS						\
 	__ASM_EXTABLE_RAW(#insn, #fixup, 				\
-			  __stringify(EX_TYPE_UACCESS_ERR_ZERO),	\
+			  __stringify(EX_TYPE_ACCESS_ERR_ZERO),	\
 			  "("						\
 			    EX_DATA_REG(ERR, err) " | "			\
 			    EX_DATA_REG(ZERO, zero)			\
@@ -105,7 +104,7 @@
 #define _ASM_EXTABLE_KACCESS_ERR_ZERO(insn, fixup, err, zero)		\
 	__DEFINE_ASM_GPR_NUMS						\
 	__ASM_EXTABLE_RAW(#insn, #fixup, 				\
-			  __stringify(EX_TYPE_KACCESS_ERR_ZERO),	\
+			  __stringify(EX_TYPE_ACCESS_ERR_ZERO),	\
 			  "("						\
 			    EX_DATA_REG(ERR, err) " | "			\
 			    EX_DATA_REG(ZERO, zero)			\
