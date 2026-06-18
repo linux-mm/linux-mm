@@ -10,6 +10,10 @@
 #define EX_TYPE_ACCESS_ERR_ZERO		2
 #define EX_TYPE_UACCESS_CPY		3
 #define EX_TYPE_LOAD_UNALIGNED_ZEROPAD	4
+/*
+ * Kernel access: used in kernel context for both regular load/store
+ * instructions and MOPS (memory copy/set) instructions.
+ */
 #define EX_TYPE_KACCESS_SEA		5
 
 /* Data fields for EX_TYPE_ACCESS_ERR_ZERO */
