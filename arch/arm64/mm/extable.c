@@ -109,7 +109,35 @@ bool fixup_exception(struct pt_regs *regs, unsigned long esr)
 		return ex_handler_uaccess_cpy(ex, regs, esr);
 	case EX_TYPE_LOAD_UNALIGNED_ZEROPAD:
 		return ex_handler_load_unaligned_zeropad(ex, regs);
+	/*
+	 * Kernel address faults (e.g. copy_to_user reading from kernel src).
+	 * Do not fixup here: a translation fault on a kernel address is a
+	 * kernel bug (e.g. NULL pointer dereference) and must oops.
+	 * Only SEA (hardware memory error) should be fixed up, which is
+	 * handled by fixup_exception_me() through the do_sea path.
+	 */
+	case EX_TYPE_KACCESS_SEA:
+		return false;
 	}
 
 	BUG();
+}
+
+bool fixup_exception_me(struct pt_regs *regs)
+{
+	const struct exception_table_entry *ex;
+
+	ex = search_exception_tables(instruction_pointer(regs));
+	if (!ex)
+		return false;
+
+	switch (ex->type) {
+	case EX_TYPE_ACCESS_ERR_ZERO:
+		return ex_handler_access_err_zero(ex, regs);
+	case EX_TYPE_KACCESS_SEA:
+		regs->pc = get_ex_fixup(ex);
+		return true;
+	}
+
+	return false;
 }

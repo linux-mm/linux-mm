@@ -10,6 +10,7 @@
 #define EX_TYPE_ACCESS_ERR_ZERO		2
 #define EX_TYPE_UACCESS_CPY		3
 #define EX_TYPE_LOAD_UNALIGNED_ZEROPAD	4
+#define EX_TYPE_KACCESS_SEA		5
 
 /* Data fields for EX_TYPE_ACCESS_ERR_ZERO */
 #define EX_DATA_REG_ERR_SHIFT	0
@@ -74,6 +75,10 @@
 
 	.macro		_asm_extable_uaccess_cpy, insn, fixup, uaccess_is_write
 	__ASM_EXTABLE_RAW(\insn, \fixup, EX_TYPE_UACCESS_CPY, \uaccess_is_write)
+	.endm
+
+	.macro          _asm_extable_kaccess_sea, insn, fixup
+	__ASM_EXTABLE_RAW(\insn, \fixup, EX_TYPE_KACCESS_SEA, 0)
 	.endm
 
 #else /* __ASSEMBLER__ */
