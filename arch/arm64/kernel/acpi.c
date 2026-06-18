@@ -409,7 +409,7 @@ int apei_claim_sea(struct pt_regs *regs)
 	 */
 	local_daif_restore(DAIF_ERRCTX);
 	nmi_enter();
-	err = ghes_notify_sea();
+	err = ghes_notify_sea(GHES_CTX(regs));
 	nmi_exit();
 
 	/*

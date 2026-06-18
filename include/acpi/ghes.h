@@ -33,10 +33,21 @@ struct ghes {
 	void __iomem *error_status_vaddr;
 };
 
+enum ghes_exec_ctx {
+	GHES_CTX_NA = -1,
+	GHES_CTX_KERNEL = 0,
+	GHES_CTX_USER = 1
+};
+
+#define GHES_CTX(regs)	((regs) ? (user_mode(regs) ? GHES_CTX_USER \
+						   : GHES_CTX_KERNEL) \
+				: GHES_CTX_NA)
+
 struct ghes_estatus_node {
 	struct llist_node llnode;
 	struct acpi_hest_generic *generic;
 	struct ghes *ghes;
+	enum ghes_exec_ctx context;
 };
 
 struct ghes_estatus_cache {
@@ -135,9 +146,9 @@ static inline void *acpi_hest_get_next(struct acpi_hest_generic_data *gdata)
 	     section = acpi_hest_get_next(section))
 
 #ifdef CONFIG_ACPI_APEI_SEA
-int ghes_notify_sea(void);
+int ghes_notify_sea(enum ghes_exec_ctx context);
 #else
-static inline int ghes_notify_sea(void) { return -ENOENT; }
+static inline int ghes_notify_sea(enum ghes_exec_ctx context) { return -ENOENT; }
 #endif
 
 struct notifier_block;
