@@ -4526,11 +4526,8 @@ success:
 	return object;
 }
 
-static void *__slab_alloc_node(struct kmem_cache *s, gfp_t gfpflags, int node,
-			       const struct slab_alloc_context *ac)
+static __always_inline int apply_numa_policy(int node)
 {
-	void *object;
-
 #ifdef CONFIG_NUMA
 	if (static_branch_unlikely(&strict_numa) &&
 			node == NUMA_NO_NODE) {
@@ -4551,6 +4548,13 @@ static void *__slab_alloc_node(struct kmem_cache *s, gfp_t gfpflags, int node,
 		}
 	}
 #endif
+	return node;
+}
+
+static void *__slab_alloc_node(struct kmem_cache *s, gfp_t gfpflags, int node,
+			       const struct slab_alloc_context *ac)
+{
+	void *object;
 
 	object = ___slab_alloc(s, gfpflags, node, ac);
 
@@ -4759,28 +4763,6 @@ void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, unsigned int alloc_flags, 
 	bool node_requested;
 	void *object;
 
-#ifdef CONFIG_NUMA
-	if (static_branch_unlikely(&strict_numa) &&
-			 node == NUMA_NO_NODE) {
-
-		struct mempolicy *mpol = current->mempolicy;
-
-		if (mpol) {
-			/*
-			 * Special BIND rule support. If the local node
-			 * is in permitted set then do not redirect
-			 * to a particular node.
-			 * Otherwise we apply the memory policy to get
-			 * the node we need to allocate on.
-			 */
-			if (mpol->mode != MPOL_BIND ||
-					!node_isset(numa_mem_id(), mpol->nodes))
-
-				node = mempolicy_slab_node();
-		}
-	}
-#endif
-
 	node_requested = IS_ENABLED(CONFIG_NUMA) && node != NUMA_NO_NODE;
 
 	/*
@@ -4929,6 +4911,8 @@ static __fastpath_inline void *slab_alloc_node(struct kmem_cache *s,
 	object = kfence_alloc(s, ac->orig_size, gfpflags);
 	if (unlikely(object))
 		goto out;
+
+	node = apply_numa_policy(node);
 
 	object = alloc_from_pcs(s, gfpflags, ac->alloc_flags, node);
 
@@ -5432,6 +5416,8 @@ retry:
 		 * spin_trylock_irqsave(&n->list_lock, ...)
 		 */
 		return NULL;
+
+	node = apply_numa_policy(node);
 
 	ret = alloc_from_pcs(s, gfp_flags, ac->alloc_flags, node);
 	if (ret)
