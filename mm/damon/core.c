@@ -2463,6 +2463,7 @@ static void damos_apply_scheme(struct damon_ctx *c, struct damon_target *t,
 			return;
 		ktime_get_coarse_ts64(&begin);
 		trace_damos_before_apply(cidx, sidx, tidx, r,
+				damon_nr_accesses_mvsum(r, c),
 				damon_nr_regions(t), do_trace);
 		sz_applied = c->ops.apply_scheme(c, t, r, s,
 				&sz_ops_filter_passed);
