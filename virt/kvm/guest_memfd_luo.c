@@ -119,11 +119,11 @@ static bool kvm_gmem_luo_can_preserve(struct liveupdate_file_handler *handler, s
 	/*
 	 * Only Fully-shared guest_memfd preservation is supported
 	 */
-	if (GMEM_I(inode)->flags & GUEST_MEMFD_FLAG_INIT_SHARED)
+	if (!(GMEM_I(inode)->flags & GUEST_MEMFD_FLAG_INIT_SHARED))
 		return 0;
 
 	/*
-	 * It makes sure that no memory can converted to private
+	 * It makes sure that no memory can be converted to private
 	 * even if it was initially fully shared (in-place conversions are
 	 * prevented).
 	 */
