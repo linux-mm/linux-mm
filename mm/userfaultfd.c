@@ -3009,9 +3009,9 @@ static void dup_fctx(struct userfaultfd_fork_ctx *fctx)
 
 void dup_userfaultfd_complete(struct list_head *fcs)
 {
-	struct userfaultfd_fork_ctx *fctx, *n;
+	struct userfaultfd_fork_ctx *fctx;
 
-	list_for_each_entry_safe(fctx, n, fcs, list) {
+	list_for_each_entry_mutable(fctx, fcs, list) {
 		dup_fctx(fctx);
 		list_del(&fctx->list);
 		kfree(fctx);
@@ -3020,7 +3020,7 @@ void dup_userfaultfd_complete(struct list_head *fcs)
 
 void dup_userfaultfd_fail(struct list_head *fcs)
 {
-	struct userfaultfd_fork_ctx *fctx, *n;
+	struct userfaultfd_fork_ctx *fctx;
 
 	/*
 	 * An error has occurred on fork, we will tear memory down, but have
@@ -3032,7 +3032,7 @@ void dup_userfaultfd_fail(struct list_head *fcs)
 	 *
 	 * mm tear down will take care of cleaning up VMA contexts.
 	 */
-	list_for_each_entry_safe(fctx, n, fcs, list) {
+	list_for_each_entry_mutable(fctx, fcs, list) {
 		struct userfaultfd_ctx *octx = fctx->orig;
 		struct userfaultfd_ctx *ctx = fctx->new;
 
@@ -3169,10 +3169,10 @@ int userfaultfd_unmap_prep(struct vm_area_struct *vma, unsigned long start,
 
 void userfaultfd_unmap_complete(struct mm_struct *mm, struct list_head *uf)
 {
-	struct userfaultfd_unmap_ctx *ctx, *n;
+	struct userfaultfd_unmap_ctx *ctx;
 	struct userfaultfd_wait_queue ewq;
 
-	list_for_each_entry_safe(ctx, n, uf, list) {
+	list_for_each_entry_mutable(ctx, uf, list) {
 		msg_init(&ewq.msg);
 
 		ewq.msg.event = UFFD_EVENT_UNMAP;
