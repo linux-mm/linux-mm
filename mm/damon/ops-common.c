@@ -113,6 +113,9 @@ int damon_hot_score(struct damon_ctx *c, struct damon_region *r,
 
 	freq_subscore = r->nr_accesses * DAMON_MAX_SUBSCORE /
 		damon_max_nr_accesses(&c->attrs);
+	/* TODO: update monitoring results always to avoid this. */
+	if (freq_subscore > DAMON_MAX_SUBSCORE)
+		freq_subscore = DAMON_MAX_SUBSCORE;
 
 	age_in_sec = (unsigned long)r->age * c->attrs.aggr_interval / 1000000;
 	if (age_in_sec)
