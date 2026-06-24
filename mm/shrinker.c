@@ -209,6 +209,8 @@ void set_shrinker_bit(struct mem_cgroup *memcg, int nid, int shrinker_id)
 
 		rcu_read_lock();
 		info = rcu_dereference(memcg->nodeinfo[nid]->shrinker_info);
+		if (unlikely(!info))
+			goto unlock;
 		if (!WARN_ON_ONCE(shrinker_id >= info->map_nr_max)) {
 			struct shrinker_info_unit *unit;
 
@@ -217,6 +219,7 @@ void set_shrinker_bit(struct mem_cgroup *memcg, int nid, int shrinker_id)
 			smp_mb__before_atomic();
 			set_bit(shrinker_id_to_offset(shrinker_id), unit->map);
 		}
+unlock:
 		rcu_read_unlock();
 	}
 }
@@ -267,6 +270,10 @@ static long xchg_nr_deferred_memcg(int nid, struct shrinker *shrinker,
 
 	rcu_read_lock();
 	info = rcu_dereference(memcg->nodeinfo[nid]->shrinker_info);
+	if (unlikely(!info)) {
+		rcu_read_unlock();
+		return 0;
+	}
 	unit = info->unit[shrinker_id_to_index(shrinker->id)];
 	nr_deferred = atomic_long_xchg(&unit->nr_deferred[shrinker_id_to_offset(shrinker->id)], 0);
 	rcu_read_unlock();
@@ -283,6 +290,10 @@ static long add_nr_deferred_memcg(long nr, int nid, struct shrinker *shrinker,
 
 	rcu_read_lock();
 	info = rcu_dereference(memcg->nodeinfo[nid]->shrinker_info);
+	if (unlikely(!info)) {
+		rcu_read_unlock();
+		return 0;
+	}
 	unit = info->unit[shrinker_id_to_index(shrinker->id)];
 	nr_deferred =
 		atomic_long_add_return(nr, &unit->nr_deferred[shrinker_id_to_offset(shrinker->id)]);
