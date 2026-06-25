@@ -1384,12 +1384,12 @@ retry:
 	 * the fault.  Since we never set FAULT_FLAG_RETRY_NOWAIT, if
 	 * we get VM_FAULT_RETRY back, the mmap_lock has been unlocked.
 	 *
-	 * Note that handle_userfault() may also release and reacquire mmap_lock
-	 * (and not return with VM_FAULT_RETRY), when returning to userland to
-	 * repeat the page fault later with a VM_FAULT_NOPAGE retval
-	 * (potentially after handling any pending signal during the return to
-	 * userland). The return to userland is identified whenever
-	 * FAULT_FLAG_USER|FAULT_FLAG_KILLABLE are both set in flags.
+	 * Note that handle_userfault() may also release and reacquire
+	 * the fault lock (and not return with VM_FAULT_RETRY), when
+	 * returning to userland to repeat the page fault later with a
+	 * VM_FAULT_NOPAGE retval (potentially after handling any pending
+	 * signal during the return to userland). The return to userland
+	 * is identified whenever FAULT_FLAG_USER is set in flags.
 	 */
 	fault = handle_mm_fault(vma, address, flags, regs);
 

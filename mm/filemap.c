@@ -1752,13 +1752,11 @@ static int __folio_lock_async(struct folio *folio, struct wait_page_queue *wait)
  *     mmap_lock or per-VMA lock has been released (mmap_read_unlock() or
  *     vma_end_read()), unless flags had both FAULT_FLAG_ALLOW_RETRY and
  *     FAULT_FLAG_RETRY_NOWAIT set, in which case the lock is still held.
- *
- * If neither ALLOW_RETRY nor KILLABLE are set, will always return 0
- * with the folio locked and the mmap_lock/per-VMA lock is left unperturbed.
  */
 vm_fault_t __folio_lock_or_retry(struct folio *folio, struct vm_fault *vmf)
 {
 	unsigned int flags = vmf->flags;
+	bool ret;
 
 	if (fault_flag_allow_retry_first(flags)) {
 		/*
@@ -1769,22 +1767,14 @@ vm_fault_t __folio_lock_or_retry(struct folio *folio, struct vm_fault *vmf)
 			return VM_FAULT_RETRY;
 
 		release_fault_lock(vmf);
-		if (flags & FAULT_FLAG_KILLABLE)
-			folio_wait_locked_killable(folio);
-		else
-			folio_wait_locked(folio);
+		folio_wait_locked_killable(folio);
 		return VM_FAULT_RETRY;
 	}
-	if (flags & FAULT_FLAG_KILLABLE) {
-		bool ret;
 
-		ret = __folio_lock_killable(folio);
-		if (ret) {
-			release_fault_lock(vmf);
-			return VM_FAULT_RETRY;
-		}
-	} else {
-		__folio_lock(folio);
+	ret = __folio_lock_killable(folio);
+	if (ret) {
+		release_fault_lock(vmf);
+		return VM_FAULT_RETRY;
 	}
 
 	return 0;
@@ -3304,21 +3294,18 @@ static int lock_folio_maybe_drop_mmap(struct vm_fault *vmf, struct folio *folio,
 		return 0;
 
 	*fpin = maybe_unlock_mmap_for_io(vmf, *fpin);
-	if (vmf->flags & FAULT_FLAG_KILLABLE) {
-		if (__folio_lock_killable(folio)) {
-			/*
-			 * We didn't have the right flags to drop the
-			 * fault lock, but all fault_handlers only check
-			 * for fatal signals if we return VM_FAULT_RETRY,
-			 * so we need to drop the fault lock here and
-			 * return 0 if we don't have a fpin.
-			 */
-			if (*fpin == NULL)
-				release_fault_lock(vmf);
-			return 0;
-		}
-	} else
-		__folio_lock(folio);
+	if (__folio_lock_killable(folio)) {
+		/*
+		 * We didn't have the right flags to drop the
+		 * fault lock, but all fault_handlers only check
+		 * for fatal signals if we return VM_FAULT_RETRY,
+		 * so we need to drop the fault lock here and
+		 * return 0 if we don't have a fpin.
+		 */
+		if (*fpin == NULL)
+			release_fault_lock(vmf);
+		return 0;
+	}
 
 	return 1;
 }

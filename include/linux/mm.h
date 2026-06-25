@@ -705,7 +705,6 @@ enum {
  * arch-specific page fault handlers.
  */
 #define FAULT_FLAG_DEFAULT  (FAULT_FLAG_ALLOW_RETRY | \
-			     FAULT_FLAG_KILLABLE | \
 			     FAULT_FLAG_INTERRUPTIBLE)
 
 /**
@@ -732,7 +731,6 @@ static inline bool fault_flag_allow_retry_first(enum fault_flag flags)
 	{ FAULT_FLAG_MKWRITE,		"MKWRITE" }, \
 	{ FAULT_FLAG_ALLOW_RETRY,	"ALLOW_RETRY" }, \
 	{ FAULT_FLAG_RETRY_NOWAIT,	"RETRY_NOWAIT" }, \
-	{ FAULT_FLAG_KILLABLE,		"KILLABLE" }, \
 	{ FAULT_FLAG_TRIED,		"TRIED" }, \
 	{ FAULT_FLAG_USER,		"USER" }, \
 	{ FAULT_FLAG_REMOTE,		"REMOTE" }, \

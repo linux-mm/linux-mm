@@ -1774,7 +1774,6 @@ enum tlb_flush_reason {
  * @FAULT_FLAG_MKWRITE: Fault was mkwrite of existing PTE.
  * @FAULT_FLAG_ALLOW_RETRY: Allow to retry the fault if blocked.
  * @FAULT_FLAG_RETRY_NOWAIT: Don't drop mmap_lock and wait when retrying.
- * @FAULT_FLAG_KILLABLE: The fault task is in SIGKILL killable region.
  * @FAULT_FLAG_TRIED: The fault has been tried once.
  * @FAULT_FLAG_USER: The fault originated in userspace.
  * @FAULT_FLAG_REMOTE: The fault is not for current task/mm.
@@ -1815,15 +1814,14 @@ enum fault_flag {
 	FAULT_FLAG_MKWRITE =		1 << 1,
 	FAULT_FLAG_ALLOW_RETRY =	1 << 2,
 	FAULT_FLAG_RETRY_NOWAIT = 	1 << 3,
-	FAULT_FLAG_KILLABLE =		1 << 4,
-	FAULT_FLAG_TRIED = 		1 << 5,
-	FAULT_FLAG_USER =		1 << 6,
-	FAULT_FLAG_REMOTE =		1 << 7,
-	FAULT_FLAG_INSTRUCTION =	1 << 8,
-	FAULT_FLAG_INTERRUPTIBLE =	1 << 9,
-	FAULT_FLAG_UNSHARE =		1 << 10,
-	FAULT_FLAG_ORIG_PTE_VALID =	1 << 11,
-	FAULT_FLAG_VMA_LOCK =		1 << 12,
+	FAULT_FLAG_TRIED = 		1 << 4,
+	FAULT_FLAG_USER =		1 << 5,
+	FAULT_FLAG_REMOTE =		1 << 6,
+	FAULT_FLAG_INSTRUCTION =	1 << 7,
+	FAULT_FLAG_INTERRUPTIBLE =	1 << 8,
+	FAULT_FLAG_UNSHARE =		1 << 9,
+	FAULT_FLAG_ORIG_PTE_VALID =	1 << 10,
+	FAULT_FLAG_VMA_LOCK =		1 << 11,
 };
 
 typedef unsigned int __bitwise zap_flags_t;

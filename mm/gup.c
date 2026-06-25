@@ -1098,7 +1098,7 @@ static int faultin_page(struct vm_area_struct *vma,
 	if (flags & FOLL_REMOTE)
 		fault_flags |= FAULT_FLAG_REMOTE;
 	if (flags & FOLL_UNLOCKABLE) {
-		fault_flags |= FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+		fault_flags |= FAULT_FLAG_ALLOW_RETRY;
 		/*
 		 * FAULT_FLAG_INTERRUPTIBLE is opt-in. GUP callers must set
 		 * FOLL_INTERRUPTIBLE to enable FAULT_FLAG_INTERRUPTIBLE.
@@ -1571,7 +1571,7 @@ int fixup_user_fault(struct mm_struct *mm,
 	address = untagged_addr_remote(mm, address);
 
 	if (unlocked)
-		fault_flags |= FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+		fault_flags |= FAULT_FLAG_ALLOW_RETRY;
 
 retry:
 	vma = gup_vma_lookup(mm, address);
@@ -1581,8 +1581,7 @@ retry:
 	if (!vma_permits_fault(vma, fault_flags))
 		return -EFAULT;
 
-	if ((fault_flags & FAULT_FLAG_KILLABLE) &&
-	    fatal_signal_pending(current))
+	if (fatal_signal_pending(current))
 		return -EINTR;
 
 	ret = handle_mm_fault(vma, address, fault_flags, NULL);
