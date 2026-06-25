@@ -3317,13 +3317,12 @@ static int lock_folio_maybe_drop_mmap(struct vm_fault *vmf, struct folio *folio,
  * that.  If we didn't pin a file then we return NULL.  The file that is
  * returned needs to be fput()'ed when we're done with it.
  */
-static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
+static void do_sync_mmap_readahead(struct vm_fault *vmf)
 {
 	struct file *file = vmf->vma->vm_file;
 	struct file_ra_state *ra = &file->f_ra;
 	struct address_space *mapping = file->f_mapping;
 	DEFINE_READAHEAD(ractl, file, ra, mapping, vmf->pgoff);
-	struct file *fpin = NULL;
 	vm_flags_t vm_flags = vmf->vma->vm_flags;
 	bool force_thp_readahead = false;
 	unsigned int thp_order = 0;
@@ -3351,15 +3350,14 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 		 * VM_EXEC case below is already intended for random access.
 		 */
 		if ((vm_flags & (VM_RAND_READ | VM_EXEC)) == VM_RAND_READ)
-			return fpin;
+			return;
 
 		if (!ra->ra_pages)
-			return fpin;
+			return;
 
 		if (vm_flags & VM_SEQ_READ) {
-			fpin = maybe_unlock_mmap_for_io(vmf, fpin);
 			page_cache_sync_ra(&ractl, ra->ra_pages);
-			return fpin;
+			return;
 		}
 	}
 
@@ -3374,13 +3372,12 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 		 * stop bothering with read-ahead. It will only hurt.
 		 */
 		if (mmap_miss > MMAP_LOTSAMISS)
-			return fpin;
+			return;
 	}
 
 	if (force_thp_readahead) {
 		unsigned long folio_nr_pages = 1UL << thp_order;
 
-		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
 		ractl._index &= ~(folio_nr_pages - 1);
 		ra->size = folio_nr_pages;
 		/*
@@ -3392,7 +3389,7 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 		ra->async_size = folio_nr_pages;
 		ra->order = thp_order;
 		page_cache_ra_order(&ractl, ra);
-		return fpin;
+		return;
 	}
 
 	if (vm_flags & VM_EXEC) {
@@ -3429,10 +3426,8 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 		ra->order = 0;
 	}
 
-	fpin = maybe_unlock_mmap_for_io(vmf, fpin);
 	ractl._index = ra->start;
 	page_cache_ra_order(&ractl, ra);
-	return fpin;
 }
 
 /*
@@ -3585,7 +3580,7 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 		count_vm_event(PGMAJFAULT);
 		count_memcg_event_mm(vmf->vma->vm_mm, PGMAJFAULT);
 		ret = VM_FAULT_MAJOR;
-		fpin = do_sync_mmap_readahead(vmf);
+		do_sync_mmap_readahead(vmf);
 retry_find:
 		/*
 		 * See comment in filemap_create_folio() why we need
