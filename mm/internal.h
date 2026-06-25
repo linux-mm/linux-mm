@@ -1104,13 +1104,10 @@ static inline unsigned long vma_address_end(struct page_vma_mapped_walk *pvmw)
 	return address;
 }
 
-static inline struct file *maybe_unlock_mmap_for_io(struct vm_fault *vmf,
-						    struct file *fpin)
+static inline struct file *maybe_unlock_mmap_for_io(struct vm_fault *vmf)
 {
+	struct file *fpin = NULL;
 	int flags = vmf->flags;
-
-	if (fpin)
-		return fpin;
 
 	/*
 	 * FAULT_FLAG_RETRY_NOWAIT means we don't want to wait on page locks or
