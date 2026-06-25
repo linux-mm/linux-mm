@@ -1994,7 +1994,7 @@ no_page:
 			gfp &= ~GFP_KERNEL;
 			gfp |= GFP_NOWAIT;
 		}
-		if (WARN_ON_ONCE(!(fgp_flags & (FGP_LOCK | FGP_FOR_MMAP))))
+		if (WARN_ON_ONCE(!(fgp_flags & FGP_LOCK)))
 			fgp_flags |= FGP_LOCK;
 
 		if (order > mapping_max_folio_order(mapping))
@@ -2041,12 +2041,6 @@ no_page:
 				err = -EAGAIN;
 			return ERR_PTR(err);
 		}
-		/*
-		 * filemap_add_folio locks the page, and for mmap
-		 * we expect an unlocked page.
-		 */
-		if (folio && (fgp_flags & FGP_FOR_MMAP))
-			folio_unlock(folio);
 	}
 
 	if (!folio)
@@ -3522,6 +3516,17 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 			filemap_invalidate_lock_shared(mapping);
 			mapping_locked = true;
 		}
+
+		ret |= folio_lock_or_retry(folio, vmf);
+		if (ret & VM_FAULT_RETRY)
+			goto out_retry;
+
+		/* Did it get truncated? */
+		if (unlikely(folio->mapping != mapping)) {
+			folio_unlock(folio);
+			folio_put(folio);
+			goto retry_find;
+		}
 	} else {
 		fgf_t fgf;
 
@@ -3543,7 +3548,7 @@ retry_find:
 			filemap_invalidate_lock_shared(mapping);
 			mapping_locked = true;
 		}
-		fgf = FGP_CREAT | FGP_FOR_MMAP;
+		fgf = FGP_CREAT | FGP_LOCK;
 		if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
 			fgf |= FGP_NOWAIT;
 		folio = __filemap_get_folio(mapping, index, fgf, vmf->gfp_mask);
@@ -3555,16 +3560,6 @@ retry_find:
 		}
 	}
 
-	ret |= folio_lock_or_retry(folio, vmf);
-	if (ret & VM_FAULT_RETRY)
-		goto out_retry;
-
-	/* Did it get truncated? */
-	if (unlikely(folio->mapping != mapping)) {
-		folio_unlock(folio);
-		folio_put(folio);
-		goto retry_find;
-	}
 	VM_BUG_ON_FOLIO(!folio_contains(folio, index), folio);
 
 	/*
