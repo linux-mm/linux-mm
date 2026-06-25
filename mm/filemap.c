@@ -3494,7 +3494,6 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 {
 	int error;
 	struct file *file = vmf->vma->vm_file;
-	struct file *fpin = NULL;
 	struct address_space *mapping = file->f_mapping;
 	struct inode *inode = mapping->host;
 	pgoff_t max_idx, index = vmf->pgoff;
@@ -3546,8 +3545,6 @@ retry_find:
 					  FGP_CREAT|FGP_FOR_MMAP,
 					  vmf->gfp_mask);
 		if (IS_ERR(folio)) {
-			if (fpin)
-				goto out_retry;
 			filemap_invalidate_unlock_shared(mapping);
 			return VM_FAULT_OOM;
 		}
@@ -3591,21 +3588,12 @@ retry_find:
 		goto page_not_uptodate;
 	}
 
-	/*
-	 * We've made it this far and we had to drop our mmap_lock, now is the
-	 * time to return to the upper layer and have it re-find the vma and
-	 * redo the fault.
-	 */
-	if (fpin) {
-		folio_unlock(folio);
-		goto out_retry;
-	}
 	if (mapping_locked)
 		filemap_invalidate_unlock_shared(mapping);
 
 	/*
-	 * Found the page and have a reference on it.
-	 * We must recheck i_size under page lock.
+	 * Found the folio and have a reference on it.
+	 * We must recheck i_size under the folio lock.
 	 */
 	max_idx = DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE);
 	if (unlikely(index >= max_idx)) {
@@ -3624,10 +3612,7 @@ page_not_uptodate:
 	 * because there really aren't any performance issues here
 	 * and we need to check for errors.
 	 */
-	fpin = maybe_unlock_mmap_for_io(vmf, fpin);
 	error = filemap_read_folio(file, mapping->a_ops->read_folio, folio);
-	if (fpin)
-		goto out_retry;
 	folio_put(folio);
 
 	if (!error || error == AOP_TRUNCATED_PAGE)
@@ -3646,8 +3631,6 @@ out_retry:
 		folio_put(folio);
 	if (mapping_locked)
 		filemap_invalidate_unlock_shared(mapping);
-	if (fpin)
-		fput(fpin);
 	return ret | VM_FAULT_RETRY;
 }
 EXPORT_SYMBOL(filemap_fault);
