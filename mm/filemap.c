@@ -3268,49 +3268,6 @@ unlock:
 #ifdef CONFIG_MMU
 #define MMAP_LOTSAMISS  (100)
 /*
- * lock_folio_maybe_drop_mmap - lock the page, possibly dropping the mmap_lock
- * @vmf - the vm_fault for this fault.
- * @folio - the folio to lock.
- * @fpin - the pointer to the file we may pin (or is already pinned).
- *
- * This works similar to lock_folio_or_retry in that it can drop the
- * mmap_lock.  It differs in that it actually returns the folio locked
- * if it returns 1 and 0 if it couldn't lock the folio.  If we did have
- * to drop the mmap_lock then fpin will point to the pinned file and
- * needs to be fput()'ed at a later point.
- */
-static int lock_folio_maybe_drop_mmap(struct vm_fault *vmf, struct folio *folio,
-				     struct file **fpin)
-{
-	if (folio_trylock(folio))
-		return 1;
-
-	/*
-	 * NOTE! This will make us return with VM_FAULT_RETRY, but with
-	 * the fault lock still held. That's how FAULT_FLAG_RETRY_NOWAIT
-	 * is supposed to work. We have way too many special cases..
-	 */
-	if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
-		return 0;
-
-	*fpin = maybe_unlock_mmap_for_io(vmf, *fpin);
-	if (__folio_lock_killable(folio)) {
-		/*
-		 * We didn't have the right flags to drop the
-		 * fault lock, but all fault_handlers only check
-		 * for fatal signals if we return VM_FAULT_RETRY,
-		 * so we need to drop the fault lock here and
-		 * return 0 if we don't have a fpin.
-		 */
-		if (*fpin == NULL)
-			release_fault_lock(vmf);
-		return 0;
-	}
-
-	return 1;
-}
-
-/*
  * Synchronous readahead happens when we don't even find a page in the page
  * cache at all.  We don't want to perform IO under the mmap sem, so if we have
  * to drop the mmap sem we return the file that was pinned in order for us to do
@@ -3523,8 +3480,8 @@ static vm_fault_t filemap_fault_recheck_pte_none(struct vm_fault *vmf)
  *
  * vma->vm_mm->mmap_lock must be held on entry.
  *
- * If our return value has VM_FAULT_RETRY set, it's because the mmap_lock
- * may be dropped before doing I/O or by lock_folio_maybe_drop_mmap().
+ * If our return value has VM_FAULT_RETRY set, it's because the fault lock
+ * may be dropped before doing I/O or by folio_lock_or_retry().
  *
  * If our return value does not have VM_FAULT_RETRY set, the mmap_lock
  * has not been released.
@@ -3596,7 +3553,8 @@ retry_find:
 		}
 	}
 
-	if (!lock_folio_maybe_drop_mmap(vmf, folio, &fpin))
+	ret |= folio_lock_or_retry(folio, vmf);
+	if (ret & VM_FAULT_RETRY)
 		goto out_retry;
 
 	/* Did it get truncated? */
