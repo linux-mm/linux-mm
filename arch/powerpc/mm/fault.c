@@ -503,7 +503,7 @@ static int ___do_page_fault(struct pt_regs *regs, unsigned long address,
 	}
 
 	fault = handle_mm_fault(vma, address, flags | FAULT_FLAG_VMA_LOCK, regs);
-	if (!(fault & (VM_FAULT_RETRY | VM_FAULT_COMPLETED)))
+	if (!(fault & VM_FAULT_RETRY))
 		vma_end_read(vma);
 
 	if (!(fault & VM_FAULT_RETRY)) {
@@ -552,10 +552,6 @@ retry:
 	if (fault_signal_pending(fault, regs))
 		return user_mode(regs) ? 0 : SIGBUS;
 
-	/* The fault is fully completed (including releasing mmap lock) */
-	if (fault & VM_FAULT_COMPLETED)
-		goto out;
-
 	/*
 	 * Handle the retry right now, the mmap_lock has been released in that
 	 * case.
@@ -571,7 +567,6 @@ done:
 	if (unlikely(fault & VM_FAULT_ERROR))
 		return mm_fault_error(regs, address, fault);
 
-out:
 	/*
 	 * Major/minor page fault accounting.
 	 */

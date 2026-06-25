@@ -141,10 +141,6 @@ retry:
 		return;
 	}
 
-	/* The fault is fully completed (including releasing mmap lock) */
-	if (fault & VM_FAULT_COMPLETED)
-		return;
-
 	/*
 	 * Fault retry nuances, mmap_lock already relinquished by core mm
 	 */

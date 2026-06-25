@@ -247,7 +247,7 @@ static void __kprobes __do_page_fault(struct pt_regs *regs,
 	}
 
 	fault = handle_mm_fault(vma, address, flags | FAULT_FLAG_VMA_LOCK, regs);
-	if (!(fault & (VM_FAULT_RETRY | VM_FAULT_COMPLETED)))
+	if (!(fault & VM_FAULT_RETRY))
 		vma_end_read(vma);
 
 	if (!(fault & VM_FAULT_RETRY)) {
@@ -313,10 +313,6 @@ good_area:
 			no_context(regs, write, address);
 		return;
 	}
-
-	/* The fault is fully completed (including releasing mmap lock) */
-	if (fault & VM_FAULT_COMPLETED)
-		return;
 
 	if (unlikely(fault & VM_FAULT_RETRY)) {
 		flags |= FAULT_FLAG_TRIED;

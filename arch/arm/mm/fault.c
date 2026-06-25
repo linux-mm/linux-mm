@@ -403,7 +403,7 @@ do_page_fault(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 		goto bad_area;
 	}
 	fault = handle_mm_fault(vma, addr, flags | FAULT_FLAG_VMA_LOCK, regs);
-	if (!(fault & (VM_FAULT_RETRY | VM_FAULT_COMPLETED)))
+	if (!(fault & VM_FAULT_RETRY))
 		vma_end_read(vma);
 
 	if (!(fault & VM_FAULT_RETRY)) {
@@ -452,10 +452,6 @@ retry:
 			goto no_context;
 		return 0;
 	}
-
-	/* The fault is fully completed (including releasing mmap lock) */
-	if (fault & VM_FAULT_COMPLETED)
-		return 0;
 
 	if (!(fault & VM_FAULT_ERROR)) {
 		if (fault & VM_FAULT_RETRY) {
