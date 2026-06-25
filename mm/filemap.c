@@ -3523,6 +3523,8 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 			mapping_locked = true;
 		}
 	} else {
+		fgf_t fgf;
+
 		ret = filemap_fault_recheck_pte_none(vmf);
 		if (unlikely(ret))
 			return ret;
@@ -3541,11 +3543,14 @@ retry_find:
 			filemap_invalidate_lock_shared(mapping);
 			mapping_locked = true;
 		}
-		folio = __filemap_get_folio(mapping, index,
-					  FGP_CREAT|FGP_FOR_MMAP,
-					  vmf->gfp_mask);
+		fgf = FGP_CREAT | FGP_FOR_MMAP;
+		if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
+			fgf |= FGP_NOWAIT;
+		folio = __filemap_get_folio(mapping, index, fgf, vmf->gfp_mask);
 		if (IS_ERR(folio)) {
 			filemap_invalidate_unlock_shared(mapping);
+			if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
+				return VM_FAULT_RETRY;
 			return VM_FAULT_OOM;
 		}
 	}
