@@ -1963,7 +1963,11 @@ repeat:
 				return ERR_PTR(-EAGAIN);
 			}
 		} else {
-			folio_lock(folio);
+			int err = folio_lock_killable(folio);
+			if (err) {
+				folio_put(folio);
+				return ERR_PTR(err);
+			}
 		}
 
 		/* Has the page been truncated? */
