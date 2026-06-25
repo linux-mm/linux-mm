@@ -3431,22 +3431,20 @@ static void do_sync_mmap_readahead(struct vm_fault *vmf)
 }
 
 /*
- * Asynchronous readahead happens when we find the page and PG_readahead,
- * so we want to possibly extend the readahead further.  We return the file that
- * was pinned if we have to drop the mmap_lock in order to do IO.
+ * Asynchronous readahead happens when the folio has the readahead flag set
+ * so we want to possibly extend the readahead further.
  */
-static struct file *do_async_mmap_readahead(struct vm_fault *vmf,
+static void do_async_mmap_readahead(struct vm_fault *vmf,
 					    struct folio *folio)
 {
 	struct file *file = vmf->vma->vm_file;
 	struct file_ra_state *ra = &file->f_ra;
 	DEFINE_READAHEAD(ractl, file, ra, file->f_mapping, vmf->pgoff);
-	struct file *fpin = NULL;
 	unsigned short mmap_miss;
 
 	/* If we don't want any read-ahead, don't bother */
 	if (vmf->vma->vm_flags & VM_RAND_READ || !ra->ra_pages)
-		return fpin;
+		return;
 
 	/*
 	 * If the folio is locked, we're likely racing against another fault.
@@ -3465,11 +3463,8 @@ static struct file *do_async_mmap_readahead(struct vm_fault *vmf,
 			WRITE_ONCE(ra->mmap_miss, --mmap_miss);
 	}
 
-	if (folio_test_readahead(folio)) {
-		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
+	if (folio_test_readahead(folio))
 		page_cache_async_ra(&ractl, folio, ra->ra_pages);
-	}
-	return fpin;
 }
 
 static vm_fault_t filemap_fault_recheck_pte_none(struct vm_fault *vmf)
@@ -3566,7 +3561,7 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 		 * the lock.
 		 */
 		if (!(vmf->flags & FAULT_FLAG_TRIED))
-			fpin = do_async_mmap_readahead(vmf, folio);
+			do_async_mmap_readahead(vmf, folio);
 		if (unlikely(!folio_test_uptodate(folio))) {
 			filemap_invalidate_lock_shared(mapping);
 			mapping_locked = true;
