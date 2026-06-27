@@ -1951,4 +1951,6 @@ static inline int get_sysctl_max_map_count(void)
 bool may_expand_vm(struct mm_struct *mm, const vma_flags_t *vma_flags,
 		   unsigned long npages);
 
+unsigned long reserved_thp_pageblocks(unsigned long nr_hpages);
+
 #endif	/* __MM_INTERNAL_H */

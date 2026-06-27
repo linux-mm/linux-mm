@@ -3568,6 +3568,35 @@ static bool unreserve_highatomic_pageblock(const struct alloc_context *ac,
 	return false;
 }
 
+unsigned long reserved_thp_pageblocks(unsigned long nr_hpages)
+{
+	unsigned int order = max_t(unsigned int, HPAGE_PMD_ORDER,
+				   pageblock_order);
+	unsigned long hpages_per_block = 1UL << (order - HPAGE_PMD_ORDER);
+	unsigned long reserved = 0;
+	gfp_t gfp = (GFP_HIGHUSER | __GFP_COMP | __GFP_NOMEMALLOC |
+		     __GFP_NOWARN | __GFP_NORETRY);
+
+	while (reserved < nr_hpages) {
+		struct page *page;
+		struct zone *zone;
+		unsigned long flags;
+
+		page = alloc_pages(gfp, order);
+		if (!page)
+			break;
+
+		zone = page_zone(page);
+		spin_lock_irqsave(&zone->lock, flags);
+		change_pageblock_range(page, order, MIGRATE_RESERVED_THP);
+		zone->nr_reserved_thp += 1UL << order;
+		spin_unlock_irqrestore(&zone->lock, flags);
+		__free_pages(page, order);
+		reserved += hpages_per_block;
+	}
+	return reserved;
+}
+
 static inline long __zone_watermark_unusable_free(struct zone *z,
 				unsigned int order, unsigned int alloc_flags)
 {
