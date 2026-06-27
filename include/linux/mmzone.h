@@ -133,10 +133,9 @@ enum migratetype {
 	 * __free_pageblock_cma() function.
 	 */
 	MIGRATE_CMA,
-	__MIGRATE_TYPE_END = MIGRATE_CMA,
-#else
-	__MIGRATE_TYPE_END = MIGRATE_HIGHATOMIC,
 #endif
+	MIGRATE_RESERVED_THP,
+	__MIGRATE_TYPE_END = MIGRATE_RESERVED_THP,
 #ifdef CONFIG_MEMORY_ISOLATION
 	MIGRATE_ISOLATE,	/* can't allocate from here */
 #endif
@@ -160,6 +159,9 @@ extern const char * const migratetype_names[MIGRATE_TYPES];
 #  define is_migrate_cma_page(_page) false
 #  define is_migrate_cma_folio(folio, pfn) false
 #endif
+
+#define is_migrate_reserved_thp(migratetype) \
+	unlikely((migratetype) == MIGRATE_RESERVED_THP)
 
 static inline bool is_migrate_movable(int mt)
 {
@@ -974,6 +976,9 @@ struct zone {
 
 	unsigned long nr_reserved_highatomic;
 	unsigned long nr_free_highatomic;
+
+	unsigned long nr_reserved_thp;
+	unsigned long nr_free_reserved_thp;
 
 	/*
 	 * We don't know if the memory that we're going to allocate will be
