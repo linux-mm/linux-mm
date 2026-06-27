@@ -5297,6 +5297,9 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	if (vma->vm_flags & VM_SHARED)
 		return VM_FAULT_SIGBUS;
 
+	if (unlikely(vma->vm_flags & VM_RESERVED_THP))
+		return VM_FAULT_OOM;
+
 	/*
 	 * Use pte_alloc() instead of pte_alloc_map(), so that OOM can
 	 * be distinguished from a transient failure of pte_offset_map().

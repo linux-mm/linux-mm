@@ -1267,6 +1267,9 @@ static struct folio *vma_alloc_anon_folio_pmd(struct vm_area_struct *vma,
 	const int order = HPAGE_PMD_ORDER;
 	struct folio *folio;
 
+	if (vma->vm_flags & VM_RESERVED_THP)
+		gfp |= __GFP_RESERVED_THP;
+
 	folio = vma_alloc_folio(gfp, order, vma, addr & HPAGE_PMD_MASK);
 
 	if (unlikely(!folio)) {
@@ -1344,8 +1347,11 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf)
 	vm_fault_t ret = 0;
 
 	folio = vma_alloc_anon_folio_pmd(vma, vmf->address);
-	if (unlikely(!folio))
+	if (unlikely(!folio)) {
+		if (vma->vm_flags & VM_RESERVED_THP)
+			return VM_FAULT_OOM;
 		return VM_FAULT_FALLBACK;
+	}
 
 	pgtable = pte_alloc_one(vma->vm_mm);
 	if (unlikely(!pgtable)) {
@@ -1480,15 +1486,17 @@ vm_fault_t do_huge_pmd_anonymous_page(struct vm_fault *vmf)
 	vm_fault_t ret;
 
 	if (!thp_vma_suitable_order(vma, haddr, PMD_ORDER))
-		return VM_FAULT_FALLBACK;
+		return (vma->vm_flags & VM_RESERVED_THP) ? VM_FAULT_OOM :
+							   VM_FAULT_FALLBACK;
 	ret = vmf_anon_prepare(vmf);
 	if (ret)
 		return ret;
 	khugepaged_enter_vma(vma, vma->vm_flags);
 
-	if (!(vmf->flags & FAULT_FLAG_WRITE) &&
-			!mm_forbids_zeropage(vma->vm_mm) &&
-			transparent_hugepage_use_zero_page()) {
+	if (!(vma->vm_flags & VM_RESERVED_THP) &&
+	    !(vmf->flags & FAULT_FLAG_WRITE) &&
+	    !mm_forbids_zeropage(vma->vm_mm) &&
+	    transparent_hugepage_use_zero_page()) {
 		pgtable_t pgtable;
 		struct folio *zero_folio;
 		vm_fault_t ret;
