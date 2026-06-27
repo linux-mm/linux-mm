@@ -2460,6 +2460,9 @@ __rmqueue(struct zone *zone, unsigned int order, int migratetype,
 {
 	struct page *page;
 
+	if (alloc_flags & ALLOC_RESERVED_THP)
+		return __rmqueue_smallest(zone, order, MIGRATE_RESERVED_THP);
+
 	if (IS_ENABLED(CONFIG_CMA)) {
 		/*
 		 * Balance movable allocations between regular and CMA areas by
@@ -3247,7 +3250,8 @@ struct page *rmqueue_buddy(struct zone *preferred_zone, struct zone *zone,
 			 * reserves as failing now is worse than failing a
 			 * high-order atomic allocation in the future.
 			 */
-			if (!page && (alloc_flags & (ALLOC_OOM|ALLOC_NON_BLOCK)))
+			if (!page && !(alloc_flags & ALLOC_RESERVED_THP) &&
+			    (alloc_flags & (ALLOC_OOM|ALLOC_NON_BLOCK)))
 				page = __rmqueue_smallest(zone, order, MIGRATE_HIGHATOMIC);
 
 			if (!page) {
@@ -3417,7 +3421,8 @@ struct page *rmqueue(struct zone *preferred_zone,
 {
 	struct page *page;
 
-	if (likely(pcp_allowed_order(order))) {
+	if (likely(pcp_allowed_order(order)) &&
+	    !(alloc_flags & ALLOC_RESERVED_THP)) {
 		page = rmqueue_pcplist(preferred_zone, zone, order,
 				       migratetype, alloc_flags);
 		if (likely(page))
@@ -3609,7 +3614,8 @@ static inline long __zone_watermark_unusable_free(struct zone *z,
 	if (likely(!(alloc_flags & ALLOC_RESERVES)))
 		unusable_free += READ_ONCE(z->nr_free_highatomic);
 
-	unusable_free += READ_ONCE(z->nr_free_reserved_thp);
+	if (!(alloc_flags & ALLOC_RESERVED_THP))
+		unusable_free += READ_ONCE(z->nr_free_reserved_thp);
 
 #ifdef CONFIG_CMA
 	/* If allocation can't use CMA areas don't use free CMA pages */
@@ -3684,6 +3690,12 @@ bool __zone_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
 
 		if (!area->nr_free)
 			continue;
+
+		if (alloc_flags & ALLOC_RESERVED_THP) {
+			if (!free_area_empty(area, MIGRATE_RESERVED_THP))
+				return true;
+			continue;
+		}
 
 		for (mt = 0; mt < MIGRATE_PCPTYPES; mt++) {
 			if (!free_area_empty(area, mt))
@@ -3918,6 +3930,9 @@ retry:
 		}
 
 		cond_accept_memory(zone, order, alloc_flags);
+
+		if (alloc_flags & ALLOC_RESERVED_THP)
+			goto try_this_zone;
 
 		/*
 		 * Detect whether the number of free pages is below high
@@ -5075,6 +5090,15 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
 	ac->zonelist = node_zonelist(preferred_nid, gfp_mask);
 	ac->nodemask = nodemask;
 	ac->migratetype = gfp_migratetype(gfp_mask);
+
+	if (gfp_mask & __GFP_RESERVED_THP) {
+		if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) ||
+		    WARN_ON_ONCE_GFP(order != HPAGE_PMD_ORDER, gfp_mask))
+			return false;
+
+		ac->migratetype = MIGRATE_RESERVED_THP;
+		*alloc_flags |= ALLOC_RESERVED_THP;
+	}
 
 	if (cpusets_enabled()) {
 		*alloc_gfp |= __GFP_HARDWALL;
