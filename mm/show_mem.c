@@ -143,6 +143,7 @@ static void show_migration_types(unsigned char type)
 #ifdef CONFIG_CMA
 		[MIGRATE_CMA]		= 'C',
 #endif
+		[MIGRATE_RESERVED_THP]	= 'T',
 #ifdef CONFIG_MEMORY_ISOLATION
 		[MIGRATE_ISOLATE]	= 'I',
 #endif
@@ -310,6 +311,8 @@ static void show_free_areas(unsigned int filter, const nodemask_t *nodemask,
 			" high:%lukB"
 			" reserved_highatomic:%luKB"
 			" free_highatomic:%luKB"
+			" reserved_thp:%luKB"
+			" free_reserved_thp:%luKB"
 			" active_anon:%lukB"
 			" inactive_anon:%lukB"
 			" active_file:%lukB"
@@ -333,6 +336,8 @@ static void show_free_areas(unsigned int filter, const nodemask_t *nodemask,
 			K(high_wmark_pages(zone)),
 			K(zone->nr_reserved_highatomic),
 			K(zone->nr_free_highatomic),
+			K(zone->nr_reserved_thp),
+			K(zone->nr_free_reserved_thp),
 			K(zone_page_state(zone, NR_ZONE_ACTIVE_ANON)),
 			K(zone_page_state(zone, NR_ZONE_INACTIVE_ANON)),
 			K(zone_page_state(zone, NR_ZONE_ACTIVE_FILE)),

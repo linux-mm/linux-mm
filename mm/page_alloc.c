@@ -265,6 +265,7 @@ const char * const migratetype_names[MIGRATE_TYPES] = {
 #ifdef CONFIG_CMA
 	"CMA",
 #endif
+	"ReserveTHP",
 #ifdef CONFIG_MEMORY_ISOLATION
 	"Isolate",
 #endif
@@ -786,6 +787,9 @@ static inline void account_freepages(struct zone *zone, int nr_pages,
 	else if (migratetype == MIGRATE_HIGHATOMIC)
 		WRITE_ONCE(zone->nr_free_highatomic,
 			   zone->nr_free_highatomic + nr_pages);
+	else if (migratetype == MIGRATE_RESERVED_THP)
+		WRITE_ONCE(zone->nr_free_reserved_thp,
+			   zone->nr_free_reserved_thp + nr_pages);
 }
 
 /* Used for pages not on another list */
@@ -2962,7 +2966,8 @@ static void __free_frozen_pages(struct page *page, unsigned int order,
 	zone = page_zone(page);
 	migratetype = get_pfnblock_migratetype(page, pfn);
 	if (unlikely(migratetype >= MIGRATE_PCPTYPES)) {
-		if (unlikely(is_migrate_isolate(migratetype))) {
+		if (unlikely(is_migrate_reserved_thp(migratetype) ||
+			     is_migrate_isolate(migratetype))) {
 			free_one_page(zone, page, pfn, order, fpi_flags);
 			return;
 		}
@@ -3040,11 +3045,18 @@ void free_unref_folios(struct folio_batch *folios)
 
 		/* Different zone requires a different pcp lock */
 		if (zone != locked_zone ||
+		    is_migrate_reserved_thp(migratetype) ||
 		    is_migrate_isolate(migratetype)) {
 			if (pcp) {
 				pcp_spin_unlock(pcp);
 				locked_zone = NULL;
 				pcp = NULL;
+			}
+
+			if (is_migrate_reserved_thp(migratetype)) {
+				free_one_page(zone, &folio->page, pfn,
+					      order, FPI_NONE);
+				continue;
 			}
 
 			/*
@@ -3570,6 +3582,8 @@ static inline long __zone_watermark_unusable_free(struct zone *z,
 	 */
 	if (likely(!(alloc_flags & ALLOC_RESERVES)))
 		unusable_free += READ_ONCE(z->nr_free_highatomic);
+
+	unusable_free += READ_ONCE(z->nr_free_reserved_thp);
 
 #ifdef CONFIG_CMA
 	/* If allocation can't use CMA areas don't use free CMA pages */
