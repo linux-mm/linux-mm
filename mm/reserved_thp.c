@@ -39,6 +39,41 @@ static int __init setup_reserved_thp_nr(char *str)
 }
 early_param("thp_reserved_nr", setup_reserved_thp_nr);
 
+unsigned long reserved_thp_hpage_nr(unsigned long start, unsigned long end)
+{
+	return (end - start) >> HPAGE_PMD_SHIFT;
+}
+
+int reserved_thp_charge(unsigned long nr_hpages)
+{
+	int ret = 0;
+
+	if (!nr_hpages)
+		return 0;
+
+	spin_lock(&reserved_thp_lock);
+	if (nr_hpages > reserved_thp_total - reserved_thp_used)
+		ret = -ENOMEM;
+	else
+		reserved_thp_used += nr_hpages;
+	spin_unlock(&reserved_thp_lock);
+
+	return ret;
+}
+
+void reserved_thp_uncharge(unsigned long nr_hpages)
+{
+	if (!nr_hpages)
+		return;
+
+	spin_lock(&reserved_thp_lock);
+	if (WARN_ON_ONCE(nr_hpages > reserved_thp_used))
+		reserved_thp_used = 0;
+	else
+		reserved_thp_used -= nr_hpages;
+	spin_unlock(&reserved_thp_lock);
+}
+
 static ssize_t total_hpages_show(struct kobject *kobj,
 				 struct kobj_attribute *attr, char *buf)
 {

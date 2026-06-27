@@ -1953,5 +1953,8 @@ bool may_expand_vm(struct mm_struct *mm, const vma_flags_t *vma_flags,
 		   unsigned long npages);
 
 unsigned long reserved_thp_pageblocks(unsigned long nr_hpages);
+unsigned long reserved_thp_hpage_nr(unsigned long start, unsigned long end);
+int reserved_thp_charge(unsigned long nr_hpages);
+void reserved_thp_uncharge(unsigned long nr_hpages);
 
 #endif	/* __MM_INTERNAL_H */
