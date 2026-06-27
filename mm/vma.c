@@ -7,6 +7,8 @@
 #include "vma_internal.h"
 #include "vma.h"
 
+#include <linux/huge_mm.h>
+
 struct mmap_state {
 	struct mm_struct *mm;
 	struct vma_iterator *vmi;
@@ -506,6 +508,10 @@ __split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 
 	WARN_ON(vma->vm_start >= addr);
 	WARN_ON(vma->vm_end <= addr);
+
+	if ((vma->vm_flags & VM_RESERVED_THP) &&
+	    !IS_ALIGNED(addr, HPAGE_PMD_SIZE))
+		return -EINVAL;
 
 	if (vma->vm_ops && vma->vm_ops->may_split) {
 		err = vma->vm_ops->may_split(vma, addr);
@@ -1361,6 +1367,7 @@ static void vms_complete_munmap_vmas(struct vma_munmap_struct *vms,
 		remove_vma(vma);
 
 	vm_unacct_memory(vms->nr_accounted);
+	reserved_thp_uncharge(vms->nr_reserved_thp);
 	validate_mm(mm);
 	if (vms->unlock)
 		mmap_read_unlock(mm);
@@ -1423,6 +1430,11 @@ static int vms_gather_munmap_vmas(struct vma_munmap_struct *vms,
 			error = -EPERM;
 			goto start_split_failed;
 		}
+		if ((vms->vma->vm_flags & VM_RESERVED_THP) &&
+		    !IS_ALIGNED(vms->start, HPAGE_PMD_SIZE)) {
+			error = -EINVAL;
+			goto start_split_failed;
+		}
 
 		error = __split_vma(vms->vmi, vms->vma, vms->start, 1);
 		if (error)
@@ -1445,6 +1457,11 @@ static int vms_gather_munmap_vmas(struct vma_munmap_struct *vms,
 		}
 		/* Does it split the end? */
 		if (next->vm_end > vms->end) {
+			if ((next->vm_flags & VM_RESERVED_THP) &&
+			    !IS_ALIGNED(vms->end, HPAGE_PMD_SIZE)) {
+				error = -EINVAL;
+				goto end_split_failed;
+			}
 			error = __split_vma(vms->vmi, next, vms->end, 0);
 			if (error)
 				goto end_split_failed;
@@ -1464,6 +1481,11 @@ static int vms_gather_munmap_vmas(struct vma_munmap_struct *vms,
 
 		if (vma_test(next, VMA_ACCOUNT_BIT))
 			vms->nr_accounted += nrpages;
+
+		if (next->vm_flags & VM_RESERVED_THP)
+			vms->nr_reserved_thp +=
+				reserved_thp_hpage_nr(next->vm_start,
+						      next->vm_end);
 
 		if (is_exec_mapping(next->vm_flags))
 			vms->exec_vm += nrpages;
@@ -1560,6 +1582,7 @@ static void init_vma_munmap(struct vma_munmap_struct *vms,
 	vms->uf = uf;
 	vms->vma_count = 0;
 	vms->nr_pages = vms->locked_vm = vms->nr_accounted = 0;
+	vms->nr_reserved_thp = 0;
 	vms->exec_vm = vms->stack_vm = vms->data_vm = 0;
 	vms->unmap_start = FIRST_USER_ADDRESS;
 	vms->unmap_end = USER_PGTABLES_CEILING;
