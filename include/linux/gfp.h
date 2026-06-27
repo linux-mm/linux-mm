@@ -30,6 +30,9 @@ static inline int gfp_migratetype(const gfp_t gfp_flags)
 	BUILD_BUG_ON(((___GFP_MOVABLE | ___GFP_RECLAIMABLE) >>
 		      GFP_MOVABLE_SHIFT) != MIGRATE_HIGHATOMIC);
 
+	if (unlikely(gfp_flags & __GFP_RESERVED_THP))
+		return MIGRATE_RESERVED_THP;
+
 	if (unlikely(page_group_by_mobility_disabled))
 		return MIGRATE_UNMOVABLE;
 

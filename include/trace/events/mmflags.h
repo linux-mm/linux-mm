@@ -24,6 +24,7 @@
 	TRACE_GFP_EM(IO)			\
 	TRACE_GFP_EM(FS)			\
 	TRACE_GFP_EM(ZERO)			\
+	TRACE_GFP_EM(RESERVED_THP)		\
 	TRACE_GFP_EM(DIRECT_RECLAIM)		\
 	TRACE_GFP_EM(KSWAPD_RECLAIM)		\
 	TRACE_GFP_EM(WRITE)			\
@@ -72,8 +73,7 @@
 
 TRACE_GFP_FLAGS
 
-/* Just in case these are ever used */
-TRACE_DEFINE_ENUM(___GFP_UNUSED_BIT);
+/* Just in case this is ever used */
 TRACE_DEFINE_ENUM(___GFP_LAST_BIT);
 
 #define gfpflag_string(flag) {(__force unsigned long)flag, #flag}

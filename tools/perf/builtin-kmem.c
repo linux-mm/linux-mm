@@ -672,6 +672,7 @@ static const struct {
 	{ "__GFP_NORETRY",		"NR" },
 	{ "__GFP_COMP",			"C" },
 	{ "__GFP_ZERO",			"Z" },
+	{ "__GFP_RESERVED_THP",		"RTHP" },
 	{ "__GFP_NOMEMALLOC",		"NMA" },
 	{ "__GFP_MEMALLOC",		"MA" },
 	{ "__GFP_HARDWALL",		"HW" },
