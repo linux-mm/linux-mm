@@ -353,6 +353,7 @@ enum {
 #endif
 	DECLARE_VMA_BIT(UFFD_MINOR, 41),
 	DECLARE_VMA_BIT(SEALED, 42),
+	DECLARE_VMA_BIT(RESERVED_THP, 43),
 	/* Flags that reuse flags above. */
 	DECLARE_VMA_BIT_ALIAS(PKEY_BIT0, HIGH_ARCH_0),
 	DECLARE_VMA_BIT_ALIAS(PKEY_BIT1, HIGH_ARCH_1),
@@ -524,6 +525,12 @@ enum {
 #else
 #define VM_DROPPABLE		VM_NONE
 #define VMA_DROPPABLE		EMPTY_VMA_FLAGS
+#endif
+
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+#define VM_RESERVED_THP		INIT_VM_FLAG(RESERVED_THP)
+#else
+#define VM_RESERVED_THP		VM_NONE
 #endif
 
 /* Bits set in the VMA until the stack is in its final location */
