@@ -24,6 +24,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/uaccess.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/huge_mm.h>
 #include <linux/mempolicy.h>
 #include <linux/pgalloc.h>
 
@@ -69,6 +70,7 @@ struct vma_remap_struct {
 	enum mremap_type remap_type;	/* expand, shrink, etc. */
 	bool mmap_locked;		/* Is mm currently write-locked? */
 	unsigned long charged;		/* If VM_ACCOUNT, # pages to account. */
+	unsigned long reserved_thp_charged; /* If VM_RESERVED_THP, # hpages. */
 	bool vmi_needs_invalidate;	/* Is the VMA iterator invalidated? */
 };
 
@@ -962,6 +964,9 @@ static unsigned long vrm_set_new_addr(struct vma_remap_struct *vrm)
 				map_flags);
 	if (IS_ERR_VALUE(res))
 		return res;
+	if ((vma->vm_flags & VM_RESERVED_THP) &&
+	    !IS_ALIGNED(res, HPAGE_PMD_SIZE))
+		return -ENOMEM;
 
 	vrm->new_addr = res;
 	return 0;
@@ -977,24 +982,44 @@ static bool vrm_calc_charge(struct vma_remap_struct *vrm)
 {
 	unsigned long charged;
 
-	if (!(vrm->vma->vm_flags & VM_ACCOUNT))
-		return true;
+	vrm->charged = 0;
+	vrm->reserved_thp_charged = 0;
 
-	/*
-	 * If we don't unmap the old mapping, then we account the entirety of
-	 * the length of the new one. Otherwise it's just the delta in size.
-	 */
-	if (vrm->flags & MREMAP_DONTUNMAP)
-		charged = vrm->new_len >> PAGE_SHIFT;
-	else
-		charged = vrm->delta >> PAGE_SHIFT;
+	if (vrm->vma->vm_flags & VM_ACCOUNT) {
+		/*
+		 * If we don't unmap the old mapping, then we account the
+		 * entirety of the length of the new one. Otherwise it's just
+		 * the delta in size.
+		 */
+		if (vrm->flags & MREMAP_DONTUNMAP)
+			charged = vrm->new_len >> PAGE_SHIFT;
+		else
+			charged = vrm->delta >> PAGE_SHIFT;
 
 
-	/* This accounts 'charged' pages of memory. */
-	if (security_vm_enough_memory_mm(current->mm, charged))
-		return false;
+		/* This accounts 'charged' pages of memory. */
+		if (security_vm_enough_memory_mm(current->mm, charged))
+			return false;
 
-	vrm->charged = charged;
+		vrm->charged = charged;
+	}
+
+	if (vrm->vma->vm_flags & VM_RESERVED_THP) {
+		unsigned long hpages;
+
+		if (vrm->flags & MREMAP_DONTUNMAP)
+			hpages = reserved_thp_hpage_nr(0, vrm->new_len);
+		else
+			hpages = reserved_thp_hpage_nr(0, vrm->delta);
+
+		if (reserved_thp_charge(hpages)) {
+			vm_unacct_memory(vrm->charged);
+			vrm->charged = 0;
+			return false;
+		}
+
+		vrm->reserved_thp_charged = hpages;
+	}
 	return true;
 }
 
@@ -1004,11 +1029,10 @@ static bool vrm_calc_charge(struct vma_remap_struct *vrm)
  */
 static void vrm_uncharge(struct vma_remap_struct *vrm)
 {
-	if (!(vrm->vma->vm_flags & VM_ACCOUNT))
-		return;
-
 	vm_unacct_memory(vrm->charged);
 	vrm->charged = 0;
+	reserved_thp_uncharge(vrm->reserved_thp_charged);
+	vrm->reserved_thp_charged = 0;
 }
 
 /*
@@ -1157,8 +1181,8 @@ static void unmap_source_vma(struct vma_remap_struct *vrm)
 	struct vm_area_struct *vma = vrm->vma;
 	VMA_ITERATOR(vmi, mm, addr);
 	int err;
-	unsigned long vm_start;
-	unsigned long vm_end;
+	unsigned long vm_start = 0;
+	unsigned long vm_end = 0;
 	/*
 	 * It might seem odd that we check for MREMAP_DONTUNMAP here, given this
 	 * function implies that we unmap the original VMA, which seems
@@ -1169,6 +1193,8 @@ static void unmap_source_vma(struct vma_remap_struct *vrm)
 	 * we actually _do_ want it be unaccounted.
 	 */
 	bool accountable_move = (vma->vm_flags & VM_ACCOUNT) &&
+		!(vrm->flags & MREMAP_DONTUNMAP);
+	bool reserved_thp_move = (vma->vm_flags & VM_RESERVED_THP) &&
 		!(vrm->flags & MREMAP_DONTUNMAP);
 
 	/*
@@ -1191,6 +1217,13 @@ static void unmap_source_vma(struct vma_remap_struct *vrm)
 		/* We are about to split vma, so store the start/end. */
 		vm_start = vma->vm_start;
 		vm_end = vma->vm_end;
+	}
+	if (reserved_thp_move) {
+		vm_flags_clear(vma, VM_RESERVED_THP);
+		if (!accountable_move) {
+			vm_start = vma->vm_start;
+			vm_end = vma->vm_end;
+		}
 	}
 
 	err = do_vmi_munmap(&vmi, mm, addr, len, vrm->uf_unmap, /* unlock= */false);
@@ -1227,19 +1260,27 @@ static void unmap_source_vma(struct vma_remap_struct *vrm)
 	 *
 	 * do_vmi_munmap() will have restored the VMI back to addr.
 	 */
-	if (accountable_move) {
+	if (accountable_move || reserved_thp_move) {
 		unsigned long end = addr + len;
+		struct vm_area_struct *prev = NULL;
+		struct vm_area_struct *next = NULL;
 
-		if (vm_start < addr) {
-			struct vm_area_struct *prev = vma_prev(&vmi);
+		if (vm_start < addr)
+			prev = vma_prev(&vmi);
+		if (vm_end > end)
+			next = vma_next(&vmi);
 
-			vm_flags_set(prev, VM_ACCOUNT); /* Acquires VMA lock. */
+		if (accountable_move) {
+			if (prev)
+				vm_flags_set(prev, VM_ACCOUNT); /* Acquires VMA lock. */
+			if (next)
+				vm_flags_set(next, VM_ACCOUNT); /* Acquires VMA lock. */
 		}
-
-		if (vm_end > end) {
-			struct vm_area_struct *next = vma_next(&vmi);
-
-			vm_flags_set(next, VM_ACCOUNT); /* Acquires VMA lock. */
+		if (reserved_thp_move) {
+			if (prev)
+				vm_flags_set(prev, VM_RESERVED_THP);
+			if (next)
+				vm_flags_set(next, VM_RESERVED_THP);
 		}
 	}
 }
@@ -1309,7 +1350,6 @@ static int copy_vma_and_data(struct vma_remap_struct *vrm,
 	*new_vma_ptr = new_vma;
 	return err;
 }
-
 /*
  * Perform final tasks for MADV_DONTUNMAP operation, clearing mlock() flag on
  * remaining VMA by convention (it cannot be mlock()'d any longer, as pages in
@@ -1576,6 +1616,23 @@ static bool align_hugetlb(struct vma_remap_struct *vrm)
 	return true;
 }
 
+static bool check_reserved_thp_alignment(struct vma_remap_struct *vrm)
+{
+	if (!(vrm->vma->vm_flags & VM_RESERVED_THP))
+		return true;
+
+	if (!IS_ALIGNED(vrm->addr, HPAGE_PMD_SIZE) ||
+	    !IS_ALIGNED(vrm->old_len, HPAGE_PMD_SIZE) ||
+	    !IS_ALIGNED(vrm->new_len, HPAGE_PMD_SIZE))
+		return false;
+
+	if ((vrm->remap_type == MREMAP_EXPAND || vrm_implies_new_addr(vrm)) &&
+	    !IS_ALIGNED(vrm->new_addr, HPAGE_PMD_SIZE))
+		return false;
+
+	return true;
+}
+
 /*
  * We are mremap()'ing without specifying a fixed address to move to, but are
  * requesting that the VMA's size be increased.
@@ -1745,6 +1802,8 @@ static int check_prep_vma(struct vma_remap_struct *vrm)
 	/* For convenience, we set new_addr even if VMA won't move. */
 	if (!vrm_implies_new_addr(vrm))
 		vrm->new_addr = addr;
+	if (!check_reserved_thp_alignment(vrm))
+		return -EINVAL;
 
 	/* Below only meaningful if we expand or move a VMA. */
 	if (!vrm_will_map_new(vrm))

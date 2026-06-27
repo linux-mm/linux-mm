@@ -48,6 +48,7 @@ struct vma_munmap_struct {
 	unsigned long nr_pages;         /* Number of pages being removed */
 	unsigned long locked_vm;        /* Number of locked pages */
 	unsigned long nr_accounted;     /* Number of VM_ACCOUNT pages */
+	unsigned long nr_reserved_thp;  /* Number of reserved PMD THP slots */
 	unsigned long exec_vm;
 	unsigned long stack_vm;
 	unsigned long data_vm;
