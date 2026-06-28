@@ -1367,6 +1367,7 @@ static __always_inline bool __free_pages_prepare(struct page *page,
 	if (unlikely(order)) {
 		int i;
 
+		hwpoison_rcu_lock();
 		if (compound) {
 			page[1].flags.f &= ~PAGE_FLAGS_SECOND;
 #ifdef NR_PAGES_IN_LARGE_FOLIO
@@ -1384,6 +1385,7 @@ static __always_inline bool __free_pages_prepare(struct page *page,
 			}
 			(page + i)->flags.f &= ~PAGE_FLAGS_CHECK_AT_PREP;
 		}
+		hwpoison_rcu_unlock();
 	}
 	if (folio_test_anon(folio)) {
 		mod_mthp_stat(order, MTHP_STAT_NR_ANON, -1);
@@ -1400,8 +1402,10 @@ static __always_inline bool __free_pages_prepare(struct page *page,
 			return false;
 	}
 
+	hwpoison_rcu_lock_flags(&page->flags.f);
 	page_cpupid_reset_last(page);
 	page->flags.f &= ~PAGE_FLAGS_CHECK_AT_PREP;
+	hwpoison_rcu_unlock_flags(&page->flags.f);
 	page->private = 0;
 	reset_page_owner(page, order);
 	page_table_check_free(page, order);
