@@ -553,8 +553,7 @@ int do_syscall_trace_enter(struct pt_regs *regs)
 		return 0;
 	}
 
-	if (regs->syscall == NO_SYSCALL ||
-	    secure_computing() == -1) {
+	if (regs->syscall == NO_SYSCALL || !secure_computing()) {
 		do_syscall_trace_leave(regs);
 		return 0;
 	}

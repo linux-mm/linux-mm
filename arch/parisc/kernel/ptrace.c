@@ -351,7 +351,7 @@ long do_syscall_trace_enter(struct pt_regs *regs)
 	}
 
 	/* Do the secure computing check after ptrace. */
-	if (secure_computing() == -1)
+	if (!secure_computing())
 		return -1;
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS

@@ -323,7 +323,7 @@ asmlinkage int syscall_trace_enter(struct pt_regs *regs)
 		if (ptrace_report_syscall_entry(regs))
 			return -1;
 
-	if (secure_computing() == -1)
+	if (!secure_computing())
 		return -1;
 
 	if (test_thread_flag(TIF_SYSCALL_TRACEPOINT))
