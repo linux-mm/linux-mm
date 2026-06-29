@@ -185,6 +185,7 @@ do {									\
 struct linux_binprm;
 extern int arch_setup_additional_pages(struct linux_binprm *bprm,
 				       int uses_interp);
+extern bool arch_syscall_is_vdso_sigreturn(struct pt_regs *regs);
 
 /* 1GB of VA */
 #ifdef CONFIG_COMPAT
