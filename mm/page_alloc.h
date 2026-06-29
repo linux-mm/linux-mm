@@ -49,6 +49,16 @@
 #define ALLOC_HIGHATOMIC	0x200 /* Allows access to MIGRATE_HIGHATOMIC */
 #define ALLOC_NOLOCK		0x400 /* Only use spin_trylock in allocation path */
 #define ALLOC_KSWAPD		0x800 /* allow waking of kswapd, __GFP_KSWAPD_RECLAIM set */
+/*
+ * Skip early PFN recording for a page allocation.  Used by
+ * __alloc_tag_add_early_pfn() to avoid recursion when allocating pages for the
+ * early PFN tracking list itself.
+ *
+ * Codetags of the pages allocated with __GFP_NO_CODETAG should be
+ * cleared (via clear_page_tag_ref()) before freeing the pages to prevent
+ * alloc_tag_sub_check() from triggering a warning.
+ */
+#define ALLOC_NO_CODETAG       0x1000
 
 /* Flags that allow allocations below the min watermark. */
 #define ALLOC_RESERVES (ALLOC_NON_BLOCK|ALLOC_MIN_RESERVE|ALLOC_HIGHATOMIC|ALLOC_OOM)
@@ -84,6 +94,8 @@ struct alloc_context {
 	 */
 	enum zone_type highest_zoneidx;
 	bool spread_dirty_pages;
+	/* Only flags that are global to the whole allocation go here. */
+	unsigned int alloc_flags;
 };
 
 /*
@@ -214,7 +226,8 @@ static inline struct page *pageblock_pfn_to_page(unsigned long start_pfn,
 extern void __free_pages_core(struct page *page, unsigned int order,
 		enum meminit_context context);
 
-void post_alloc_hook(struct page *page, unsigned int order, gfp_t gfp_flags);
+void post_alloc_hook(struct page *page, unsigned int order, gfp_t gfp_flags,
+		     unsigned int alloc_flags);
 extern bool free_pages_prepare(struct page *page, unsigned int order);
 
 extern int user_min_free_kbytes;
@@ -245,7 +258,7 @@ struct page *alloc_frozen_pages_nolock_noprof(gfp_t gfp_flags, int nid, unsigned
 void free_frozen_pages_nolock(struct page *page, unsigned int order);
 
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
-		nodemask_t *nodemask);
+		nodemask_t *nodemask, unsigned int alloc_flags);
 #define __alloc_pages(...)			alloc_hooks(__alloc_pages_noprof(__VA_ARGS__))
 
 extern void zone_pcp_reset(struct zone *zone);
