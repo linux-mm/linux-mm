@@ -136,6 +136,7 @@ bool mem_cgroup_kmem_disabled(void)
 }
 
 static void memcg_uncharge(struct mem_cgroup *memcg, unsigned int nr_pages);
+static void mod_memcg_lruvec_state(struct lruvec *lruvec, enum node_stat_item idx, int val);
 
 static void obj_cgroup_release(struct percpu_ref *ref)
 {
@@ -170,9 +171,11 @@ static void obj_cgroup_release(struct percpu_ref *ref)
 
 	if (nr_pages) {
 		struct mem_cgroup *memcg;
+		struct lruvec *lruvec;
 
 		memcg = get_mem_cgroup_from_objcg(objcg);
-		mod_memcg_state(memcg, MEMCG_KMEM, -nr_pages);
+		lruvec = mem_cgroup_lruvec(memcg, NODE_DATA(objcg->nid));
+		mod_lruvec_state(lruvec, NR_KMEM, -nr_pages);
 		memcg1_account_kmem(memcg, -nr_pages);
 		if (!mem_cgroup_is_root(memcg))
 			memcg_uncharge(memcg, nr_pages);
@@ -423,13 +426,13 @@ static const unsigned int memcg_node_stat_items[] = {
 #ifdef CONFIG_HUGETLB_PAGE
 	NR_HUGETLB,
 #endif
+	NR_KMEM,
 };
 
 static const unsigned int memcg_stat_items[] = {
 	MEMCG_SWAP,
 	MEMCG_SOCK,
 	MEMCG_PERCPU_B,
-	MEMCG_KMEM,
 	MEMCG_ZSWAP_B,
 	MEMCG_ZSWAPPED,
 	MEMCG_ZSWAP_INCOMP,
@@ -1546,7 +1549,7 @@ struct memory_stat {
 static const struct memory_stat memory_stats[] = {
 	{ "anon",			NR_ANON_MAPPED			},
 	{ "file",			NR_FILE_PAGES			},
-	{ "kernel",			MEMCG_KMEM			},
+	{ "kernel",			NR_KMEM				},
 	{ "kernel_stack",		NR_KERNEL_STACK_KB		},
 	{ "pagetables",			NR_PAGETABLE			},
 	{ "sec_pagetables",		NR_SECONDARY_PAGETABLE		},
@@ -2907,10 +2910,9 @@ struct mem_cgroup *mem_cgroup_from_virt(void *p)
 	return folio_memcg_check(virt_to_folio(p));
 }
 
-static struct obj_cgroup *__get_obj_cgroup_from_memcg(struct mem_cgroup *memcg)
+static struct obj_cgroup *__get_obj_cgroup_from_memcg(struct mem_cgroup *memcg,
+						      int nid)
 {
-	int nid = numa_node_id();
-
 	for (; memcg; memcg = parent_mem_cgroup(memcg)) {
 		struct obj_cgroup *objcg = rcu_dereference(memcg->nodeinfo[nid]->objcg);
 
@@ -2926,68 +2928,73 @@ static inline struct obj_cgroup *get_obj_cgroup_from_memcg(struct mem_cgroup *me
 	struct obj_cgroup *objcg;
 
 	rcu_read_lock();
-	objcg = __get_obj_cgroup_from_memcg(memcg);
+	objcg = __get_obj_cgroup_from_memcg(memcg, numa_node_id());
 	rcu_read_unlock();
 
 	return objcg;
 }
 
-static struct obj_cgroup *current_objcg_update(void)
+static struct obj_cgroup **current_objcg_update(void)
 {
 	struct mem_cgroup *memcg;
-	struct obj_cgroup *old, *objcg = NULL;
+	struct obj_cgroup **objcgs;
+	unsigned long old_tagged;
+	int nid;
 
 	do {
-		/* Atomically drop the update bit. */
-		old = xchg(&current->objcg, NULL);
-		if (old) {
-			old = (struct obj_cgroup *)
-				((unsigned long)old & ~CURRENT_OBJCG_UPDATE_FLAG);
-			obj_cgroup_put(old);
+		old_tagged = (unsigned long)READ_ONCE(current->objcgs);
+		objcgs = (struct obj_cgroup **)
+			(old_tagged & ~CURRENT_OBJCG_UPDATE_FLAG);
 
-			old = NULL;
+		/*
+		 * If there is no per-node cache (kthread or fork-time
+		 * allocation failure), there is nothing to refresh. The
+		 * cmpxchg below still clears the update bit so we do not
+		 * keep re-entering this slow path.
+		 */
+		if (objcgs) {
+			if (!current->mm || (current->flags & PF_KTHREAD)) {
+				/*
+				 * The task lost its mm: drop the cached
+				 * per-node references; future allocations will
+				 * fall back to root_mem_cgroup.
+				 */
+				for_each_node(nid)
+					obj_cgroup_put(xchg(&objcgs[nid], NULL));
+			} else {
+				/*
+				 * Re-read the memcg under rcu since the task
+				 * may have been asynchronously moved and the
+				 * previous memcg can be offlined.
+				 */
+				rcu_read_lock();
+				memcg = mem_cgroup_from_task(current);
+				for_each_node(nid) {
+					struct obj_cgroup *fresh, *stale;
+
+					fresh = __get_obj_cgroup_from_memcg(memcg, nid);
+					stale = xchg(&objcgs[nid], fresh);
+					obj_cgroup_put(stale);
+				}
+				rcu_read_unlock();
+			}
 		}
 
-		/* If new objcg is NULL, no reason for the second atomic update. */
-		if (!current->mm || (current->flags & PF_KTHREAD))
-			return NULL;
-
 		/*
-		 * Release the objcg pointer from the previous iteration,
-		 * if try_cmpxcg() below fails.
+		 * Publish the cleared-flag pointer. If kmem_attach raced and
+		 * re-set the update bit, retry the whole refresh.
 		 */
-		if (unlikely(objcg)) {
-			obj_cgroup_put(objcg);
-			objcg = NULL;
-		}
+	} while (!try_cmpxchg((unsigned long *)&current->objcgs,
+			      &old_tagged, (unsigned long)objcgs));
 
-		/*
-		 * Obtain the new objcg pointer. The current task can be
-		 * asynchronously moved to another memcg and the previous
-		 * memcg can be offlined. So let's get the memcg pointer
-		 * and try get a reference to objcg under a rcu read lock.
-		 */
-
-		rcu_read_lock();
-		memcg = mem_cgroup_from_task(current);
-		objcg = __get_obj_cgroup_from_memcg(memcg);
-		rcu_read_unlock();
-
-		/*
-		 * Try set up a new objcg pointer atomically. If it
-		 * fails, it means the update flag was set concurrently, so
-		 * the whole procedure should be repeated.
-		 */
-	} while (!try_cmpxchg(&current->objcg, &old, objcg));
-
-	return objcg;
+	return objcgs;
 }
 
-__always_inline struct obj_cgroup *current_obj_cgroup(void)
+__always_inline static struct obj_cgroup *__current_obj_cgroup(int nid)
 {
 	struct mem_cgroup *memcg;
 	struct obj_cgroup *objcg;
-	int nid = numa_node_id();
+	struct obj_cgroup **objcgs;
 
 	if (IS_ENABLED(CONFIG_MEMCG_NMI_UNSAFE) && in_nmi())
 		return NULL;
@@ -2997,14 +3004,16 @@ __always_inline struct obj_cgroup *current_obj_cgroup(void)
 		if (unlikely(memcg))
 			goto from_memcg;
 
-		objcg = READ_ONCE(current->objcg);
-		if (unlikely((unsigned long)objcg & CURRENT_OBJCG_UPDATE_FLAG))
-			objcg = current_objcg_update();
+		objcgs = READ_ONCE(current->objcgs);
+		if (unlikely((unsigned long)objcgs & CURRENT_OBJCG_UPDATE_FLAG))
+			objcgs = current_objcg_update();
 		/*
-		 * Objcg reference is kept by the task, so it's safe
-		 * to use the objcg by the current task.
+		 * Per-node objcg references are kept by the task, so it's
+		 * safe to use them by the current task.
 		 */
-		return objcg ? : rcu_dereference_check(root_mem_cgroup->nodeinfo[nid]->objcg, 1);
+		if (objcgs && (objcg = objcgs[nid]))
+			return objcg;
+		return rcu_dereference_check(root_mem_cgroup->nodeinfo[nid]->objcg, 1);
 	}
 
 	memcg = this_cpu_read(int_active_memcg);
@@ -3029,6 +3038,11 @@ from_memcg:
 	return rcu_dereference_check(root_mem_cgroup->nodeinfo[nid]->objcg, 1);
 }
 
+__always_inline struct obj_cgroup *current_obj_cgroup(void)
+{
+	return __current_obj_cgroup(numa_node_id());
+}
+
 struct obj_cgroup *get_obj_cgroup_from_folio(struct folio *folio)
 {
 	struct obj_cgroup *objcg;
@@ -3041,20 +3055,26 @@ struct obj_cgroup *get_obj_cgroup_from_folio(struct folio *folio)
 }
 
 #ifdef CONFIG_MEMCG_NMI_SAFETY_REQUIRES_ATOMIC
-static inline void account_kmem_nmi_safe(struct mem_cgroup *memcg, int val)
+static inline void account_kmem_nmi_safe(struct mem_cgroup *memcg, int nid, int val)
 {
 	if (likely(!in_nmi())) {
-		mod_memcg_state(memcg, MEMCG_KMEM, val);
+		struct lruvec *lruvec = mem_cgroup_lruvec(memcg, NODE_DATA(nid));
+
+		mod_lruvec_state(lruvec, NR_KMEM, val);
 	} else {
+		struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
+
 		/* preemption is disabled in_nmi(). */
 		__css_rstat_updated(&memcg->css, smp_processor_id());
-		atomic_add(val, &memcg->kmem_stat);
+		atomic_add(val, &pn->kmem);
 	}
 }
 #else
-static inline void account_kmem_nmi_safe(struct mem_cgroup *memcg, int val)
+static inline void account_kmem_nmi_safe(struct mem_cgroup *memcg, int nid, int val)
 {
-	mod_memcg_state(memcg, MEMCG_KMEM, val);
+	struct lruvec *lruvec = mem_cgroup_lruvec(memcg, NODE_DATA(nid));
+
+	mod_lruvec_state(lruvec, NR_KMEM, val);
 }
 #endif
 
@@ -3070,7 +3090,7 @@ static void obj_cgroup_uncharge_pages(struct obj_cgroup *objcg,
 
 	memcg = get_mem_cgroup_from_objcg(objcg);
 
-	account_kmem_nmi_safe(memcg, -nr_pages);
+	account_kmem_nmi_safe(memcg, objcg->nid, -nr_pages);
 	memcg1_account_kmem(memcg, -nr_pages);
 	if (!mem_cgroup_is_root(memcg))
 		refill_stock(memcg, nr_pages);
@@ -3098,7 +3118,7 @@ static int obj_cgroup_charge_pages(struct obj_cgroup *objcg, gfp_t gfp,
 	if (ret)
 		goto out;
 
-	account_kmem_nmi_safe(memcg, nr_pages);
+	account_kmem_nmi_safe(memcg, objcg->nid, nr_pages);
 	memcg1_account_kmem(memcg, nr_pages);
 out:
 	css_put(&memcg->css);
@@ -3136,7 +3156,7 @@ int __memcg_kmem_charge_page(struct page *page, gfp_t gfp, int order)
 	struct obj_cgroup *objcg;
 	int ret = 0;
 
-	objcg = current_obj_cgroup();
+	objcg = __current_obj_cgroup(page_to_nid(page));
 	if (objcg && !obj_cgroup_is_root(objcg)) {
 		ret = obj_cgroup_charge_pages(objcg, gfp, 1 << order);
 		if (!ret) {
@@ -3326,10 +3346,11 @@ static void drain_obj_stock_slot(struct obj_stock_pcp *stock, int i)
 
 		if (nr_pages) {
 			struct mem_cgroup *memcg;
+			struct lruvec *lruvec;
 
 			memcg = get_mem_cgroup_from_objcg(old);
-
-			mod_memcg_state(memcg, MEMCG_KMEM, -nr_pages);
+			lruvec = mem_cgroup_lruvec(memcg, NODE_DATA(old->nid));
+			mod_lruvec_state(lruvec, NR_KMEM, -nr_pages);
 			memcg1_account_kmem(memcg, -nr_pages);
 			if (!mem_cgroup_is_root(memcg))
 				memcg_uncharge(memcg, nr_pages);
@@ -3338,7 +3359,7 @@ static void drain_obj_stock_slot(struct obj_stock_pcp *stock, int i)
 		}
 
 		/*
-		 * The leftover is flushed to the centralized per-memcg value.
+		 * The leftover is flushed to the per-node per-memcg value.
 		 * On the next attempt to refill obj stock it will be moved
 		 * to a per-cpu stock (probably, on an other CPU), see
 		 * refill_obj_stock().
@@ -3525,11 +3546,63 @@ void obj_cgroup_uncharge(struct obj_cgroup *objcg, size_t size)
 	refill_obj_stock(objcg, size, true);
 }
 
+/*
+ * obj_cgroup_account_kmem - account KMEM for nr_pages
+ *
+ * Called after obj_cgroup_precharge() when the allocation succeeds.
+ * Accounts KMEM for nr_pages on the objcg's node.
+ */
+void obj_cgroup_account_kmem(struct obj_cgroup *objcg, unsigned int nr_pages)
+{
+	struct mem_cgroup *memcg;
+
+	rcu_read_lock();
+	memcg = obj_cgroup_memcg(objcg);
+	account_kmem_nmi_safe(memcg, objcg->nid, nr_pages);
+	memcg1_account_kmem(memcg, nr_pages);
+	rcu_read_unlock();
+}
+
+/*
+ * obj_cgroup_precharge - reserve pages without KMEM accounting
+ *
+ * Reserves page counter credits for limit enforcement. Does not update
+ * KMEM stats or the per-CPU obj stock, because precharge decouples
+ * the page counter charge from KMEM accounting (which happens later
+ * per-node via obj_cgroup_account_kmem).
+ *
+ * On failure, use obj_cgroup_unprecharge() to release the reservation.
+ */
+int obj_cgroup_precharge(struct obj_cgroup *objcg, gfp_t gfp,
+			 unsigned int nr_pages)
+{
+	struct mem_cgroup *memcg;
+	int ret;
+
+	memcg = get_mem_cgroup_from_objcg(objcg);
+	ret = try_charge_memcg(memcg, gfp, nr_pages);
+	css_put(&memcg->css);
+
+	return ret;
+}
+
+void obj_cgroup_unprecharge(struct obj_cgroup *objcg, unsigned int nr_pages)
+{
+	struct mem_cgroup *memcg;
+
+	memcg = get_mem_cgroup_from_objcg(objcg);
+	if (!mem_cgroup_is_root(memcg))
+		refill_stock(memcg, nr_pages);
+	css_put(&memcg->css);
+}
+
 static inline size_t obj_full_size(struct kmem_cache *s)
 {
 	/*
 	 * For each accounted object there is an extra space which is used
-	 * to store obj_cgroup membership. Charge it too.
+	 * to store obj_cgroup membership. Charge it too. In addition, we
+	 * allocate obj_exts array on the same node as slab_nid(), so per-node
+	 * kmem accounting is fine.
 	 */
 	return s->size + sizeof(struct obj_cgroup *);
 }
@@ -3589,6 +3662,16 @@ bool __memcg_slab_post_alloc_hook(struct kmem_cache *s, struct list_lru *lru,
 		}
 
 		/*
+		 * Charge against the per-node objcg matching the slab's node
+		 * so the stock's per-objcg vmstat batch (keyed by objcg->nid)
+		 * aligns with the physical slab. May transiently fall back to
+		 * root if the per-node entry is being drained.
+		 */
+		objcg = __current_obj_cgroup(slab_nid(slab));
+		if (!objcg || obj_cgroup_is_root(objcg))
+			continue;
+
+		/*
 		 * if we fail and size is 1, memcg_alloc_abort_single() will
 		 * just free the object, which is ok as we have not assigned
 		 * objcg to its obj_ext yet
@@ -3596,7 +3679,7 @@ bool __memcg_slab_post_alloc_hook(struct kmem_cache *s, struct list_lru *lru,
 		 * for larger sizes, kmem_cache_free_bulk() will uncharge
 		 * any objects that were already charged and obj_ext assigned
 		 *
-		 * TODO: we could batch this until slab_pgdat(slab) changes
+		 * TODO: we could batch this until slab_nid(slab) changes
 		 * between iterations, with a more complicated undo
 		 */
 		stock = trylock_stock();
@@ -4230,6 +4313,7 @@ static int mem_cgroup_css_online(struct cgroup_subsys_state *css)
 		if (unlikely(mem_cgroup_is_root(memcg)))
 			objcg->is_root = true;
 
+		objcg->nid = nid;
 		objcg->memcg = memcg;
 		rcu_assign_pointer(memcg->nodeinfo[nid]->objcg, objcg);
 		obj_cgroup_get(objcg);
@@ -4433,15 +4517,6 @@ static void flush_nmi_stats(struct mem_cgroup *memcg, struct mem_cgroup *parent,
 {
 	int nid;
 
-	if (atomic_read(&memcg->kmem_stat)) {
-		int kmem = atomic_xchg(&memcg->kmem_stat, 0);
-		int index = memcg_stats_index(MEMCG_KMEM);
-
-		memcg->vmstats->state[index] += kmem;
-		if (parent)
-			parent->vmstats->state_pending[index] += kmem;
-	}
-
 	for_each_node_state(nid, N_MEMORY) {
 		struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
 		struct lruvec_stats *lstats = pn->lruvec_stats;
@@ -4471,6 +4546,18 @@ static void flush_nmi_stats(struct mem_cgroup *memcg, struct mem_cgroup *parent,
 			memcg->vmstats->state[index] += slab;
 			if (parent)
 				parent->vmstats->state_pending[index] += slab;
+		}
+		if (atomic_read(&pn->kmem)) {
+			int kmem = atomic_xchg(&pn->kmem, 0);
+			int index = memcg_stats_index(NR_KMEM);
+
+			mod_node_page_state(NODE_DATA(nid), NR_KMEM, kmem);
+			lstats->state[index] += kmem;
+			memcg->vmstats->state[index] += kmem;
+			if (plstats)
+				plstats->state_pending[index] += kmem;
+			if (parent)
+				parent->vmstats->state_pending[index] += kmem;
 		}
 	}
 }
@@ -4545,22 +4632,47 @@ static void mem_cgroup_css_rstat_flush(struct cgroup_subsys_state *css, int cpu)
 
 static void mem_cgroup_fork(struct task_struct *task)
 {
+	struct obj_cgroup **objcgs;
+
 	/*
-	 * Set the update flag to cause task->objcg to be initialized lazily
-	 * on the first allocation. It can be done without any synchronization
-	 * because it's always performed on the current task, so does
-	 * current_objcg_update().
+	 * Kthreads do not need a per-node cache; their kmem allocations fall
+	 * back to root_mem_cgroup via current_obj_cgroup().
 	 */
-	task->objcg = (struct obj_cgroup *)CURRENT_OBJCG_UPDATE_FLAG;
+	if (task->flags & PF_KTHREAD) {
+		task->objcgs = NULL;
+		return;
+	}
+
+	/*
+	 * Eagerly allocate the per-node cache so that current_objcg_update()
+	 * never has to allocate from potentially-atomic kmem allocation
+	 * paths. On allocation failure this task will use root_mem_cgroup
+	 * for kmem accounting.
+	 *
+	 * Tag with the update flag so the first kmem allocation populates
+	 * the entries via current_objcg_update().
+	 */
+	objcgs = kcalloc(nr_node_ids, sizeof(*objcgs), GFP_KERNEL);
+	if (objcgs)
+		task->objcgs = (struct obj_cgroup **)
+			((unsigned long)objcgs | CURRENT_OBJCG_UPDATE_FLAG);
+	else
+		task->objcgs = NULL;
 }
 
 static void mem_cgroup_exit(struct task_struct *task)
 {
-	struct obj_cgroup *objcg = task->objcg;
+	struct obj_cgroup **objcgs;
+	int nid;
 
-	objcg = (struct obj_cgroup *)
-		((unsigned long)objcg & ~CURRENT_OBJCG_UPDATE_FLAG);
-	obj_cgroup_put(objcg);
+	objcgs = (struct obj_cgroup **)
+		((unsigned long)task->objcgs & ~CURRENT_OBJCG_UPDATE_FLAG);
+
+	if (objcgs) {
+		for_each_node(nid)
+			obj_cgroup_put(objcgs[nid]);
+		kfree(objcgs);
+	}
 
 	/*
 	 * Some kernel allocations can happen after this point,
@@ -4568,7 +4680,7 @@ static void mem_cgroup_exit(struct task_struct *task)
 	 * because it's always performed on the current task, so does
 	 * current_objcg_update().
 	 */
-	task->objcg = NULL;
+	task->objcgs = NULL;
 }
 
 #ifdef CONFIG_LRU_GEN
@@ -4600,7 +4712,7 @@ static void mem_cgroup_kmem_attach(struct cgroup_taskset *tset)
 
 	cgroup_taskset_for_each(task, css, tset) {
 		/* atomically set the update bit */
-		set_bit(CURRENT_OBJCG_UPDATE_BIT, (unsigned long *)&task->objcg);
+		set_bit(CURRENT_OBJCG_UPDATE_BIT, (unsigned long *)&task->objcgs);
 	}
 }
 
@@ -5235,7 +5347,9 @@ static void uncharge_batch(const struct uncharge_gather *ug)
 	if (ug->nr_memory) {
 		memcg_uncharge(memcg, ug->nr_memory);
 		if (ug->nr_kmem) {
-			mod_memcg_state(memcg, MEMCG_KMEM, -ug->nr_kmem);
+			struct lruvec *lruvec =
+				mem_cgroup_lruvec(memcg, NODE_DATA(ug->objcg->nid));
+			mod_lruvec_state(lruvec, NR_KMEM, -ug->nr_kmem);
 			memcg1_account_kmem(memcg, -ug->nr_kmem);
 		}
 		memcg1_oom_recover(memcg);
