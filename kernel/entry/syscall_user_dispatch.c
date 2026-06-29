@@ -32,6 +32,11 @@ static void trigger_sigsys(struct pt_regs *regs)
 	force_sig_info(&info);
 }
 
+bool __weak arch_syscall_is_vdso_sigreturn(struct pt_regs *regs)
+{
+	return false;
+}
+
 bool syscall_user_dispatch(struct pt_regs *regs)
 {
 	struct syscall_user_dispatch *sd = &current->syscall_dispatch;

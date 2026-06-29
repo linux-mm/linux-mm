@@ -10,6 +10,7 @@
 
 #ifdef CONFIG_GENERIC_ENTRY
 
+bool arch_syscall_is_vdso_sigreturn(struct pt_regs *regs);
 int set_syscall_user_dispatch(unsigned long mode, unsigned long offset,
 			      unsigned long len, char __user *selector);
 
