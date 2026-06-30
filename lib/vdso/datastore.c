@@ -32,7 +32,7 @@ struct vdso_arch_data *vdso_k_arch_data __ro_after_init =
 void __init vdso_setup_data_pages(void)
 {
 	unsigned int order = get_order(VDSO_NR_PAGES * PAGE_SIZE);
-	struct page *pages;
+	struct page *vdso_data_pages;
 
 	/*
 	 * Allocate the data pages dynamically. SPARC does not support mapping
@@ -42,24 +42,24 @@ void __init vdso_setup_data_pages(void)
 	 * Do not use folios. In time namespaces the pages are mapped in a different order
 	 * to userspace, which is not handled by the folio optimizations in finish_fault().
 	 */
-	pages = alloc_pages(GFP_KERNEL, order);
-	if (!pages)
+	vdso_data_pages = alloc_pages(GFP_KERNEL, order);
+	if (!vdso_data_pages)
 		panic("Unable to allocate VDSO storage pages");
 
 	/* The pages are mapped one-by-one into userspace and each one needs to be refcounted. */
-	split_page(pages, order);
+	split_page(vdso_data_pages, order);
 
 	/* Move the data already written by other subsystems to the new pages */
-	memcpy(page_address(pages), vdso_initdata, VDSO_NR_PAGES * PAGE_SIZE);
+	memcpy(page_address(vdso_data_pages), vdso_initdata, VDSO_NR_PAGES * PAGE_SIZE);
 
 	if (IS_ENABLED(CONFIG_GENERIC_GETTIMEOFDAY))
-		vdso_k_time_data = page_address(pages + VDSO_TIME_PAGE_OFFSET);
+		vdso_k_time_data = page_address(vdso_data_pages + VDSO_TIME_PAGE_OFFSET);
 
 	if (IS_ENABLED(CONFIG_VDSO_GETRANDOM))
-		vdso_k_rng_data = page_address(pages + VDSO_RNG_PAGE_OFFSET);
+		vdso_k_rng_data = page_address(vdso_data_pages + VDSO_RNG_PAGE_OFFSET);
 
 	if (IS_ENABLED(CONFIG_ARCH_HAS_VDSO_ARCH_DATA))
-		vdso_k_arch_data = page_address(pages + VDSO_ARCH_PAGES_START);
+		vdso_k_arch_data = page_address(vdso_data_pages + VDSO_ARCH_PAGES_START);
 }
 
 static vm_fault_t vvar_fault(const struct vm_special_mapping *sm,
