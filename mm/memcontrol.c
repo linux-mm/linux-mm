@@ -2301,7 +2301,8 @@ static bool is_memcg_drain_needed(struct memcg_stock_pcp *stock,
 	return flush;
 }
 
-static void schedule_drain_work(int cpu, struct work_struct *work)
+static void
+schedule_drain_work(int cpu, struct work_struct *work, unsigned long *flags)
 {
 	/*
 	 * Protect housekeeping cpumask read and work enqueue together
@@ -2310,8 +2311,21 @@ static void schedule_drain_work(int cpu, struct work_struct *work)
 	 * pending work on newly isolated CPUs.
 	 */
 	guard(rcu)();
-	if (!cpu_is_isolated(cpu))
-		queue_work_on(cpu, memcg_wq, work);
+	if (cpu_is_isolated(cpu)) {
+		/*
+		 * The target CPU is isolated: the drain work was not
+		 * queued. Clear FLUSHING_CACHED_CHARGE so a future
+		 * drain_all_stock() call can retry instead of skipping
+		 * this stock forever.
+		 *
+		 * The cached charge itself is left untouched here; it
+		 * will be drained the next time drain_local_stock() runs
+		 * on this CPU (e.g. after it leaves isolation).
+		 */
+		clear_bit(FLUSHING_CACHED_CHARGE, flags);
+		return;
+	}
+	queue_work_on(cpu, memcg_wq, work);
 }
 
 /*
@@ -2344,7 +2358,8 @@ void drain_all_stock(struct mem_cgroup *root_memcg)
 			if (cpu == curcpu)
 				drain_local_memcg_stock(&memcg_st->work);
 			else
-				schedule_drain_work(cpu, &memcg_st->work);
+				schedule_drain_work(cpu, &memcg_st->work,
+						    &memcg_st->flags);
 		}
 
 		if (!test_bit(FLUSHING_CACHED_CHARGE, &obj_st->flags) &&
@@ -2354,7 +2369,8 @@ void drain_all_stock(struct mem_cgroup *root_memcg)
 			if (cpu == curcpu)
 				drain_local_obj_stock(&obj_st->work);
 			else
-				schedule_drain_work(cpu, &obj_st->work);
+				schedule_drain_work(cpu, &obj_st->work,
+						    &obj_st->flags);
 		}
 	}
 	migrate_enable();
