@@ -1774,6 +1774,8 @@ static int __damon_start(struct damon_ctx *ctx)
 	return err;
 }
 
+static int __damon_commit_ctx(struct damon_ctx *dst, struct damon_ctx *src);
+
 /**
  * damon_start() - Starts the monitorings for a given group of contexts.
  * @ctxs:	an array of the pointers for contexts to start monitoring
@@ -1791,13 +1793,22 @@ static int __damon_start(struct damon_ctx *ctx)
  */
 int damon_start(struct damon_ctx **ctxs, int nr_ctxs, bool exclusive)
 {
+	struct damon_ctx *test_ctx;
 	int i;
 	int err = 0;
 
+	test_ctx = damon_new_ctx();
+	if (!test_ctx)
+		return -ENOMEM;
+
 	for (i = 0; i < nr_ctxs; i++) {
-		if (!is_power_of_2(ctxs[i]->min_region_sz))
-			return -EINVAL;
+		err = __damon_commit_ctx(test_ctx, ctxs[i]);
+		if (err) {
+			damon_destroy_ctx(test_ctx);
+			return err;
+		}
 	}
+	damon_destroy_ctx(test_ctx);
 
 	mutex_lock(&damon_lock);
 	if ((exclusive && nr_running_ctxs) ||
