@@ -1559,6 +1559,8 @@ static int __init bootmem_init_numa(void)
 		else
 			err = numa_parse_sun4u();
 	}
+	if (!err)
+		node_possible_map = node_online_map;
 	return err;
 }
 
