@@ -1179,7 +1179,7 @@ void __init mem_topology_setup(void)
 	 * that we expect to make use of for this platform's affinity
 	 * calculations.
 	 */
-	nodes_and(node_possible_map, node_possible_map, node_online_map);
+	node_possible_map = node_online_map;
 
 	find_possible_nodes();
 
