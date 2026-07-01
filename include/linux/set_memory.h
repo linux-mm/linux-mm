@@ -72,6 +72,17 @@ static inline int clear_mce_nospec(unsigned long pfn)
 }
 #endif
 
+#ifndef CONFIG_ARM64
+static inline int set_memory_device(unsigned long addr, int numpages)
+{
+	return 0;
+}
+static inline int set_memory_normal(unsigned long addr, int numpages)
+{
+	return 0;
+}
+#endif
+
 #ifndef CONFIG_ARCH_HAS_MEM_ENCRYPT
 static inline int set_memory_encrypted(unsigned long addr, int numpages)
 {

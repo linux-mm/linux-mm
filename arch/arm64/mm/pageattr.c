@@ -251,6 +251,22 @@ int set_memory_valid(unsigned long addr, int numpages, int enable)
 					__pgprot(PTE_PRESENT_VALID_KERNEL));
 }
 
+int set_memory_device(unsigned long addr, int numpages)
+{
+	return __change_memory_common(addr, PAGE_SIZE * numpages,
+				__pgprot(PROT_DEVICE_nGnRnE),
+				__pgprot(PROT_NORMAL));
+}
+EXPORT_SYMBOL_GPL(set_memory_device);
+
+int set_memory_normal(unsigned long addr, int numpages)
+{
+	return __change_memory_common(addr, PAGE_SIZE * numpages,
+				__pgprot(PROT_NORMAL),
+				__pgprot(PROT_DEVICE_nGnRnE));
+}
+EXPORT_SYMBOL_GPL(set_memory_normal);
+
 int set_direct_map_invalid_noflush(struct page *page)
 {
 	pgprot_t clear_mask = __pgprot(PTE_PRESENT_VALID_KERNEL);
