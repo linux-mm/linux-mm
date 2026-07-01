@@ -451,6 +451,7 @@ int hugepage_madvise(struct vm_area_struct *vma,
 	switch (advice) {
 	case MADV_HUGEPAGE:
 		*vm_flags &= ~VM_NOHUGEPAGE;
+		*vm_flags &= ~VM_RESERVED_THP;
 		*vm_flags |= VM_HUGEPAGE;
 		/*
 		 * If the vma become good for khugepaged to scan,
@@ -461,6 +462,7 @@ int hugepage_madvise(struct vm_area_struct *vma,
 		break;
 	case MADV_NOHUGEPAGE:
 		*vm_flags &= ~VM_HUGEPAGE;
+		*vm_flags &= ~VM_RESERVED_THP;
 		*vm_flags |= VM_NOHUGEPAGE;
 		/*
 		 * Setting VM_NOHUGEPAGE will prevent khugepaged from scanning
@@ -468,6 +470,12 @@ int hugepage_madvise(struct vm_area_struct *vma,
 		 * it got registered before VM_NOHUGEPAGE was set.
 		 */
 		break;
+	case MADV_RESERVED_THP:
+		*vm_flags &= ~(VM_HUGEPAGE | VM_NOHUGEPAGE);
+		*vm_flags |= VM_RESERVED_THP;
+		break;
+	default:
+		return -EINVAL;
 	}
 
 	return 0;

@@ -330,6 +330,8 @@ unsigned long thp_vma_allowable_orders(struct vm_area_struct *vma,
 
 		if (vm_flags & VM_HUGEPAGE)
 			mask |= READ_ONCE(huge_anon_orders_madvise);
+		if (vm_flags & VM_RESERVED_THP)
+			mask |= BIT(PMD_ORDER);
 		if (hugepage_global_always() ||
 		    ((vm_flags & VM_HUGEPAGE) && hugepage_global_enabled()))
 			mask |= READ_ONCE(huge_anon_orders_inherit);
@@ -371,7 +373,7 @@ static inline bool vma_thp_disabled(struct vm_area_struct *vma,
 	 * Are THPs disabled only for VMAs where we didn't get an explicit
 	 * advise to use them?
 	 */
-	if (vm_flags & VM_HUGEPAGE)
+	if (vm_flags & (VM_HUGEPAGE | VM_RESERVED_THP))
 		return false;
 	/*
 	 * Forcing a collapse (e.g., madv_collapse), is a clear advice to

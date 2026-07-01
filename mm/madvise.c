@@ -13,6 +13,7 @@
 #include <linux/page-isolation.h>
 #include <linux/page_idle.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/huge_mm.h>
 #include <linux/hugetlb.h>
 #include <linux/falloc.h>
 #include <linux/fadvise.h>
@@ -1330,6 +1331,65 @@ static bool can_madvise_modify(struct madvise_behavior *madv_behavior)
 }
 #endif
 
+static bool reserved_thp_madvise_aligned(struct vm_area_struct *vma,
+					 struct madvise_behavior_range *range)
+{
+	if (!(vma->vm_flags & VM_RESERVED_THP))
+		return true;
+
+	return IS_ALIGNED(range->start, HPAGE_PMD_SIZE) &&
+	       IS_ALIGNED(range->end, HPAGE_PMD_SIZE);
+}
+
+static int madvise_hugepage_policy(struct madvise_behavior *madv_behavior,
+				   vm_flags_t *new_flags,
+				   unsigned long *reserved_hpages,
+				   bool *charge_reserved_thp,
+				   bool *uncharge_reserved_thp)
+{
+	struct vm_area_struct *vma = madv_behavior->vma;
+	struct madvise_behavior_range *range = &madv_behavior->range;
+	unsigned long hpages;
+	int behavior = madv_behavior->behavior;
+	int error;
+
+	switch (behavior) {
+	case MADV_HUGEPAGE:
+	case MADV_NOHUGEPAGE:
+		error = hugepage_madvise(vma, new_flags, behavior);
+		if (error)
+			return error;
+		*uncharge_reserved_thp = (vma->vm_flags & VM_RESERVED_THP) &&
+					 !(*new_flags & VM_RESERVED_THP);
+		return 0;
+	case MADV_RESERVED_THP:
+		if (!IS_ENABLED(CONFIG_64BIT))
+			return -EINVAL;
+		if (!vma_is_anonymous(vma) || (*new_flags & VM_SHARED) ||
+		    (*new_flags & VM_SPECIAL))
+			return -EINVAL;
+		if (!IS_ALIGNED(range->start, HPAGE_PMD_SIZE) ||
+		    !IS_ALIGNED(range->end, HPAGE_PMD_SIZE))
+			return -EINVAL;
+
+		error = hugepage_madvise(vma, new_flags, behavior);
+		if (error)
+			return error;
+
+		if (!(vma->vm_flags & VM_RESERVED_THP)) {
+			hpages = reserved_thp_hpage_nr(range->start, range->end);
+			error = reserved_thp_charge(hpages);
+			if (error)
+				return error;
+			*reserved_hpages = hpages;
+			*charge_reserved_thp = true;
+		}
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
 /*
  * Apply an madvise behavior to a region of a vma.  madvise_update_vma
  * will handle splitting a vm area into separate areas, each area with its own
@@ -1341,6 +1401,9 @@ static int madvise_vma_behavior(struct madvise_behavior *madv_behavior)
 	struct vm_area_struct *vma = madv_behavior->vma;
 	vm_flags_t new_flags = vma->vm_flags;
 	struct madvise_behavior_range *range = &madv_behavior->range;
+	unsigned long reserved_hpages = 0;
+	bool charge_reserved_thp = false;
+	bool uncharge_reserved_thp = false;
 	int error;
 
 	if (unlikely(!can_madvise_modify(madv_behavior)))
@@ -1352,14 +1415,22 @@ static int madvise_vma_behavior(struct madvise_behavior *madv_behavior)
 	case MADV_WILLNEED:
 		return madvise_willneed(madv_behavior);
 	case MADV_COLD:
+		if (!reserved_thp_madvise_aligned(vma, range))
+			return -EINVAL;
 		return madvise_cold(madv_behavior);
 	case MADV_PAGEOUT:
+		if (!reserved_thp_madvise_aligned(vma, range))
+			return -EINVAL;
 		return madvise_pageout(madv_behavior);
 	case MADV_FREE:
 	case MADV_DONTNEED:
 	case MADV_DONTNEED_LOCKED:
+		if (!reserved_thp_madvise_aligned(vma, range))
+			return -EINVAL;
 		return madvise_dontneed_free(madv_behavior);
 	case MADV_COLLAPSE:
+		if (vma->vm_flags & VM_RESERVED_THP)
+			return -EINVAL;
 		return madvise_collapse(vma, range->start, range->end,
 			&madv_behavior->lock_dropped);
 	case MADV_GUARD_INSTALL:
@@ -1415,7 +1486,11 @@ static int madvise_vma_behavior(struct madvise_behavior *madv_behavior)
 		break;
 	case MADV_HUGEPAGE:
 	case MADV_NOHUGEPAGE:
-		error = hugepage_madvise(vma, &new_flags, behavior);
+	case MADV_RESERVED_THP:
+		error = madvise_hugepage_policy(madv_behavior, &new_flags,
+						&reserved_hpages,
+						&charge_reserved_thp,
+						&uncharge_reserved_thp);
 		if (error)
 			goto out;
 		break;
@@ -1430,6 +1505,11 @@ static int madvise_vma_behavior(struct madvise_behavior *madv_behavior)
 	VM_WARN_ON_ONCE(madv_behavior->lock_mode != MADVISE_MMAP_WRITE_LOCK);
 
 	error = madvise_update_vma(new_flags, madv_behavior);
+	if (error && charge_reserved_thp)
+		reserved_thp_uncharge(reserved_hpages);
+	else if (!error && uncharge_reserved_thp)
+		reserved_thp_uncharge(reserved_thp_hpage_nr(range->start,
+							    range->end));
 out:
 	/*
 	 * madvise() returns EAGAIN if kernel resources, such as
@@ -1540,6 +1620,7 @@ madvise_behavior_valid(int behavior)
 	case MADV_HUGEPAGE:
 	case MADV_NOHUGEPAGE:
 	case MADV_COLLAPSE:
+	case MADV_RESERVED_THP:
 #endif
 	case MADV_DONTDUMP:
 	case MADV_DODUMP:

@@ -1482,6 +1482,7 @@ unsigned int reclaim_clean_pages_from_list(struct zone *zone,
 #define ALLOC_HIGHATOMIC	0x200 /* Allows access to MIGRATE_HIGHATOMIC */
 #define ALLOC_TRYLOCK		0x400 /* Only use spin_trylock in allocation path */
 #define ALLOC_KSWAPD		0x800 /* allow waking of kswapd, __GFP_KSWAPD_RECLAIM set */
+#define ALLOC_RESERVED_THP	0x1000 /* Allows access to reserved THP pageblocks */
 
 /* Flags that allow allocations below the min watermark. */
 #define ALLOC_RESERVES (ALLOC_NON_BLOCK|ALLOC_MIN_RESERVE|ALLOC_HIGHATOMIC|ALLOC_OOM)
@@ -1954,5 +1955,10 @@ static inline int get_sysctl_max_map_count(void)
 
 bool may_expand_vm(struct mm_struct *mm, const vma_flags_t *vma_flags,
 		   unsigned long npages);
+
+unsigned long reserved_thp_pageblocks(unsigned long nr_hpages);
+unsigned long reserved_thp_hpage_nr(unsigned long start, unsigned long end);
+int reserved_thp_charge(unsigned long nr_hpages);
+void reserved_thp_uncharge(unsigned long nr_hpages);
 
 #endif	/* __MM_INTERNAL_H */

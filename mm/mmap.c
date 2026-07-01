@@ -1251,6 +1251,7 @@ unsigned long tear_down_vmas(struct mm_struct *mm, struct vma_iterator *vmi,
 		struct vm_area_struct *vma, unsigned long end)
 {
 	unsigned long nr_accounted = 0;
+	unsigned long nr_reserved_thp = 0;
 	int count = 0;
 
 	mmap_assert_write_locked(mm);
@@ -1258,6 +1259,10 @@ unsigned long tear_down_vmas(struct mm_struct *mm, struct vma_iterator *vmi,
 	do {
 		if (vma->vm_flags & VM_ACCOUNT)
 			nr_accounted += vma_pages(vma);
+		if (vma->vm_flags & VM_RESERVED_THP)
+			nr_reserved_thp +=
+				reserved_thp_hpage_nr(vma->vm_start,
+						      vma->vm_end);
 		vma_mark_detached(vma);
 		remove_vma(vma);
 		count++;
@@ -1266,6 +1271,7 @@ unsigned long tear_down_vmas(struct mm_struct *mm, struct vma_iterator *vmi,
 	} while (vma && vma->vm_end <= end);
 
 	VM_WARN_ON_ONCE(count != mm->map_count);
+	reserved_thp_uncharge(nr_reserved_thp);
 	return nr_accounted;
 }
 
@@ -1733,6 +1739,7 @@ __latent_entropy int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	struct vm_area_struct *mpnt, *tmp;
 	int retval;
 	unsigned long charge = 0;
+	unsigned long reserved_charge = 0;
 	LIST_HEAD(uf);
 	VMA_ITERATOR(vmi, mm, 0);
 
@@ -1775,12 +1782,22 @@ __latent_entropy int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 			continue;
 		}
 		charge = 0;
+		reserved_charge = 0;
 		if (mpnt->vm_flags & VM_ACCOUNT) {
 			unsigned long len = vma_pages(mpnt);
 
 			if (security_vm_enough_memory_mm(oldmm, len)) /* sic */
 				goto fail_nomem;
 			charge = len;
+		}
+		if (mpnt->vm_flags & VM_RESERVED_THP) {
+			unsigned long len;
+
+			len = reserved_thp_hpage_nr(mpnt->vm_start,
+						    mpnt->vm_end);
+			if (reserved_thp_charge(len))
+				goto fail_nomem;
+			reserved_charge = len;
 		}
 
 		tmp = vm_area_dup(mpnt);
@@ -1916,6 +1933,7 @@ fail_nomem_policy:
 	vm_area_free(tmp);
 fail_nomem:
 	retval = -ENOMEM;
+	reserved_thp_uncharge(reserved_charge);
 	vm_unacct_memory(charge);
 	goto loop_out;
 }
