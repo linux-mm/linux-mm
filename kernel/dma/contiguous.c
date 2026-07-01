@@ -52,7 +52,7 @@
 #define CMA_SIZE_MBYTES 0
 #endif
 
-static struct cma *dma_contiguous_areas[MAX_CMA_AREAS];
+static struct cma *dma_contiguous_areas[MAX_EARLY_CMA_AREAS];
 static unsigned int dma_contiguous_areas_num;
 
 static int dma_contiguous_insert_area(struct cma *cma)
