@@ -35,6 +35,7 @@
 #include <linux/random.h>
 #include <linux/elf.h>
 #include <linux/elf-randomize.h>
+#include <linux/elf_plugins.h>
 #include <linux/utsname.h>
 #include <linux/coredump.h>
 #include <linux/sched.h>
@@ -870,6 +871,12 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	if (!elf_phdata)
 		goto out;
 
+	interpreter = elf_plugin_open_interpreter(bprm, elf_ex, elf_phdata);
+	if (IS_ERR(interpreter)) {
+		retval = PTR_ERR(interpreter);
+		goto out_free_ph;
+	}
+
 	elf_ppnt = elf_phdata;
 	for (i = 0; i < elf_ex->e_phnum; i++, elf_ppnt++) {
 		char *elf_interpreter;
@@ -880,6 +887,9 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		}
 
 		if (elf_ppnt->p_type != PT_INTERP)
+			continue;
+
+		if (interpreter)
 			continue;
 
 		/*
@@ -933,6 +943,20 @@ static int load_elf_binary(struct linux_binprm *bprm)
 out_free_interp:
 		kfree(elf_interpreter);
 		goto out_free_ph;
+	}
+
+	if (interpreter && !interp_elf_ex) {
+		interp_elf_ex = kmalloc_obj(*interp_elf_ex);
+		if (!interp_elf_ex) {
+			retval = -ENOMEM;
+			goto out_free_file;
+		}
+
+		/* Get the exec headers */
+		retval = elf_read(interpreter, interp_elf_ex,
+				  sizeof(*interp_elf_ex), 0);
+		if (retval < 0)
+			goto out_free_dentry;
 	}
 
 	elf_ppnt = elf_phdata;

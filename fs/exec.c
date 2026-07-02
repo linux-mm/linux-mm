@@ -46,6 +46,7 @@
 #include <linux/key.h>
 #include <linux/personality.h>
 #include <linux/binfmts.h>
+#include <linux/elf_plugins.h>
 #include <linux/utsname.h>
 #include <linux/pid_namespace.h>
 #include <linux/module.h>
@@ -107,6 +108,52 @@ void unregister_binfmt(struct linux_binfmt * fmt)
 }
 
 EXPORT_SYMBOL(unregister_binfmt);
+
+#if IS_ENABLED(CONFIG_BINFMT_ELF_PLUGINS)
+static DEFINE_MUTEX(elf_plugins_lock);
+static LIST_HEAD(elf_plugins);
+
+int register_elf_plugin(struct elf_plugin *plugin)
+{
+	mutex_lock(&elf_plugins_lock);
+	list_add_tail(&plugin->list, &elf_plugins);
+	mutex_unlock(&elf_plugins_lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(register_elf_plugin);
+
+void unregister_elf_plugin(struct elf_plugin *plugin)
+{
+	mutex_lock(&elf_plugins_lock);
+	list_del(&plugin->list);
+	mutex_unlock(&elf_plugins_lock);
+}
+EXPORT_SYMBOL_GPL(unregister_elf_plugin);
+
+struct file *elf_plugin_open_interpreter(struct linux_binprm *bprm,
+					 struct elfhdr *elf_ex,
+					 struct elf_phdr *elf_phdata)
+{
+	struct elf_plugin *plugin;
+	struct file *file = NULL;
+
+	mutex_lock(&elf_plugins_lock);
+	list_for_each_entry(plugin, &elf_plugins, list) {
+		if (!try_module_get(plugin->owner))
+			continue;
+		mutex_unlock(&elf_plugins_lock);
+
+		file = plugin->open_interpreter(bprm, elf_ex, elf_phdata);
+
+		mutex_lock(&elf_plugins_lock);
+		module_put(plugin->owner);
+		if (file)
+			break;
+	}
+	mutex_unlock(&elf_plugins_lock);
+	return file;
+}
+#endif
 
 static inline void put_binfmt(struct linux_binfmt * fmt)
 {
