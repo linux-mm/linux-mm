@@ -4794,6 +4794,9 @@ static ssize_t memory_high_write(struct kernfs_open_file *of,
 		if (signal_pending(current))
 			break;
 
+		if (memcg_is_dying(memcg))
+			break;
+
 		if (!drained) {
 			drain_all_stock(memcg);
 			drained = true;
@@ -4843,6 +4846,9 @@ static ssize_t memory_max_write(struct kernfs_open_file *of,
 			break;
 
 		if (signal_pending(current))
+			break;
+
+		if (memcg_is_dying(memcg))
 			break;
 
 		if (!drained) {
