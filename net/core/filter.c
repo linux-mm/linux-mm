@@ -8402,6 +8402,14 @@ sk_filter_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 		return &bpf_get_socket_uid_proto;
 	case BPF_FUNC_perf_event_output:
 		return &bpf_skb_event_output_proto;
+#if IS_BUILTIN(CONFIG_BINFMT_MISC)
+	case BPF_FUNC_binprm_set_interp:
+		/*
+		 * binfmt_misc reuses SOCKET_FILTER programs to select an
+		 * interpreter; expose the helper that lets them set it.
+		 */
+		return &bpf_binprm_set_interp_proto;
+#endif
 	default:
 		return bpf_sk_base_func_proto(func_id, prog);
 	}
