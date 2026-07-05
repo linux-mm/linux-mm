@@ -7006,8 +7006,8 @@ void __init page_alloc_sysctl_init(void)
 	register_sysctl_init("vm", page_alloc_sysctl_table);
 }
 
-static void free_prepared_contig_range(struct page *page,
-		unsigned long nr_pages)
+static void __free_prepared_contig_range(struct page *page,
+		unsigned long nr_pages, fpi_t fpi_flags)
 {
 	unsigned long pfn = page_to_pfn(page);
 
@@ -7024,12 +7024,17 @@ static void free_prepared_contig_range(struct page *page,
 		 * Free the chunk as a single block. Our caller has already
 		 * called free_pages_prepare() for each order-0 page.
 		 */
-		__free_frozen_pages(page, order, FPI_PREPARED);
+		__free_frozen_pages(page, order, fpi_flags | FPI_PREPARED);
 
 		pfn += 1UL << order;
 		page += 1UL << order;
 		nr_pages -= 1UL << order;
 	}
+}
+
+static void free_prepared_contig_range(struct page *page, unsigned long nr_pages)
+{
+	__free_prepared_contig_range(page, nr_pages, FPI_NONE);
 }
 
 static void __free_contig_range_common(unsigned long pfn, unsigned long nr_pages,
