@@ -575,7 +575,7 @@ static void damon_test_set_regions(struct kunit *test)
 			}, 3);
 }
 
-static void damon_test_nr_accesses_to_accesses_bp(struct kunit *test)
+static void damon_test_sample_count_to_bp(struct kunit *test)
 {
 	struct damon_attrs attrs = {
 		.sample_interval = 10,
@@ -585,7 +585,7 @@ static void damon_test_nr_accesses_to_accesses_bp(struct kunit *test)
 	/*
 	 * In some cases such as 32bit architectures where UINT_MAX is
 	 * ULONG_MAX, attrs.aggr_interval becomes zero.  Calling
-	 * damon_nr_accesses_to_accesses_bp() in the case will cause
+	 * damon_sample_count_to_bp() in the case will cause
 	 * divide-by-zero.  Such case is prohibited in normal execution since
 	 * the caution is documented on the comment for the function, and
 	 * damon_update_monitoring_results() does the check.  Skip the test in
@@ -594,7 +594,7 @@ static void damon_test_nr_accesses_to_accesses_bp(struct kunit *test)
 	if (!attrs.aggr_interval)
 		kunit_skip(test, "aggr_interval is zero.");
 
-	KUNIT_EXPECT_EQ(test, damon_nr_accesses_to_accesses_bp(123, &attrs), 0);
+	KUNIT_EXPECT_EQ(test, damon_sample_count_to_bp(123, &attrs), 0);
 }
 
 static void damon_test_update_monitoring_result(struct kunit *test)
@@ -1572,7 +1572,7 @@ static struct kunit_case damon_test_cases[] = {
 	KUNIT_CASE(damon_test_split_above_half_progresses),
 	KUNIT_CASE(damon_test_ops_registration),
 	KUNIT_CASE(damon_test_set_regions),
-	KUNIT_CASE(damon_test_nr_accesses_to_accesses_bp),
+	KUNIT_CASE(damon_test_sample_count_to_bp),
 	KUNIT_CASE(damon_test_update_monitoring_result),
 	KUNIT_CASE(damon_test_set_attrs),
 	KUNIT_CASE(damon_test_mvsum),
