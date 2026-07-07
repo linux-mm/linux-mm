@@ -95,6 +95,8 @@ int cg_read(const char *cgroup, const char *control, char *buf, size_t len)
 
 	snprintf(path, sizeof(path), "%s/%s", cgroup, control);
 
+	sleep(2);
+
 	ret = read_text(path, buf, len);
 	return ret >= 0 ? 0 : ret;
 }
