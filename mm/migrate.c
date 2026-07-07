@@ -1213,7 +1213,7 @@ static void migrate_folio_done(struct folio *src,
 static int migrate_folio_unmap(new_folio_t get_new_folio,
 		free_folio_t put_new_folio, unsigned long private,
 		struct folio *src, struct folio **dstp, enum migrate_mode mode,
-		struct list_head *ret)
+		struct list_head *ret, enum migrate_reason reason)
 {
 	struct folio *dst;
 	int rc = -EAGAIN;
@@ -1221,6 +1221,7 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 	struct anon_vma *anon_vma = NULL;
 	bool locked = false;
 	bool dst_locked = false;
+	enum ttu_flags ttu = 0;
 
 	dst = get_new_folio(src, private);
 	if (!dst)
@@ -1260,8 +1261,14 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 		folio_lock(src);
 	}
 	locked = true;
-	if (folio_test_mlocked(src))
+	if (folio_test_mlocked(src)) {
 		old_folio_state |= FOLIO_WAS_MLOCKED;
+
+		if (reason == MR_COMPACTION && !compaction_allow_unevictable()) {
+			rc = -EBUSY;
+			goto out;
+		}
+	}
 
 	if (folio_test_writeback(src)) {
 		/*
@@ -1335,7 +1342,14 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 		/* Establish migration ptes */
 		VM_BUG_ON_FOLIO(folio_test_anon(src) &&
 			       !folio_test_ksm(src) && !anon_vma, src);
-		try_to_migrate(src, mode == MIGRATE_ASYNC ? TTU_BATCH_FLUSH : 0);
+
+		if (mode == MIGRATE_ASYNC)
+			ttu |= TTU_BATCH_FLUSH;
+
+		if (reason == MR_COMPACTION && !compaction_allow_unevictable())
+			ttu |= TTU_RESPECT_MLOCK;
+
+		try_to_migrate(src, ttu);
 		old_folio_state |= FOLIO_WAS_MAPPED;
 	}
 
@@ -1916,7 +1930,8 @@ static int migrate_pages_batch(struct list_head *from,
 			}
 
 			rc = migrate_folio_unmap(get_new_folio, put_new_folio,
-					private, folio, &dst, mode, ret_folios);
+					private, folio, &dst, mode, ret_folios,
+					reason);
 			/*
 			 * The rules are:
 			 *	0: folio will be put on unmap_folios list,
