@@ -4186,12 +4186,18 @@ static bool wp_can_reuse_anon_folio(struct folio *folio,
 	 */
 	if (folio_test_ksm(folio) || folio_ref_count(folio) > 3)
 		return false;
-	if (!folio_test_lru(folio))
+	if (!folio_test_lru(folio)) {
+		/*
+		 * Assume folio is on lru_cache and holds a cache reference.
+		 */
+		if (folio_ref_count(folio) > 2 + folio_test_swapcache(folio))
+			return false;
 		/*
 		 * We cannot easily detect+handle references from
 		 * remote LRU caches or references to LRU folios.
 		 */
 		lru_add_drain();
+	}
 	if (folio_ref_count(folio) > 1 + folio_test_swapcache(folio))
 		return false;
 	if (!folio_trylock(folio))
@@ -4890,16 +4896,6 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	} else if (folio != swapcache)
 		page = folio_page(folio, 0);
 
-	/*
-	 * If we want to map a page that's in the swapcache writable, we
-	 * have to detect via the refcount if we're really the exclusive
-	 * owner. Try removing the extra reference from the local LRU
-	 * caches if required.
-	 */
-	if ((vmf->flags & FAULT_FLAG_WRITE) &&
-	    !folio_test_ksm(folio) && !folio_test_lru(folio))
-		lru_add_drain();
-
 	folio_throttle_swaprate(folio, GFP_KERNEL);
 
 	/*
@@ -5036,12 +5032,9 @@ check_folio:
 
 	/*
 	 * Same logic as in do_wp_page(); however, optimize for pages that are
-	 * certainly not shared either because we just allocated them without
-	 * exposing them to the swapcache or because the swap entry indicates
-	 * exclusivity.
+	 * certainly not because the swap entry indicates exclusivity.
 	 */
-	if (!folio_test_ksm(folio) &&
-	    (exclusive || folio_ref_count(folio) == 1)) {
+	if (!folio_test_ksm(folio) && exclusive) {
 		if ((vma->vm_flags & VM_WRITE) && !userfaultfd_pte_wp(vma, pte) &&
 		    !pte_needs_soft_dirty_wp(vma, pte)) {
 			pte = pte_mkwrite(pte, vma);
@@ -5087,8 +5080,11 @@ check_folio:
 	 * Remove the swap entry and conditionally try to free up the swapcache.
 	 * Do it after mapping, so raced page faults will likely see the folio
 	 * in swap cache and wait on the folio lock.
+	 * Assume non-LRU folios may be queued in the LRU cache, which contributes
+	 * an additional reference to the folio.
 	 */
-	if (should_try_to_free_swap(si, folio, vma, nr_pages, vmf->flags))
+	if (should_try_to_free_swap(si, folio, vma, nr_pages +
+			!folio_test_lru(folio), vmf->flags))
 		folio_free_swap(folio);
 
 	folio_unlock(folio);
