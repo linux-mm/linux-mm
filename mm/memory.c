@@ -893,8 +893,12 @@ static void restore_exclusive_pte(struct vm_area_struct *vma,
 	if (pte_swp_soft_dirty(orig_pte))
 		pte = pte_mksoft_dirty(pte);
 
-	if (pte_swp_uffd_wp(orig_pte))
-		pte = pte_mkuffd_wp(pte);
+	if (pte_swp_uffd(orig_pte))
+		pte = pte_mkuffd(pte);
+
+	/* See do_swap_page(): restore PAGE_NONE for RWP */
+	if (pte_swp_uffd(orig_pte) && userfaultfd_rwp(vma))
+		pte = pte_modify(pte, PAGE_NONE);
 
 	if ((vma->vm_flags & VM_WRITE) &&
 	    can_change_pte_writable(vma, address, pte)) {
@@ -977,8 +981,8 @@ copy_nonpresent_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 			pte = softleaf_to_pte(entry);
 			if (pte_swp_soft_dirty(orig_pte))
 				pte = pte_swp_mksoft_dirty(pte);
-			if (pte_swp_uffd_wp(orig_pte))
-				pte = pte_swp_mkuffd_wp(pte);
+			if (pte_swp_uffd(orig_pte))
+				pte = pte_swp_mkuffd(pte);
 			set_pte_at(src_mm, addr, src_pte, pte);
 		}
 	} else if (softleaf_is_device_private(entry)) {
@@ -1011,8 +1015,8 @@ copy_nonpresent_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 			entry = make_readable_device_private_entry(
 							swp_offset(entry));
 			pte = swp_entry_to_pte(entry);
-			if (pte_swp_uffd_wp(orig_pte))
-				pte = pte_swp_mkuffd_wp(pte);
+			if (pte_swp_uffd(orig_pte))
+				pte = pte_swp_mkuffd(pte);
 			set_pte_at(src_mm, addr, src_pte, pte);
 		}
 	} else if (softleaf_is_device_exclusive(entry)) {
@@ -1034,8 +1038,8 @@ copy_nonpresent_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 				   make_pte_marker(marker));
 		return 0;
 	}
-	if (!userfaultfd_wp(dst_vma))
-		pte = pte_swp_clear_uffd_wp(pte);
+	if (!userfaultfd_protected(dst_vma))
+		pte = pte_swp_clear_uffd(pte);
 	set_pte_at(dst_mm, addr, dst_pte, pte);
 	return 0;
 }
@@ -1081,9 +1085,13 @@ copy_present_page(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma
 	/* All done, just insert the new page copy in the child */
 	pte = folio_mk_pte(new_folio, dst_vma->vm_page_prot);
 	pte = maybe_mkwrite(pte_mkdirty(pte), dst_vma);
-	if (userfaultfd_pte_wp(dst_vma, ptep_get(src_pte)))
-		/* Uffd-wp needs to be delivered to dest pte as well */
-		pte = pte_mkuffd_wp(pte);
+	if (userfaultfd_protected(dst_vma) && pte_uffd(ptep_get(src_pte))) {
+		/* The uffd bit needs to be delivered to the dest pte as well */
+		pte = pte_mkuffd(pte);
+		/* Restore PAGE_NONE so the RWP marker keeps trapping */
+		if (userfaultfd_rwp(dst_vma))
+			pte = pte_modify(pte, PAGE_NONE);
+	}
 	set_pte_at(dst_vma->vm_mm, addr, dst_pte, pte);
 	return 0;
 }
@@ -1093,9 +1101,31 @@ static __always_inline void __copy_present_ptes(struct vm_area_struct *dst_vma,
 		pte_t pte, unsigned long addr, int nr)
 {
 	struct mm_struct *src_mm = src_vma->vm_mm;
+	bool writable;
+
+	/*
+	 * Snapshot writability before the RWP-disarm rewrite below: when the
+	 * child is not RWP-armed, pte_modify(pte, dst_vma->vm_page_prot) can
+	 * silently drop _PAGE_RW from a resolved (no-marker) writable PTE,
+	 * so a later pte_write(pte) check would skip the COW wrprotect and
+	 * leave the parent writable over a folio shared with the child.
+	 */
+	writable = pte_write(pte);
+
+	/*
+	 * Child is not RWP-armed: restore accessible protection so the
+	 * inherited PAGE_NONE does not cost a fault on first read. Gate on
+	 * pte_uffd(pte) so unrelated PAGE_NONE markers (e.g. NUMA balancing)
+	 * are not normalised away.
+	 */
+	if (!userfaultfd_protected(dst_vma)) {
+		if (userfaultfd_rwp(src_vma) && pte_uffd(pte))
+			pte = pte_modify(pte, dst_vma->vm_page_prot);
+		pte = pte_clear_uffd(pte);
+	}
 
 	/* If it's a COW mapping, write protect it both processes. */
-	if (is_cow_mapping(src_vma->vm_flags) && pte_write(pte)) {
+	if (is_cow_mapping(src_vma->vm_flags) && writable) {
 		wrprotect_ptes(src_mm, addr, src_pte, nr);
 		pte = pte_wrprotect(pte);
 	}
@@ -1104,9 +1134,6 @@ static __always_inline void __copy_present_ptes(struct vm_area_struct *dst_vma,
 	if (src_vma->vm_flags & VM_SHARED)
 		pte = pte_mkclean(pte);
 	pte = pte_mkold(pte);
-
-	if (!userfaultfd_wp(dst_vma))
-		pte = pte_clear_uffd_wp(pte);
 
 	set_ptes(dst_vma->vm_mm, addr, dst_pte, pte, nr);
 }
@@ -3918,8 +3945,8 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		if (unlikely(unshare)) {
 			if (pte_soft_dirty(vmf->orig_pte))
 				entry = pte_mksoft_dirty(entry);
-			if (pte_uffd_wp(vmf->orig_pte))
-				entry = pte_mkuffd_wp(entry);
+			if (pte_uffd(vmf->orig_pte))
+				entry = pte_mkuffd(entry);
 		} else {
 			entry = maybe_mkwrite(pte_mkdirty(entry), vma);
 		}
@@ -4258,7 +4285,7 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 			 * etc.) because we're only removing the uffd-wp bit,
 			 * which is completely invisible to the user.
 			 */
-			pte = pte_clear_uffd_wp(ptep_get(vmf->pte));
+			pte = pte_clear_uffd(ptep_get(vmf->pte));
 
 			set_pte_at(vma->vm_mm, vmf->address, vmf->pte, pte);
 			/*
@@ -4747,6 +4774,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	struct swap_info_struct *si = NULL;
 	rmap_t rmap_flags = RMAP_NONE;
 	bool exclusive = false;
+	bool rwp_restore = false;
 	softleaf_t entry;
 	pte_t pte;
 	vm_fault_t ret = 0;
@@ -5023,15 +5051,30 @@ check_folio:
 	pte = mk_pte(page, vma->vm_page_prot);
 	if (pte_swp_soft_dirty(vmf->orig_pte))
 		pte = pte_mksoft_dirty(pte);
-	if (pte_swp_uffd_wp(vmf->orig_pte))
-		pte = pte_mkuffd_wp(pte);
+	if (pte_swp_uffd(vmf->orig_pte))
+		pte = pte_mkuffd(pte);
+
+	/*
+	 * A page reclaimed while RWP-protected carries the uffd bit on
+	 * its swap entry. Re-apply PAGE_NONE on swap-in so the first access
+	 * still traps as an RWP fault. pte_modify() preserves _PAGE_UFFD.
+	 */
+	if (pte_swp_uffd(vmf->orig_pte) && userfaultfd_rwp(vma)) {
+		pte = pte_modify(pte, PAGE_NONE);
+		rwp_restore = true;
+	}
 
 	/*
 	 * Similar logic as in do_wp_page(); however, optimize for pages that
 	 * are certainly exclusive.
+	 *
+	 * Skip the write upgrade for an RWP-restored pte: it must stay
+	 * PROT_NONE so the access retries through the RWP fault path
+	 * (do_uffd_rwp()) rather than being made writable here.
 	 */
 	if (exclusive) {
-		if ((vma->vm_flags & VM_WRITE) && !userfaultfd_pte_wp(vma, pte) &&
+		if (!rwp_restore &&
+		    (vma->vm_flags & VM_WRITE) && !userfaultfd_pte_wp(vma, pte) &&
 		    !pte_needs_soft_dirty_wp(vma, pte)) {
 			pte = pte_mkwrite(pte, vma);
 			if (vmf->flags & FAULT_FLAG_WRITE)
@@ -5092,7 +5135,12 @@ check_folio:
 		folio_put(swapcache);
 	}
 
-	if ((vmf->flags & FAULT_FLAG_WRITE) && !pte_write(pte)) {
+	/*
+	 * For an RWP-restored pte, leave it PROT_NONE and let the write
+	 * retry through the RWP fault path; do not COW it here, which would
+	 * drop the marker for a non-exclusive page.
+	 */
+	if ((vmf->flags & FAULT_FLAG_WRITE) && !pte_write(pte) && !rwp_restore) {
 		ret |= do_wp_page(vmf);
 		if (ret & VM_FAULT_ERROR)
 			ret &= VM_FAULT_ERROR;
@@ -5239,7 +5287,7 @@ void map_anon_folio_pte_nopf(struct folio *folio, pte_t *pte,
 	if (vma->vm_flags & VM_WRITE)
 		entry = pte_mkwrite(pte_mkdirty(entry), vma);
 	if (uffd_wp)
-		entry = pte_mkuffd_wp(entry);
+		entry = pte_mkuffd(entry);
 
 	folio_ref_add(folio, nr_pages - 1);
 	folio_add_new_anon_rmap(folio, vma, addr, RMAP_EXCLUSIVE);
@@ -5306,7 +5354,7 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 			return handle_userfault(vmf, VM_UFFD_MISSING);
 		}
 		if (vmf_orig_pte_uffd_wp(vmf))
-			entry = pte_mkuffd_wp(entry);
+			entry = pte_mkuffd(entry);
 		set_pte_at(vma->vm_mm, addr, vmf->pte, entry);
 
 		/* No need to invalidate - it was non-present before */
@@ -5556,7 +5604,7 @@ void set_pte_range(struct vm_fault *vmf, struct folio *folio,
 	else if (pte_write(entry) && folio_test_dirty(folio))
 		entry = pte_mkdirty(entry);
 	if (unlikely(vmf_orig_pte_uffd_wp(vmf)))
-		entry = pte_mkuffd_wp(entry);
+		entry = pte_mkuffd(entry);
 	/* copy-on-write page */
 	if (write && !(vma->vm_flags & VM_SHARED)) {
 		VM_BUG_ON_FOLIO(nr != 1, folio);
@@ -6071,6 +6119,16 @@ static void numa_rebuild_large_mapping(struct vm_fault *vmf, struct vm_area_stru
 		if (!pte_present(ptent) || !pte_protnone(ptent))
 			continue;
 
+		/*
+		 * RWP-armed PTEs are also protnone but carry _PAGE_UFFD as a
+		 * marker. Leave them alone -- rewriting to vm_page_prot would
+		 * stop the RWP trap. Gate on userfaultfd_rwp(vma) too:
+		 * NUMA balancing preserves _PAGE_UFFD on UFFD_WP-marked PTEs
+		 * when applying PROT_NONE, and those still need rebuilding.
+		 */
+		if (userfaultfd_rwp(vma) && pte_uffd(ptent))
+			continue;
+
 		if (pfn_folio(pte_pfn(ptent)) != folio)
 			continue;
 
@@ -6084,6 +6142,35 @@ static void numa_rebuild_large_mapping(struct vm_fault *vmf, struct vm_area_stru
 
 		numa_rebuild_single_mapping(vmf, vma, addr, start_ptep, writable);
 	}
+}
+
+static vm_fault_t do_uffd_rwp(struct vm_fault *vmf)
+{
+	pte_t pte;
+
+	if (!userfaultfd_rwp_async(vmf->vma)) {
+		/* Sync mode: unmap PTE and deliver to userfaultfd handler */
+		pte_unmap(vmf->pte);
+		return handle_userfault(vmf, VM_UFFD_RWP);
+	}
+
+	spin_lock(vmf->ptl);
+	if (unlikely(!pte_same(ptep_get(vmf->pte), vmf->orig_pte))) {
+		pte_unmap_unlock(vmf->pte, vmf->ptl);
+		return 0;
+	}
+	pte = pte_modify(vmf->orig_pte, vmf->vma->vm_page_prot);
+	/* pte_modify() preserves _PAGE_UFFD; drop it on resolution */
+	pte = pte_clear_uffd(pte);
+	pte = pte_mkyoung(pte);
+	if (!pte_write(pte) &&
+	    vma_wants_manual_pte_write_upgrade(vmf->vma) &&
+	    can_change_pte_writable(vmf->vma, vmf->address, pte))
+		pte = pte_mkwrite(pte, vmf->vma);
+	set_pte_at(vmf->vma->vm_mm, vmf->address, vmf->pte, pte);
+	update_mmu_cache(vmf->vma, vmf->address, vmf->pte);
+	pte_unmap_unlock(vmf->pte, vmf->ptl);
+	return 0;
 }
 
 static vm_fault_t do_numa_page(struct vm_fault *vmf)
@@ -6361,8 +6448,16 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 	if (!pte_present(vmf->orig_pte))
 		return do_swap_page(vmf);
 
-	if (pte_protnone(vmf->orig_pte) && vma_is_accessible(vmf->vma))
+	if (pte_protnone(vmf->orig_pte) && vma_is_accessible(vmf->vma)) {
+		/*
+		 * RWP-protected PTEs are protnone plus the uffd bit. On a
+		 * VM_UFFD_RWP VMA, a protnone PTE without the uffd bit is
+		 * NUMA hinting and must still fall through to do_numa_page().
+		 */
+		if (userfaultfd_pte_rwp(vmf->vma, vmf->orig_pte))
+			return do_uffd_rwp(vmf);
 		return do_numa_page(vmf);
+	}
 
 	spin_lock(vmf->ptl);
 	entry = vmf->orig_pte;
@@ -6476,8 +6571,11 @@ retry_pud:
 		return 0;
 	}
 	if (pmd_trans_huge(vmf.orig_pmd)) {
-		if (pmd_protnone(vmf.orig_pmd) && vma_is_accessible(vma))
+		if (pmd_protnone(vmf.orig_pmd) && vma_is_accessible(vma)) {
+			if (userfaultfd_huge_pmd_rwp(vma, vmf.orig_pmd))
+				return do_huge_pmd_uffd_rwp(&vmf);
 			return do_huge_pmd_numa_page(&vmf);
+		}
 
 		if ((flags & (FAULT_FLAG_WRITE|FAULT_FLAG_UNSHARE)) &&
 		    !pmd_write(vmf.orig_pmd)) {

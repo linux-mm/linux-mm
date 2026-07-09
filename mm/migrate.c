@@ -327,8 +327,12 @@ static bool try_to_map_unused_to_zeropage(struct page_vma_mapped_walk *pvmw,
 
 	if (pte_swp_soft_dirty(old_pte))
 		newpte = pte_mksoft_dirty(newpte);
-	if (pte_swp_uffd_wp(old_pte))
-		newpte = pte_mkuffd_wp(newpte);
+	if (pte_swp_uffd(old_pte))
+		newpte = pte_mkuffd(newpte);
+
+	/* See remove_migration_pte(): restore PAGE_NONE for RWP */
+	if (pte_swp_uffd(old_pte) && userfaultfd_rwp(pvmw->vma))
+		newpte = pte_modify(newpte, PAGE_NONE);
 
 	set_pte_at(pvmw->vma->vm_mm, pvmw->address, pvmw->pte, newpte);
 
@@ -396,8 +400,12 @@ static bool remove_migration_pte(struct folio *folio,
 
 		if (softleaf_is_migration_write(entry))
 			pte = pte_mkwrite(pte, vma);
-		else if (pte_swp_uffd_wp(old_pte))
-			pte = pte_mkuffd_wp(pte);
+		else if (pte_swp_uffd(old_pte))
+			pte = pte_mkuffd(pte);
+
+		/* See do_swap_page(): restore PAGE_NONE for RWP */
+		if (pte_swp_uffd(old_pte) && userfaultfd_rwp(vma))
+			pte = pte_modify(pte, PAGE_NONE);
 
 		if (folio_test_anon(folio) && !softleaf_is_migration_read(entry))
 			rmap_flags |= RMAP_EXCLUSIVE;
@@ -412,8 +420,8 @@ static bool remove_migration_pte(struct folio *folio,
 			pte = softleaf_to_pte(entry);
 			if (pte_swp_soft_dirty(old_pte))
 				pte = pte_swp_mksoft_dirty(pte);
-			if (pte_swp_uffd_wp(old_pte))
-				pte = pte_swp_mkuffd_wp(pte);
+			if (pte_swp_uffd(old_pte))
+				pte = pte_swp_mkuffd(pte);
 		}
 
 #ifdef CONFIG_HUGETLB_PAGE

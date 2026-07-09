@@ -1965,7 +1965,7 @@ static inline unsigned int folio_unmap_pte_batch(struct folio *folio,
 	if (pte_unused(pte))
 		return 1;
 
-	if (userfaultfd_wp(vma))
+	if (userfaultfd_protected(vma))
 		return 1;
 
 	/*
@@ -2317,13 +2317,13 @@ static bool try_to_unmap_one(struct folio *folio, struct vm_area_struct *vma,
 			if (likely(pte_present(pteval))) {
 				if (pte_soft_dirty(pteval))
 					swp_pte = pte_swp_mksoft_dirty(swp_pte);
-				if (pte_uffd_wp(pteval))
-					swp_pte = pte_swp_mkuffd_wp(swp_pte);
+				if (pte_uffd(pteval))
+					swp_pte = pte_swp_mkuffd(swp_pte);
 			} else {
 				if (pte_swp_soft_dirty(pteval))
 					swp_pte = pte_swp_mksoft_dirty(swp_pte);
-				if (pte_swp_uffd_wp(pteval))
-					swp_pte = pte_swp_mkuffd_wp(swp_pte);
+				if (pte_swp_uffd(pteval))
+					swp_pte = pte_swp_mkuffd(swp_pte);
 			}
 			set_pte_at(mm, address, pvmw.pte, swp_pte);
 		} else {
@@ -2694,14 +2694,14 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 				swp_pte = swp_entry_to_pte(entry);
 				if (pte_soft_dirty(pteval))
 					swp_pte = pte_swp_mksoft_dirty(swp_pte);
-				if (pte_uffd_wp(pteval))
-					swp_pte = pte_swp_mkuffd_wp(swp_pte);
+				if (pte_uffd(pteval))
+					swp_pte = pte_swp_mkuffd(swp_pte);
 			} else {
 				swp_pte = swp_entry_to_pte(entry);
 				if (pte_swp_soft_dirty(pteval))
 					swp_pte = pte_swp_mksoft_dirty(swp_pte);
-				if (pte_swp_uffd_wp(pteval))
-					swp_pte = pte_swp_mkuffd_wp(swp_pte);
+				if (pte_swp_uffd(pteval))
+					swp_pte = pte_swp_mkuffd(swp_pte);
 			}
 			if (folio_test_hugetlb(folio))
 				set_huge_pte_at(mm, address, pvmw.pte, swp_pte,
