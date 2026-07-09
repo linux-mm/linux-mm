@@ -1,0 +1,72 @@
+name: mm-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - mm-new
+      - mm-unstable
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    # Don't run in the mm-ci repository, since it doesn't actually have the
+    # kernel code.
+    if: github.repository == 'linux-mm/linux-mm'
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          # - runner: ubuntu-24.04-arm
+          #   arch: arm64
+    runs-on: ${{ matrix.runner }}
+    name: Host tests (${{ matrix.arch }})
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get -q update
+          sudo apt-get -qy install build-essential liburcu-dev
+
+      - name: Run memblock tests
+        run: bash .github/scripts/run-memblock-tests.sh
+
+      - name: Run VMA tests
+        if: always()
+        run: bash .github/scripts/run-vma-tests.sh
+
+      - name: Run data structure tests
+        if: always()
+        run: bash .github/scripts/run-datastructure-tests.sh
+
+  vm-tests:
+    # Don't run in the mm-ci repository, since it doesn't actually have the
+    # kernel code.
+    if: github.repository == 'linux-mm/linux-mm'
+    runs-on: self-hosted
+    name: VM tests
+
+    steps:
+      - name: checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build kernel
+        id: build
+        run: bash .github/scripts/build-kernel.sh
+
+      - name: Run MM selftests
+        run: bash .github/scripts/run-mm-selftests.sh
+
+      - name: Run KUnit SLUB test
+        if: always() && steps.build.outcome == 'success'
+        run: bash .github/scripts/run-kunit-tests.sh
