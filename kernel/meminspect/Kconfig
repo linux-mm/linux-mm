@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0
+
+config MEMINSPECT
+	bool "Allow the kernel to register memory regions for inspection purpose"
+	depends on !CRASH_DUMP || DMA_CMA
+	help
+	  Inspection mechanism allows registration of a specific memory
+	  area (or object) for later inspection purposes. Ranges are added
+	  into an inspection table, which can be requested and analyzed by
+	  specific drivers. Drivers would interface any hardware mechanism
+	  that will allow inspection of the data, including but not limited
+	  to: dumping for debugging, creating a coredump, analysis, or
+	  statistical information.  The inspection table is created ahead
+	  of time such that it can be later used regardless of the state of
+	  the kernel (running, frozen, crashed, or any particular state).
+
+	  Note that modules using this feature must be rebuilt if this
+	  option changes.
+
+config MEMINSPECT_KINFO
+	tristate "Shared memory KInfo compatible driver"
+	depends on MEMINSPECT
+	help
+	  Say y here to enable the Shared memory KInfo compatible driver.
+	  With this driver, the registered regions are copied to a shared
+	  memory zone at register time.
+	  The shared memory zone is supplied via OF.
+	  This driver will select only regions that are of interest,
+	  and keep only addresses. The format of the list is Kinfo compatible.
