@@ -15,6 +15,8 @@
 #include <linux/swapops.h>
 #include <linux/vmstat.h>
 #include "internal.h"
+#include "mm_init.h"
+#include "sparse.h"
 #include <asm/dma.h>
 
 /*
