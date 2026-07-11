@@ -276,6 +276,17 @@ void unmap_vmas(struct mmu_gather *tlb, struct unmap_desc *unmap);
 
 #ifdef CONFIG_MMU
 
+static inline unsigned long rmap_base(unsigned long vm_start, pgoff_t pgoff)
+{
+	return vm_start - (pgoff << PAGE_SHIFT);
+}
+
+static inline unsigned long vma_rmap_base(const struct vm_area_struct *vma)
+{
+	return rmap_base(vma->vm_start, vma->vm_pgoff);
+}
+
+#ifndef CONFIG_ANON_VMA_FRACTAL
 static inline void get_anon_vma(struct anon_vma *anon_vma)
 {
 	atomic_inc(&anon_vma->refcount);
@@ -319,6 +330,179 @@ static inline void anon_vma_unlock_read(struct anon_vma *anon_vma)
 	up_read(&anon_vma->root->rwsem);
 }
 
+/* Provide unified anon_vma VMA iteration interfaces. */
+#define ANON_RMAP_FOREACH_VMA(anon_vma, addr, start, last, rmap_proc_vma) \
+do { \
+	struct vm_area_struct *vma; /* must be named vma */ \
+	struct rb_root_cached *_rb_root = &(anon_vma)->rb_root; \
+	struct anon_vma_chain *_avc; \
+	\
+	anon_vma_interval_tree_foreach(_avc, _rb_root, start, last) { \
+		vma = _avc->vma; \
+		(rmap_proc_vma); \
+	} \
+} while (0)
+
+#else
+
+static inline struct anon_node *anon_node_next_rbc_child(
+		struct anon_node *anon_nod, struct anon_node *node)
+{
+	node = list_next_entry(node, fractal_list);
+	return node->depth == anon_nod->depth + 1 ? node : NULL;
+}
+
+static inline struct anon_node *anon_node_next_descendant(
+		struct anon_node *anon_nod, struct anon_node *node)
+{
+	node = list_next_entry(node, fractal_list);
+	return node->depth > anon_nod->depth ? node : NULL;
+}
+
+static inline void get_anon_node(struct anon_node *anon_nod)
+{
+	VM_BUG_ON(atomic_read(&anon_nod->refcount) == 0);
+	atomic_inc(&anon_nod->refcount);
+}
+
+void __put_anon_node(struct anon_node *anon_nod);
+
+static inline void put_anon_node(struct anon_node *anon_nod)
+{
+	VM_BUG_ON(atomic_read(&anon_nod->refcount) == 0);
+	if (atomic_dec_and_test(&anon_nod->refcount))
+		__put_anon_node(anon_nod);
+}
+
+static inline unsigned long anon_node_rmap_base(struct anon_node *anon_nod)
+{
+	return atomic_long_read(&anon_nod->rbc) & ~ANON_RMAP_BASE_COUNT_MASK;
+}
+
+static inline unsigned long anon_node_rmap_count(struct anon_node *anon_nod)
+{
+	return atomic_long_read(&anon_nod->rbc) & ANON_RMAP_BASE_COUNT_MAX;
+}
+
+static inline bool anon_node_can_share(struct anon_node *anon_nod)
+{
+	return anon_nod->depth == 0 &&
+		anon_node_rmap_count(anon_nod) <= ANON_NODE_SHARE_LIMIT;
+}
+
+static inline void anon_node_verify(struct anon_node *node)
+{
+	struct anon_node *rbc_ch = node;
+
+	WARN_ON_ONCE(anon_node_rmap_count(node) == 0 && node->nr_children == 0);
+	while ((rbc_ch = anon_node_next_rbc_child(node, rbc_ch)) != NULL) {
+		WARN_ON_ONCE(anon_node_rmap_count(rbc_ch) == 0);
+	}
+}
+
+static inline unsigned long anon_node_rmap_address(struct anon_node *anon_nod,
+		unsigned long pgoff)
+{
+	if (!anon_node_rmap_count(anon_nod))
+		return 0;
+	return anon_node_rmap_base(anon_nod) + (pgoff << PAGE_SHIFT);
+}
+
+static inline struct vm_area_struct *anon_node_lookup_vma(
+	struct anon_node *anon_nod, unsigned long addr, unsigned long pgoff)
+{
+	struct vm_area_struct *vma;
+
+	if (!addr)
+		addr = anon_node_rmap_address(anon_nod, pgoff);
+	if (!anon_nod->mm || !addr)
+		return NULL;
+
+	vma = vma_lookup(anon_nod->mm, addr);
+	return (vma && vma->anon_vma == (void *)anon_nod) ? vma : NULL;
+}
+
+void vm_lock_anon_node(struct mm_struct *mm, struct anon_node *anon_nod);
+void vm_unlock_anon_node(struct anon_node *anon_nod);
+int anon_node_trylock_rmap(struct anon_node *anon_nod);
+void anon_node_lock_rmap(struct anon_node *anon_nod);
+void anon_node_unlock_rmap(struct anon_node *anon_nod);
+
+#define ANON_RMAP_LEAF_VMA	1
+#define ANON_RMAP_FLAGS 	(ANON_RMAP_LEAF_VMA)
+
+static inline bool anon_rmap_is_leaf_vma(void *anon_rmap)
+{
+#ifdef CONFIG_PER_VMA_LOCK
+	return ((unsigned long)anon_rmap & ANON_RMAP_FLAGS) == ANON_RMAP_LEAF_VMA;
+#else
+	return false;
+#endif
+}
+
+static inline struct vm_area_struct *anon_rmap_to_leaf_vma(void *anon_rmap)
+{
+	return (void *)((unsigned long)anon_rmap & ~ANON_RMAP_FLAGS);
+}
+
+#define ANON_RMAP_FOREACH_VMA(anon_vma, addr, start, last, rmap_proc_vma) \
+do { \
+	struct vm_area_struct *vma = NULL; /* must be named vma */ \
+	struct anon_node *_anon_nod = (void *)(anon_vma); \
+	struct anon_node *_nod = _anon_nod; \
+	unsigned long _pgoff = (start); \
+	unsigned long _nr = 0, _total = 1; \
+	\
+	if (anon_rmap_is_leaf_vma(_anon_nod)) { \
+		vma = anon_rmap_to_leaf_vma(_anon_nod); \
+		(rmap_proc_vma); \
+		break; \
+	} \
+	while (_nod) { \
+		vma = anon_node_lookup_vma(_nod, (addr), _pgoff); \
+		if (vma) \
+			(rmap_proc_vma); \
+		_pgoff = vma ? vma->vm_pgoff + vma_pages(vma) : _pgoff + 1; \
+		if (!(addr) && _pgoff <= (last)) \
+			continue; \
+		_pgoff = (start); \
+		BUG_ON(++_nr > (_total += _nod->nr_children)); \
+		_nod = anon_node_next_descendant(_anon_nod, _nod); \
+	} \
+} while (0)
+
+static inline void get_anon_vma(struct anon_vma *anon_vma)
+{
+	get_anon_node((void *)anon_vma);
+}
+
+static inline void put_anon_vma(struct anon_vma *anon_vma)
+{
+	put_anon_node((void *)anon_vma);
+}
+
+/* Huge pages are protected by folio_lock(), these APIs no longer needed. */
+static inline void anon_vma_lock_write(struct anon_vma *anon_vma) {}
+static inline int anon_vma_trylock_write(struct anon_vma *anon_vma) { return 1; }
+static inline void anon_vma_unlock_write(struct anon_vma *anon_vma) {}
+
+/* These are still used as rmap lock APIs. */
+static inline void anon_vma_lock_read(struct anon_vma *anon_vma)
+{
+	anon_node_lock_rmap((void *)anon_vma);
+}
+
+static inline int anon_vma_trylock_read(struct anon_vma *anon_vma)
+{
+	return anon_node_trylock_rmap((void *)anon_vma);
+}
+
+static inline void anon_vma_unlock_read(struct anon_vma *anon_vma)
+{
+	anon_node_unlock_rmap((void *)anon_vma);
+}
+#endif
+
 struct anon_vma *folio_get_anon_vma(const struct folio *folio);
 
 /* Operations which modify VMAs. */
@@ -334,6 +518,27 @@ int anon_vma_clone(struct vm_area_struct *dst, struct vm_area_struct *src,
 int anon_vma_fork(struct vm_area_struct *vma, struct vm_area_struct *pvma);
 int  __anon_vma_prepare(struct vm_area_struct *vma);
 void unlink_anon_vmas(struct vm_area_struct *vma);
+
+#ifndef CONFIG_ANON_VMA_FRACTAL
+static inline int anon_vma_fork_with_prev(struct vm_area_struct *vma,
+	struct vm_area_struct *pvma, struct vm_area_struct *vma_prev,
+	struct vm_area_struct *pvma_prev)
+{
+	return anon_vma_fork(vma, pvma);
+}
+static inline int vma_pre_update_rmap_base(struct vm_area_struct *vma,
+	unsigned long diff) { return 0; }
+static inline void vma_post_update_rmap_base(struct vm_area_struct *vma,
+	unsigned long diff) {}
+#else
+int anon_vma_fork_with_prev(struct vm_area_struct *vma,
+	struct vm_area_struct *pvma, struct vm_area_struct *vma_prev,
+	struct vm_area_struct *pvma_prev);
+/* relocate_vma_down() changes vma_rmap_base. */
+int vma_pre_update_rmap_base(struct vm_area_struct *vma, unsigned long diff);
+void vma_post_update_rmap_base(struct vm_area_struct *vma, unsigned long diff);
+
+#endif
 
 static inline int anon_vma_prepare(struct vm_area_struct *vma)
 {
