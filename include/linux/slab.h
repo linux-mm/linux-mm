@@ -645,8 +645,12 @@ static inline unsigned int arch_slab_minalign(void)
 
 /*
  * kmem_cache_alloc and friends return pointers aligned to ARCH_SLAB_MINALIGN.
- * kmalloc and friends return pointers aligned to both ARCH_KMALLOC_MINALIGN
- * and ARCH_SLAB_MINALIGN, but here we only assume the former alignment.
+ * Objects allocated by kmalloc and friends are aligned to both
+ * ARCH_KMALLOC_MINALIGN and ARCH_SLAB_MINALIGN, but here we only assume the
+ * former alignment.
+ *
+ * This guarantee does not apply to ZERO_SIZE_PTR, which is not an allocated
+ * object.
  */
 #define __assume_kmalloc_alignment __assume_aligned(ARCH_KMALLOC_MINALIGN)
 #define __assume_slab_alignment __assume_aligned(ARCH_SLAB_MINALIGN)
@@ -958,10 +962,10 @@ unsigned int kmem_cache_sheaf_size(struct slab_sheaf *sheaf);
  */
 
 void *__kmalloc_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags)
-				__assume_kmalloc_alignment __alloc_size(1);
+				__alloc_size(1);
 
 void *__kmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags, int node)
-				__assume_kmalloc_alignment __alloc_size(1);
+				__alloc_size(1);
 
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t flags, size_t size)
 				__assume_kmalloc_alignment __alloc_size(3);

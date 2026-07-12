@@ -29,9 +29,10 @@ static inline bool alloc_flags_allow_spinning(const unsigned int alloc_flags)
 	return !(alloc_flags & SLAB_ALLOC_NOLOCK);
 }
 
+/* Can return ZERO_SIZE_PTR, so not tagged __assume_kmalloc_alignment. */
 void *__kmalloc_flags_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags,
 				  unsigned int alloc_flags, int node)
-				  __assume_kmalloc_alignment __alloc_size(1);
+				  __alloc_size(1);
 
 static __always_inline __alloc_size(1) void *_kmalloc_flags_noprof(size_t size,
 		gfp_t flags, unsigned int alloc_flags, int node, kmalloc_token_t token)
