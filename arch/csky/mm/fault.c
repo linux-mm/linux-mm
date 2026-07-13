@@ -114,11 +114,11 @@ static inline void bad_area_nosemaphore(struct pt_regs *regs, struct mm_struct *
 
 static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long addr)
 {
-	pgd_t *pgd, *pgd_k;
-	pud_t *pud, *pud_k;
-	pmd_t *pmd, *pmd_k;
-	pte_t *pte_k;
+	pmd_t *pmdp, *pmdp_k, pmd_k;
+	pte_t *ptep_k;
 	int offset;
+
+	BUILD_BUG_ON(CONFIG_PGTABLE_LEVELS != 2);
 
 	/* User mode accesses just cause a SIGSEGV */
 	if (user_mode(regs)) {
@@ -135,32 +135,19 @@ static inline void vmalloc_fault(struct pt_regs *regs, int code, unsigned long a
 	 */
 	offset = pgd_index(addr);
 
-	pgd = get_pgd() + offset;
-	pgd_k = init_mm.pgd + offset;
+	pmdp = (pmd_t *)(get_pgd() + offset);
+	pmdp_k = (pmd_t *)(init_mm.pgd + offset);
 
-	if (!pgd_present(*pgd_k)) {
-		no_context(regs, addr);
-		return;
-	}
-	set_pgd(pgd, *pgd_k);
-
-	pud = (pud_t *)pgd;
-	pud_k = (pud_t *)pgd_k;
-	if (!pud_present(*pud_k)) {
+	pmd_k = *pmdp_k;
+	if (!pmd_present(pmd_k)) {
 		no_context(regs, addr);
 		return;
 	}
 
-	pmd = pmd_offset(pud, addr);
-	pmd_k = pmd_offset(pud_k, addr);
-	if (!pmd_present(*pmd_k)) {
-		no_context(regs, addr);
-		return;
-	}
-	set_pmd(pmd, *pmd_k);
+	set_pmd(pmdp, pmd_k);
 
-	pte_k = pte_offset_kernel(pmd_k, addr);
-	if (!pte_present(*pte_k)) {
+	ptep_k = pte_offset_kernel(pmdp_k, addr);
+	if (!pte_present(*ptep_k)) {
 		no_context(regs, addr);
 		return;
 	}
