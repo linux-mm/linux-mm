@@ -40,6 +40,14 @@ static inline void pud_clear(pud_t *pud)	{ }
 
 #define set_pud(pudptr, pudval)			BUILD_BUG()
 
+static inline pud_t pudp_get(pud_t *pudp)
+{
+	pud_t dummy = { 0 };
+
+	return dummy;
+}
+#define pudp_get pudp_get
+
 static inline pmd_t * pmd_offset(pud_t * pud, unsigned long address)
 {
 	return (pmd_t *)pud;
