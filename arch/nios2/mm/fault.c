@@ -227,35 +227,23 @@ vmalloc_fault:
 		 * an interrupt in the middle of a task switch..
 		 */
 		int offset = pgd_index(address);
-		pgd_t *pgd, *pgd_k;
-		p4d_t *p4d, *p4d_k;
-		pud_t *pud, *pud_k;
-		pmd_t *pmd, *pmd_k;
-		pte_t *pte_k;
 
-		pgd = pgd_current + offset;
-		pgd_k = init_mm.pgd + offset;
+		BUILD_BUG_ON(CONFIG_PGTABLE_LEVELS != 2);
 
-		if (!pgd_present(*pgd_k))
-			goto no_context;
-		set_pgd(pgd, *pgd_k);
+		pmd_t *pmdp, *pmdp_k, pmd_k;
+		pte_t *ptep_k;
 
-		p4d = p4d_offset(pgd, address);
-		p4d_k = p4d_offset(pgd_k, address);
-		if (!p4d_present(*p4d_k))
-			goto no_context;
-		pud = pud_offset(p4d, address);
-		pud_k = pud_offset(p4d_k, address);
-		if (!pud_present(*pud_k))
-			goto no_context;
-		pmd = pmd_offset(pud, address);
-		pmd_k = pmd_offset(pud_k, address);
-		if (!pmd_present(*pmd_k))
-			goto no_context;
-		set_pmd(pmd, *pmd_k);
+		pmdp = (pmd_t *)(pgd_current + offset);
+		pmdp_k = (pmd_t *)(init_mm.pgd + offset);
+		pmd_k = *pmdp_k;
 
-		pte_k = pte_offset_kernel(pmd_k, address);
-		if (!pte_present(*pte_k))
+		if (!pmd_present(pmd_k))
+			goto no_context;
+
+		set_pmd(pmdp, pmd_k);
+
+		ptep_k = pte_offset_kernel(pmdp_k, address);
+		if (!pte_present(*ptep_k))
 			goto no_context;
 
 		flush_tlb_kernel_page(address);
