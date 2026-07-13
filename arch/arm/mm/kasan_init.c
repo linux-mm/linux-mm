@@ -211,6 +211,7 @@ void __init kasan_init(void)
 {
 	phys_addr_t pa_start, pa_end;
 	u64 i;
+	pud_t *pudp __maybe_unused;
 
 	/*
 	 * We are going to perform proper setup of shadow memory.
@@ -230,11 +231,12 @@ void __init kasan_init(void)
 	/* We need to be in the same PGD or this won't work */
 	BUILD_BUG_ON(pgd_index(KASAN_SHADOW_START) !=
 		     pgd_index(KASAN_SHADOW_END));
+	pudp = pud_off_k(KASAN_SHADOW_START);
 	memcpy(tmp_pmd_table,
-	       (void*)pgd_page_vaddr(*pgd_offset_k(KASAN_SHADOW_START)),
+	       (void*)pud_pgtable(pudp_get(pudp)),
 	       sizeof(tmp_pmd_table));
-	set_pgd(&tmp_pgd_table[pgd_index(KASAN_SHADOW_START)],
-		__pgd(__pa(tmp_pmd_table) | PMD_TYPE_TABLE | L_PGD_SWAPPER));
+	set_pud(&tmp_pgd_table[pgd_index(KASAN_SHADOW_START)],
+		__pmd(__pa(tmp_pmd_table) | PMD_TYPE_TABLE | L_PGD_SWAPPER));
 #endif
 	cpu_switch_mm(tmp_pgd_table, &init_mm);
 	local_flush_tlb_all();
