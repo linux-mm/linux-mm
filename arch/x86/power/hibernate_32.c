@@ -29,8 +29,7 @@ pgd_t *resume_pg_dir;
  */
 static pmd_t *resume_one_md_table_init(pgd_t *pgd)
 {
-	p4d_t *p4d;
-	pud_t *pud;
+	pud_t *pud = pud_offset(p4d_offset(pgd, 0), 0);
 	pmd_t *pmd_table;
 
 #ifdef CONFIG_X86_PAE
@@ -38,14 +37,10 @@ static pmd_t *resume_one_md_table_init(pgd_t *pgd)
 	if (!pmd_table)
 		return NULL;
 
-	set_pgd(pgd, __pgd(__pa(pmd_table) | _PAGE_PRESENT));
-	p4d = p4d_offset(pgd, 0);
-	pud = pud_offset(p4d, 0);
+	set_pud(pud, __pud(__pa(pmd_table) | _PAGE_PRESENT));
 
 	BUG_ON(pmd_table != pmd_offset(pud, 0));
 #else
-	p4d = p4d_offset(pgd, 0);
-	pud = pud_offset(p4d, 0);
 	pmd_table = pmd_offset(pud, 0);
 #endif
 
@@ -134,11 +129,12 @@ static inline void resume_init_first_level_page_table(pgd_t *pg_dir)
 {
 #ifdef CONFIG_X86_PAE
 	int i;
+	pud_t *pud = pud_offset(p4d_offset(pg_dir, 0), 0);
 
 	/* Init entries of the first-level page table to the zero page */
 	for (i = 0; i < PTRS_PER_PGD; i++)
-		set_pgd(pg_dir + i,
-			__pgd(__pa(empty_zero_page) | _PAGE_PRESENT));
+		set_pud(pud + i,
+			__pud(__pa(empty_zero_page) | _PAGE_PRESENT));
 #endif
 }
 
