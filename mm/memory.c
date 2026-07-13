@@ -725,10 +725,10 @@ static inline struct page *__vm_normal_page(struct vm_area_struct *vma,
 				if (!pfn_valid(pfn))
 					return NULL;
 			} else {
-				unsigned long off = (addr - vma->vm_start) >> PAGE_SHIFT;
+				const pgoff_t index = linear_page_index(vma, addr);
 
 				/* Only CoW'ed anon folios are "normal". */
-				if (pfn == vma->vm_pgoff + off)
+				if (pfn == index)
 					return NULL;
 				if (!is_cow_mapping(vma->vm_flags))
 					return NULL;
@@ -2663,7 +2663,7 @@ static int __vm_map_pages(struct vm_area_struct *vma, struct page **pages,
 int vm_map_pages(struct vm_area_struct *vma, struct page **pages,
 				unsigned long num)
 {
-	return __vm_map_pages(vma, pages, num, vma->vm_pgoff);
+	return __vm_map_pages(vma, pages, num, vma_start_pgoff(vma));
 }
 EXPORT_SYMBOL(vm_map_pages);
 
@@ -3318,7 +3318,8 @@ int vm_iomap_memory(struct vm_area_struct *vma, phys_addr_t start, unsigned long
 	unsigned long pfn;
 	int err;
 
-	err = __simple_ioremap_prep(vm_len, vma->vm_pgoff, start, len, &pfn);
+	err = __simple_ioremap_prep(vm_len, vma_start_pgoff(vma), start, len,
+				    &pfn);
 	if (err)
 		return err;
 
@@ -4360,21 +4361,21 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 	return wp_page_copy(vmf);
 }
 
-static inline void unmap_mapping_range_tree(struct rb_root_cached *root,
+static inline void unmap_mapping_range_tree(struct address_space *mapping,
 					    pgoff_t first_index,
 					    pgoff_t last_index,
 					    struct zap_details *details)
 {
 	struct vm_area_struct *vma;
-	unsigned long start, size;
 	struct mmu_gather tlb;
 
-	vma_interval_tree_foreach(vma, root, first_index, last_index) {
-		const pgoff_t start_idx = max(first_index, vma->vm_pgoff);
+	mapping_rmap_tree_foreach(vma, mapping, first_index, last_index) {
+		const pgoff_t start_idx = max(first_index, vma_start_pgoff(vma));
 		const pgoff_t end_idx = min(last_index, vma_last_pgoff(vma)) + 1;
-
-		start = vma->vm_start + ((start_idx - vma->vm_pgoff) << PAGE_SHIFT);
-		size = (end_idx - start_idx) << PAGE_SHIFT;
+		const pgoff_t offset = start_idx - vma_start_pgoff(vma);
+		const unsigned long offset_bytes = offset << PAGE_SHIFT;
+		const unsigned long start = vma->vm_start + offset_bytes;
+		const unsigned long size = (end_idx - start_idx) << PAGE_SHIFT;
 
 		tlb_gather_mmu(&tlb, vma->vm_mm);
 		zap_vma_range_batched(&tlb, vma, start, size, details);
@@ -4411,7 +4412,7 @@ void unmap_mapping_folio(struct folio *folio)
 
 	i_mmap_lock_read(mapping);
 	if (unlikely(mapping_mapped(mapping)))
-		unmap_mapping_range_tree(&mapping->i_mmap, first_index,
+		unmap_mapping_range_tree(mapping, first_index,
 					 last_index, &details);
 	i_mmap_unlock_read(mapping);
 }
@@ -4441,7 +4442,7 @@ void unmap_mapping_pages(struct address_space *mapping, pgoff_t start,
 
 	i_mmap_lock_read(mapping);
 	if (unlikely(mapping_mapped(mapping)))
-		unmap_mapping_range_tree(&mapping->i_mmap, first_index,
+		unmap_mapping_range_tree(mapping, first_index,
 					 last_index, &details);
 	i_mmap_unlock_read(mapping);
 }
@@ -5712,7 +5713,7 @@ fallback:
 	} else if (nr_pages > 1) {
 		pgoff_t idx = folio_page_idx(folio, page);
 		/* The page offset of vmf->address within the VMA. */
-		pgoff_t vma_off = vmf->pgoff - vmf->vma->vm_pgoff;
+		pgoff_t vma_off = vmf->pgoff - vma_start_pgoff(vmf->vma);
 		/* The index of the entry in the pagetable for fault page. */
 		pgoff_t pte_off = pte_index(vmf->address);
 
@@ -5824,7 +5825,7 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 	pgoff_t nr_pages = READ_ONCE(fault_around_pages);
 	pgoff_t pte_off = pte_index(vmf->address);
 	/* The page offset of vmf->address within the VMA. */
-	pgoff_t vma_off = vmf->pgoff - vmf->vma->vm_pgoff;
+	pgoff_t vma_off = vmf->pgoff - vma_start_pgoff(vmf->vma);
 	pgoff_t from_pte, to_pte;
 	vm_fault_t ret;
 
@@ -7352,7 +7353,7 @@ void print_vma_addr(char *prefix, unsigned long ip)
 	if (vma && vma->vm_file) {
 		struct file *f = vma->vm_file;
 		ip -= vma->vm_start;
-		ip += vma->vm_pgoff << PAGE_SHIFT;
+		ip += vma_start_pgoff(vma) << PAGE_SHIFT;
 		printk("%s%pD[%lx,%lx+%lx]", prefix, f, ip,
 				vma->vm_start,
 				vma->vm_end - vma->vm_start);
