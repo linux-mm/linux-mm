@@ -1267,7 +1267,12 @@ static void __init setup_vm_final(void)
 	 */
 	unsigned long idx = pgd_index(__fix_to_virt(FIX_FDT));
 
-	set_pgd(&swapper_pg_dir[idx], early_pg_dir[idx]);
+	BUILD_BUG_ON (CONFIG_PGTABLE_LEVELS != 2);
+
+	pmd_t *pmdp_s = (void *)&swapper_pg_dir[idx];
+	pmd_t *pmdp = (void *)&early_pg_dir[idx];
+
+	set_pmd(pmdp_s, pmdp_get(pmdp));
 #endif
 	create_pgd_mapping(swapper_pg_dir, FIXADDR_START,
 			   __pa_symbol(fixmap_pgd_next),
