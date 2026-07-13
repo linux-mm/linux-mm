@@ -70,19 +70,17 @@ static pmd_t * __init one_md_table_init(pgd_t *pgd)
 	pud_t *pud;
 	pmd_t *pmd_table;
 
+	p4d = p4d_offset(pgd, 0);
+	pud = pud_offset(p4d, 0);
 #ifdef CONFIG_X86_PAE
-	if (!(pgd_val(*pgd) & _PAGE_PRESENT)) {
+	if (!(pud_val(*pud) & _PAGE_PRESENT)) {
 		pmd_table = (pmd_t *)alloc_low_page();
-		set_pgd(pgd, __pgd(__pa(pmd_table) | _PAGE_PRESENT));
-		p4d = p4d_offset(pgd, 0);
-		pud = pud_offset(p4d, 0);
+		set_pud(pud, __pud(__pa(pmd_table) | _PAGE_PRESENT));
 		BUG_ON(pmd_table != pmd_offset(pud, 0));
 
 		return pmd_table;
 	}
 #endif
-	p4d = p4d_offset(pgd, 0);
-	pud = pud_offset(p4d, 0);
 	pmd_table = pmd_offset(pud, 0);
 
 	return pmd_table;
