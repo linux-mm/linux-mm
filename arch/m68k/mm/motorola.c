@@ -273,7 +273,7 @@ static pmd_t * __init kernel_ptr_table(void)
 
 			if (!pud_present(*pud))
 				continue;
-			pmd = pgd_page_vaddr(kernel_pg_dir[i]);
+			pmd = (unsigned long)pud_pgtable(*pud);
 			if (pmd > last)
 				last = pmd;
 		}

@@ -95,7 +95,7 @@ static inline void init_pointer_tables(void)
 		if (!pud_present(*pud))
 			continue;
 
-		pmd_dir = (pmd_t *)pgd_page_vaddr(kernel_pg_dir[i]);
+		pmd_dir = pud_pgtable(*pud);
 		init_pointer_table(pmd_dir, TABLE_PMD);
 
 		for (j = 0; j < PTRS_PER_PMD; j++) {
