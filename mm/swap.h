@@ -208,6 +208,41 @@ static inline void swap_cluster_unlock_irq(struct swap_cluster_info *ci)
 
 extern int swap_retry_table_alloc(swp_entry_t entry, gfp_t gfp);
 
+struct zswap_entry;
+#ifdef CONFIG_ZSWAP
+void *zswap_swp_tb_get_shadow(unsigned long swp_tb);
+unsigned char zswap_swp_tb_get_count(unsigned long swp_tb);
+unsigned char zswap_swp_tb_get_flags(unsigned long swp_tb);
+int zswap_swp_tb_dup_count(unsigned long swp_tb,
+			   struct swap_cluster_info *ci, unsigned int ci_off);
+void zswap_swp_tb_put_count(unsigned long swp_tb,
+			    struct swap_cluster_info *ci, unsigned int ci_off);
+void zswap_entry_free(struct zswap_entry *entry);
+#else
+static inline void *zswap_swp_tb_get_shadow(unsigned long swp_tb)
+{
+	return NULL;
+}
+static inline unsigned char zswap_swp_tb_get_count(unsigned long swp_tb)
+{
+	return 0;
+}
+static inline unsigned char zswap_swp_tb_get_flags(unsigned long swp_tb)
+{
+	return 0;
+}
+static inline int zswap_swp_tb_dup_count(unsigned long swp_tb,
+					 struct swap_cluster_info *ci,
+					 unsigned int ci_off)
+{
+	return 0;
+}
+static inline void zswap_swp_tb_put_count(unsigned long swp_tb,
+					  struct swap_cluster_info *ci,
+					  unsigned int ci_off) {}
+static inline void zswap_entry_free(struct zswap_entry *entry) {}
+#endif
+
 /*
  * Below are the core routines for doing swap for a folio.
  * All helpers requires the folio to be locked, and a locked folio
@@ -239,7 +274,7 @@ extern void __swap_cluster_free_entries(struct swap_info_struct *si,
 /* linux/mm/page_io.c */
 int sio_pool_init(void);
 struct swap_iocb;
-void swap_read_folio(struct folio *folio, struct swap_iocb **plug);
+void swap_read_folio(struct folio *folio, struct swap_iocb **plug, void *zentry);
 void __swap_read_unplug(struct swap_iocb *plug);
 static inline void swap_read_unplug(struct swap_iocb *plug)
 {
@@ -301,13 +336,16 @@ static inline bool folio_matches_swap_entry(const struct folio *folio,
 bool swap_cache_has_folio(swp_entry_t entry);
 struct folio *swap_cache_get_folio(swp_entry_t entry);
 void *swap_cache_get_shadow(swp_entry_t entry);
+bool folio_maybe_swapped(struct folio *folio);
 void swap_cache_del_folio(struct folio *folio);
 struct folio *swap_cache_alloc_folio(swp_entry_t target_entry, gfp_t gfp_mask,
 				     unsigned long orders, struct vm_fault *vmf,
-				     struct mempolicy *mpol, pgoff_t ilx);
+				     struct mempolicy *mpol, pgoff_t ilx,
+				     void **zentry);
 /* Below helpers require the caller to lock and pass in the swap cluster. */
 void __swap_cache_add_folio(struct swap_cluster_info *ci,
-			    struct folio *folio, swp_entry_t entry);
+			    struct folio *folio, swp_entry_t entry,
+			    void **zentry);
 void __swap_cache_del_folio(struct swap_cluster_info *ci,
 			    struct folio *folio, swp_entry_t entry, void *shadow);
 void __swap_cache_replace_folio(struct swap_cluster_info *ci,
@@ -379,7 +417,8 @@ static inline void folio_put_swap(struct folio *folio, struct page *page)
 {
 }
 
-static inline void swap_read_folio(struct folio *folio, struct swap_iocb **plug)
+static inline void swap_read_folio(struct folio *folio, struct swap_iocb **plug,
+				   void *zentry)
 {
 }
 
@@ -449,6 +488,11 @@ static inline struct folio *swap_cache_get_folio(swp_entry_t entry)
 static inline void *swap_cache_get_shadow(swp_entry_t entry)
 {
 	return NULL;
+}
+
+static inline bool folio_maybe_swapped(struct folio *folio)
+{
+	return false;
 }
 
 static inline void swap_cache_del_folio(struct folio *folio)

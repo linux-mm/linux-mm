@@ -935,7 +935,8 @@ static bool __swap_cluster_alloc_entries(struct swap_info_struct *si,
 		nr_pages = 1 << order;
 		swap_cluster_assert_empty(ci, ci_off, nr_pages, false);
 		__swap_cache_add_folio(ci, folio, swp_entry(si->type,
-							    ci_off + cluster_offset(si, ci)));
+							    ci_off + cluster_offset(si, ci)),
+				       NULL);
 	} else if (IS_ENABLED(CONFIG_HIBERNATION)) {
 		order = 0;
 		nr_pages = 1;
@@ -1536,25 +1537,51 @@ static void __swap_cluster_put_entry(struct swap_cluster_info *ci,
 
 	lockdep_assert_held(&ci->lock);
 	swp_tb = __swap_table_get(ci, ci_off);
+
+	/* Pointer entries store count in the zswap_entry struct */
+	if (swp_tb_is_pointer(swp_tb)) {
+		zswap_swp_tb_put_count(swp_tb, ci, ci_off);
+		return;
+	}
+
 	count = __swp_tb_get_count(swp_tb);
 
 	VM_WARN_ON_ONCE(count <= 0);
 	VM_WARN_ON_ONCE(count > SWP_TB_COUNT_MAX);
-
-	if (count == SWP_TB_COUNT_MAX) {
-		count = ci->extend_table[ci_off];
-		/* Overflow starts with SWP_TB_COUNT_MAX */
-		VM_WARN_ON_ONCE(count < SWP_TB_COUNT_MAX);
-		count--;
-		if (count == (SWP_TB_COUNT_MAX - 1)) {
-			ci->extend_table[ci_off] = 0;
-			__swap_table_set(ci, ci_off, __swp_tb_mk_count(swp_tb, count));
+		if (count == SWP_TB_COUNT_MAX) {
+			if (!ci->extend_table) {
+				/*
+				 * MAX without extend_table: MAX is the real
+				 * count.  Decrement and write back inline.
+				 */
+				count--;
+				__swap_table_set(ci, ci_off,
+					__swp_tb_mk_count(swp_tb, count));
+			} else {
+				/*
+				 * MAX with extend_table: real count lives in
+				 * ci->extend_table[ci_off].  Pull, decrement
+				 * it, and either move it back inline (if now
+				 * fits) or write it back to the extend table.
+				 */
+				count = ci->extend_table[ci_off];
+				/* Overflow starts with SWP_TB_COUNT_MAX */
+				VM_WARN_ON_ONCE(count < SWP_TB_COUNT_MAX);
+				count--;
+				if (count == (SWP_TB_COUNT_MAX - 1)) {
+					ci->extend_table[ci_off] = 0;
+					__swap_table_set(ci, ci_off,
+						__swp_tb_mk_count(swp_tb, count));
+				} else {
+					ci->extend_table[ci_off] = count;
+				}
+			}
 		} else {
-			ci->extend_table[ci_off] = count;
+			/* count < MAX: simple inline decrement */
+			count--;
+			__swap_table_set(ci, ci_off,
+				__swp_tb_mk_count(swp_tb, count));
 		}
-	} else {
-		__swap_table_set(ci, ci_off, __swp_tb_mk_count(swp_tb, --count));
-	}
 
 	/*
 	 * `SWP_TB_COUNT_MAX - 1` triggers extend table allocation. If the
@@ -1596,7 +1623,18 @@ static void swap_put_entries_cluster(struct swap_info_struct *si,
 	ci_end = ci_off + nr;
 	do {
 		swp_tb = __swap_table_get(ci, ci_off);
-		if (swp_tb_get_count(swp_tb) == 1) {
+		/*
+		 * Pointer entries store count in the zswap_entry;
+		 * handle them before swp_tb_get_count (which returns
+		 * -EINVAL for non-countable types).
+		 */
+		if (swp_tb_is_pointer(swp_tb)) {
+			if (zswap_swp_tb_get_count(swp_tb) == 1) {
+				if (ci_batch == -1)
+					ci_batch = ci_off;
+				continue;
+			}
+		} else if (swp_tb_get_count(swp_tb) == 1) {
 			/* count == 1 and non-cached slots will be batch freed. */
 			if (!swp_tb_is_folio(swp_tb)) {
 				if (ci_batch == -1)
@@ -1647,6 +1685,11 @@ static int __swap_cluster_dup_entry(struct swap_cluster_info *ci,
 	/* Bad or special slots can't be handled */
 	if (WARN_ON_ONCE(swp_tb_is_bad(swp_tb)))
 		return -EINVAL;
+
+	/* Pointer entries store count in the zswap_entry struct */
+	if (swp_tb_is_pointer(swp_tb))
+		return zswap_swp_tb_dup_count(swp_tb, ci, ci_off);
+
 	count = __swp_tb_get_count(swp_tb);
 	/* Must be either cached or have a count already */
 	if (WARN_ON_ONCE(!count && !swp_tb_is_folio(swp_tb)))
@@ -1923,13 +1966,26 @@ void __swap_cluster_free_entries(struct swap_info_struct *si,
 		old_tb = __swap_table_get(ci, ci_off);
 		/*
 		 * Freeing is done after release of the last swap count
-		 * ref, or after swap cache is dropped
+		 * ref, or after swap cache is dropped. A Pointer entry
+		 * means zswap has a compressed copy; the xarray still
+		 * holds the entry and zswap_invalidate will free it.
 		 */
-		VM_WARN_ON(!swp_tb_is_shadow(old_tb) || __swp_tb_get_count(old_tb) > 1);
+		if (swp_tb_is_pointer(old_tb)) {
+			VM_WARN_ON(zswap_swp_tb_get_count(old_tb) > 1);
+			/*
+			 * Free the zswap entry now under ci->lock while
+			 * the Pointer is still in the swap table.  Once
+			 * we null the slot, the entry would be leaked.
+			 */
+			zswap_entry_free(swp_tb_to_pointer(old_tb));
+		} else {
+			VM_WARN_ON(!swp_tb_is_shadow(old_tb) ||
+				   __swp_tb_get_count(old_tb) > 1);
+		}
 
 		/* Resetting the slot to NULL also clears the inline flags. */
 		__swap_table_set(ci, ci_off, null_to_swp_tb());
-		if (!SWAP_TABLE_HAS_ZEROFLAG)
+		if (!SWAP_TABLE_HAS_ZEROFLAG && !swp_tb_is_pointer(old_tb))
 			__swap_table_clear_zero(ci, ci_off);
 
 		/*
@@ -1961,8 +2017,11 @@ int __swap_count(swp_entry_t entry)
 {
 	struct swap_cluster_info *ci = __swap_entry_to_cluster(entry);
 	unsigned int ci_off = swp_cluster_offset(entry);
+	unsigned long swp_tb = __swap_table_get(ci, ci_off);
 
-	return swp_tb_get_count(__swap_table_get(ci, ci_off));
+	if (swp_tb_is_pointer(swp_tb))
+		return zswap_swp_tb_get_count(swp_tb);
+	return swp_tb_get_count(swp_tb);
 }
 
 /**
@@ -1980,6 +2039,8 @@ bool swap_entry_swapped(struct swap_info_struct *si, swp_entry_t entry)
 	swp_tb = swap_table_get(ci, offset % SWAPFILE_CLUSTER);
 	swap_cluster_unlock(ci);
 
+	if (swp_tb_is_pointer(swp_tb))
+		return zswap_swp_tb_get_count(swp_tb) > 0;
 	return swp_tb_get_count(swp_tb) > 0;
 }
 
@@ -2020,7 +2081,7 @@ int swp_swapcount(swp_entry_t entry)
  *
  * Context: Caller must ensure the folio is locked and in the swap cache.
  */
-static bool folio_maybe_swapped(struct folio *folio)
+bool folio_maybe_swapped(struct folio *folio)
 {
 	swp_entry_t entry = folio->swap;
 	struct swap_cluster_info *ci;
@@ -2561,8 +2622,12 @@ static int unuse_pte_range(struct vm_area_struct *vma, pmd_t *pmd,
 		if (!folio) {
 			swp_tb = swap_table_get(__swap_entry_to_cluster(entry),
 						swp_cluster_offset(entry));
-			if (swp_tb_get_count(swp_tb) <= 0)
+			if (swp_tb_is_pointer(swp_tb)) {
+				if (zswap_swp_tb_get_count(swp_tb) <= 0)
+					continue;
+			} else if (swp_tb_get_count(swp_tb) <= 0) {
 				continue;
+			}
 			return -ENOMEM;
 		}
 
