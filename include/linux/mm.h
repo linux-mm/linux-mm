@@ -3758,6 +3758,11 @@ static inline struct ptdesc *pagetable_alloc_noprof(gfp_t gfp, unsigned int orde
 {
 	struct page *page = alloc_pages_noprof(gfp | __GFP_COMP, order);
 
+	if (!page)
+		return NULL;
+
+	lruvec_stat_add_folio(page_folio(page), NR_PAGETABLE);
+
 	return page_ptdesc(page);
 }
 #define pagetable_alloc(...)	alloc_hooks(pagetable_alloc_noprof(__VA_ARGS__))
@@ -3765,6 +3770,8 @@ static inline struct ptdesc *pagetable_alloc_noprof(gfp_t gfp, unsigned int orde
 static inline void __pagetable_free(struct ptdesc *pt)
 {
 	struct page *page = ptdesc_page(pt);
+
+	lruvec_stat_sub_folio(page_folio(page), NR_PAGETABLE);
 
 	__free_pages(page, compound_order(page));
 }
@@ -3874,7 +3881,6 @@ static inline void __pagetable_ctor(struct ptdesc *ptdesc)
 	struct folio *folio = ptdesc_folio(ptdesc);
 
 	__folio_set_pgtable(folio);
-	lruvec_stat_add_folio(folio, NR_PAGETABLE);
 }
 
 static inline void pagetable_dtor(struct ptdesc *ptdesc)
@@ -3883,7 +3889,6 @@ static inline void pagetable_dtor(struct ptdesc *ptdesc)
 
 	ptlock_free(ptdesc);
 	__folio_clear_pgtable(folio);
-	lruvec_stat_sub_folio(folio, NR_PAGETABLE);
 }
 
 static inline void pagetable_dtor_free(struct ptdesc *ptdesc)
