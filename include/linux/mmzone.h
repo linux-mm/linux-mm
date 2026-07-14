@@ -329,6 +329,9 @@ enum node_stat_item {
 	PGROTATE_ANON,
 	PGROTATE_FILE,
 	PGREFILL,
+#ifdef CONFIG_LRU_GEN
+	AGING,
+#endif
 #ifdef CONFIG_HUGETLB_PAGE
 	NR_HUGETLB,
 #endif
