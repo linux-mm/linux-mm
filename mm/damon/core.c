@@ -2789,7 +2789,7 @@ static u64 damos_get_some_mem_psi_total(void)
 static inline u64 damos_get_some_mem_psi_total(void)
 {
 	return 0;
-};
+}
 
 #endif	/* CONFIG_PSI */
 
