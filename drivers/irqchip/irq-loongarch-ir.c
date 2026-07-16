@@ -384,7 +384,7 @@ static int redirect_table_init(struct redirect_desc *irde)
 	unsigned long *bitmap;
 	struct folio *folio;
 
-	folio = __folio_alloc_node(GFP_KERNEL | __GFP_ZERO, IRD_TABLE_PAGE_ORDER, irde->node);
+	folio = folio_alloc_node(GFP_KERNEL | __GFP_ZERO, IRD_TABLE_PAGE_ORDER, irde->node);
 	if (!folio) {
 		pr_err("Node [%d] redirect table alloc pages failed!\n", irde->node);
 		return -ENOMEM;
@@ -410,7 +410,7 @@ static int redirect_queue_init(struct redirect_desc *irde)
 	struct redirect_queue *inv_queue = &irde->inv_queue;
 	struct folio *folio;
 
-	folio = __folio_alloc_node(GFP_KERNEL | __GFP_ZERO, INV_QUEUE_PAGE_ORDER, irde->node);
+	folio = folio_alloc_node(GFP_KERNEL | __GFP_ZERO, INV_QUEUE_PAGE_ORDER, irde->node);
 	if (!folio) {
 		pr_err("Node [%d] invalid queue alloc pages failed!\n", irde->node);
 		return -ENOMEM;
