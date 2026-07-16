@@ -5500,7 +5500,6 @@ struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_
 				    preferred_nid, nodemask, ALLOC_DEFAULT);
 	return page_rmappable_folio(page);
 }
-EXPORT_SYMBOL(__folio_alloc_noprof);
 
 struct folio *folio_alloc_node_noprof(gfp_t gfp, unsigned int order, int nid)
 {
