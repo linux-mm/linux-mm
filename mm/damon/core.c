@@ -1912,6 +1912,9 @@ static unsigned long damon_apply_min_nr_regions(struct damon_ctx *ctx)
 		damon_for_each_region_safe(r, next, t) {
 			while (damon_sz_region(r) > max_region_sz) {
 				damon_split_region_at(t, r, max_region_sz);
+				/* split might failed */
+				if (r == damon_last_region(t))
+					break;
 				r = damon_next_region(r);
 			}
 		}
