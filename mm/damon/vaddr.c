@@ -6,6 +6,7 @@
 #define pr_fmt(fmt) "damon-va: " fmt
 
 #include <linux/highmem.h>
+#include <linux/huge_mm.h>
 #include <linux/hugetlb.h>
 #include <linux/mman.h>
 #include <linux/mmu_notifier.h>
@@ -897,6 +898,111 @@ static unsigned long damos_va_stat(struct damon_target *target,
 	return 0;
 }
 
+/*
+ * damos_va_split() - Split large folios in a region down to @target_order
+ * using the existing split_folio_to_order().
+ *
+ * Locking: folio_walk_start() returns the folio with the page table lock
+ * held.  split_folio_to_order() must not run under the page table lock,
+ * so we pin the folio (reference + lock), end the walk to drop the page
+ * table lock, and split while holding only mmap_read_lock.
+ * split_folio_to_order() returns -EBUSY for a raced or pinned folio;
+ * we skip such folios.
+ */
+static unsigned long damos_va_split(struct damon_target *target,
+		struct damon_region *r, struct damos *s,
+		unsigned long *sz_filter_passed)
+{
+	unsigned int target_order = s->order;
+	unsigned long addr = ALIGN_DOWN(r->ar.start, PAGE_SIZE);
+	unsigned long end = r->ar.end;
+	unsigned long applied = 0;
+	struct mm_struct *mm;
+
+	mm = damon_get_mm(target);
+	if (!mm)
+		return 0;
+
+	while (addr < end) {
+		struct vm_area_struct *vma;
+		struct folio *folio;
+		struct folio_walk fw;
+		unsigned long folio_sz = 0;
+
+		if (mmap_read_lock_killable(mm))
+			break;
+
+		vma = vma_lookup(mm, addr);
+		if (!vma) {
+			/* Skip the gap to the next VMA, if any. */
+			vma = find_vma(mm, addr);
+			mmap_read_unlock(mm);
+			if (!vma || vma->vm_start >= end)
+				break;
+			addr = vma->vm_start;
+			continue;
+		}
+
+		/* Folios in these VMAs are not our business. */
+		if (vma->vm_flags & (VM_HUGETLB | VM_MIXEDMAP)) {
+			addr = vma->vm_end;
+			mmap_read_unlock(mm);
+			continue;
+		}
+
+		folio = folio_walk_start(&fw, vma, addr, 0);
+		if (!folio) {
+			mmap_read_unlock(mm);
+			addr += PAGE_SIZE;
+			continue;
+		}
+
+		folio_sz = folio_size(folio);
+
+		/*
+		 * For file-backed folios, @target_order may be below the
+		 * filesystem's minimum folio order (mapping_min_folio_order()).
+		 * split_folio_to_order() will simply fail in that case and
+		 * we skip the folio.  This is a safe no-op; future work can
+		 * adjust target_order upward like split_huge_pages_in_pid()
+		 * does when a specific filesystem needs it.
+		 */
+
+		/* Honour the scheme's operations-layer filters. */
+		if (damos_ops_has_filter(s)) {
+			if (damos_va_filter_out(s, folio, vma, addr,
+					fw.level == FW_LEVEL_PTE ? fw.ptep : NULL,
+					fw.level == FW_LEVEL_PMD ? fw.pmdp : NULL)) {
+				folio_walk_end(&fw, vma);
+				mmap_read_unlock(mm);
+				goto next;
+			}
+			*sz_filter_passed += folio_sz;
+		}
+
+		if (folio_order(folio) > target_order && folio_trylock(folio)) {
+			folio_get(folio);
+			/* Drop the page table lock before splitting. */
+			folio_walk_end(&fw, vma);
+
+			if (!split_folio_to_order(folio, target_order))
+				applied += folio_sz;
+
+			folio_unlock(folio);
+			folio_put(folio);
+		} else {
+			folio_walk_end(&fw, vma);
+		}
+		mmap_read_unlock(mm);
+next:
+		addr = ALIGN_DOWN(addr, folio_sz) + folio_sz;
+		cond_resched();
+	}
+
+	mmput(mm);
+	return applied;
+}
+
 static unsigned long damon_va_apply_scheme(struct damon_ctx *ctx,
 		struct damon_target *t, struct damon_region *r,
 		struct damos *scheme, unsigned long *sz_filter_passed)
@@ -927,6 +1033,8 @@ static unsigned long damon_va_apply_scheme(struct damon_ctx *ctx,
 		return damos_va_migrate(t, r, scheme, sz_filter_passed);
 	case DAMOS_STAT:
 		return damos_va_stat(t, r, scheme, sz_filter_passed);
+	case DAMOS_SPLIT:
+		return damos_va_split(t, r, scheme, sz_filter_passed);
 	default:
 		/*
 		 * DAMOS actions that are not yet supported by 'vaddr'.
