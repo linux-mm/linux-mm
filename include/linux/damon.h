@@ -119,6 +119,7 @@ struct damon_target {
  * @DAMOS_HUGEPAGE:	Call ``madvise()`` for the region with MADV_HUGEPAGE.
  * @DAMOS_NOHUGEPAGE:	Call ``madvise()`` for the region with MADV_NOHUGEPAGE.
  * @DAMOS_COLLAPSE:	Call ``madvise()`` for the region with MADV_COLLAPSE.
+ * @DAMOS_SPLIT:	Split each large folio in the region to a smaller order.
  * @DAMOS_LRU_PRIO:	Prioritize the region on its LRU lists.
  * @DAMOS_LRU_DEPRIO:	Deprioritize the region on its LRU lists.
  * @DAMOS_MIGRATE_HOT:  Migrate the regions prioritizing warmer regions.
@@ -139,6 +140,7 @@ enum damos_action {
 	DAMOS_HUGEPAGE,
 	DAMOS_NOHUGEPAGE,
 	DAMOS_COLLAPSE,
+	DAMOS_SPLIT,
 	DAMOS_LRU_PRIO,
 	DAMOS_LRU_DEPRIO,
 	DAMOS_MIGRATE_HOT,
@@ -591,10 +593,15 @@ struct damos {
 	struct damos_quota quota;
 	struct damos_watermarks wmarks;
 	union {
-		struct {
-			int target_nid;
-			struct damos_migrate_dests migrate_dests;
-		};
+		int target_nid;
+		struct damos_migrate_dests migrate_dests;
+		/*
+		 * @order: target folio order for DAMOS_SPLIT.
+		 * Split large folios down to this order.  0 for
+		 * order-0 base pages, 2..HPAGE_PMD_ORDER-1 for
+		 * smaller mTHP.  Order-1 is rejected.
+		 */
+		unsigned int order;
 	};
 	struct list_head core_filters;
 	struct list_head ops_filters;

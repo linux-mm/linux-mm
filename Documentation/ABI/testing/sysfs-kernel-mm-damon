@@ -219,6 +219,13 @@ Contact:	SJ Park <sj@kernel.org>
 Description:	Action's target NUMA node id.  Supported by only relevant
 		actions.
 
+What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/schemes/<S>/target_order
+Date:		Jul 2026
+Contact:	SJ Park <sj@kernel.org>
+Description:	Target folio order for the ``split`` action.  Large folios in
+		the target region are split down to this order.  Valid values
+		are 0 (order-0 base pages) and 2..HPAGE_PMD_ORDER-1.
+
 What:		/sys/kernel/mm/damon/admin/kdamonds/<K>/contexts/<C>/schemes/<S>/apply_interval_us
 Date:		Sep 2023
 Contact:	SJ Park <sj@kernel.org>
