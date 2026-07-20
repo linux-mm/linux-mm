@@ -21,10 +21,11 @@ answer, although very likely you should use
 
 ::
 
-  kzalloc(<size>, GFP_KERNEL);
+  ptr = kzalloc_obj(*ptr, GFP_KERNEL);
 
-Of course there are cases when other allocation APIs and different GFP
-flags must be used.
+The ``GFP_KERNEL`` flag can be omitted, because GFP_KERNEL is the
+default value. It is left here deliberately. Of course there are
+cases when other allocation APIs and different GFP flags must be used.
 
 Get Free Page flags
 ===================
@@ -133,24 +134,24 @@ Selecting memory allocator
 ==========================
 
 The most straightforward way to allocate memory is to use a function
-from the kmalloc() family. And, to be on the safe side it's best to use
-routines that set memory to zero, like kzalloc(). If you need to
-allocate memory for an array, there are kmalloc_array() and kcalloc()
+from the kmalloc_obj() family. And, to be on the safe side it's best to use
+routines that set memory to zero, like kzalloc_obj(). If you need to
+allocate memory for an array, there are kmalloc_objs() and kzalloc_objs()
 helpers. The helpers struct_size(), array_size() and array3_size() can
 be used to safely calculate object sizes without overflowing.
 
-The maximal size of a chunk that can be allocated with `kmalloc` is
+The maximal size of a chunk that can be allocated with `kmalloc_obj` is
 limited. The actual limit depends on the hardware and the kernel
-configuration, but it is a good practice to use `kmalloc` for objects
+configuration, but it is a good practice to use `kmalloc_obj` for objects
 smaller than page size.
 
-The address of a chunk allocated with `kmalloc` is aligned to at least
+The address of a chunk allocated with `kmalloc_obj` is aligned to at least
 ARCH_KMALLOC_MINALIGN bytes. For sizes which are a power of two, the
 alignment is also guaranteed to be at least the respective size. For other
 sizes, the alignment is guaranteed to be at least the largest power-of-two
 divisor of the size.
 
-Chunks allocated with kmalloc() can be resized with krealloc(). Similarly
+Chunks allocated with kmalloc_obj() can be resized with krealloc(). Similarly
 to kmalloc_array(): a helper for resizing arrays is provided in the form of
 krealloc_array().
 
