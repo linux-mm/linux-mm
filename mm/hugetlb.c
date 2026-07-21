@@ -39,6 +39,7 @@
 #include <linux/padata.h>
 #include <linux/pgalloc.h>
 #include <linux/memcontrol.h>
+#include "hugetlb_subpool.h"
 
 #include <asm/page.h>
 #include <asm/tlb.h>
@@ -114,8 +115,7 @@ __cacheline_aligned_in_smp DEFINE_SPINLOCK(hugetlb_lock);
 static int num_fault_mutexes __ro_after_init;
 struct mutex *hugetlb_fault_mutex_table __ro_after_init;
 
-/* Forward declaration */
-static int hugetlb_acct_memory(struct hstate *h, long delta);
+/* Forward declarations */
 static void hugetlb_vma_lock_free(struct vm_area_struct *vma);
 static void hugetlb_vma_lock_alloc(struct vm_area_struct *vma);
 static void __hugetlb_vma_unlock_write_free(struct vm_area_struct *vma);
@@ -125,156 +125,6 @@ static int __huge_pmd_unshare(struct mmu_gather *tlb,
 static void hugetlb_unshare_pmds(struct vm_area_struct *vma,
 		unsigned long start, unsigned long end, bool take_locks);
 static struct resv_map *vma_resv_map(struct vm_area_struct *vma);
-
-static inline bool subpool_is_free(struct hugepage_subpool *spool)
-{
-	if (spool->count)
-		return false;
-
-	return spool->used_hpages == 0;
-}
-
-static inline void unlock_or_release_subpool(struct hugepage_subpool *spool,
-						unsigned long irq_flags)
-{
-	spin_unlock_irqrestore(&spool->lock, irq_flags);
-
-	/* If no pages are used, and no other handles to the subpool
-	 * remain, give up any reservations based on minimum size and
-	 * free the subpool */
-	if (subpool_is_free(spool)) {
-		if (spool->min_hpages != -1)
-			hugetlb_acct_memory(spool->hstate,
-						-spool->min_hpages);
-		kfree(spool);
-	}
-}
-
-struct hugepage_subpool *hugepage_new_subpool(struct hstate *h, long max_hpages,
-						long min_hpages)
-{
-	struct hugepage_subpool *spool;
-
-	spool = kzalloc_obj(*spool);
-	if (!spool)
-		return NULL;
-
-	spin_lock_init(&spool->lock);
-	spool->count = 1;
-	spool->max_hpages = max_hpages;
-	spool->hstate = h;
-	spool->min_hpages = min_hpages;
-
-	if (min_hpages != -1 && hugetlb_acct_memory(h, min_hpages)) {
-		kfree(spool);
-		return NULL;
-	}
-	spool->rsv_hpages = min_hpages;
-
-	return spool;
-}
-
-void hugepage_put_subpool(struct hugepage_subpool *spool)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&spool->lock, flags);
-	BUG_ON(!spool->count);
-	spool->count--;
-	unlock_or_release_subpool(spool, flags);
-}
-
-/*
- * Subpool accounting for allocating and reserving pages.
- * Return -ENOMEM if there are not enough resources to satisfy the
- * request.  Otherwise, return the number of pages by which the
- * global pools must be adjusted (upward).  The returned value may
- * only be different than the passed value (delta) in the case where
- * a subpool minimum size must be maintained.
- */
-static long hugepage_subpool_get_pages(struct hugepage_subpool *spool,
-				      long delta)
-{
-	long ret = delta;
-
-	if (!spool)
-		return ret;
-
-	spin_lock_irq(&spool->lock);
-
-	if (spool->max_hpages != -1 &&
-	    spool->used_hpages + delta > spool->max_hpages) {
-		ret = -ENOMEM;
-		goto unlock_ret;
-	}
-
-	spool->used_hpages += delta;
-
-	/* minimum size accounting */
-	if (spool->min_hpages != -1 && spool->rsv_hpages) {
-		if (delta > spool->rsv_hpages) {
-			/*
-			 * Asking for more reserves than those already taken on
-			 * behalf of subpool.  Return difference.
-			 */
-			ret = delta - spool->rsv_hpages;
-			spool->rsv_hpages = 0;
-		} else {
-			ret = 0;	/* reserves already accounted for */
-			spool->rsv_hpages -= delta;
-		}
-	}
-
-unlock_ret:
-	spin_unlock_irq(&spool->lock);
-	return ret;
-}
-
-/*
- * Subpool accounting for freeing and unreserving pages.
- * Return the number of global page reservations that must be dropped.
- * The return value may only be different than the passed value (delta)
- * in the case where a subpool minimum size must be maintained.
- */
-static long hugepage_subpool_put_pages(struct hugepage_subpool *spool,
-				       long delta)
-{
-	long ret = delta;
-	unsigned long flags;
-
-	if (!spool)
-		return delta;
-
-	spin_lock_irqsave(&spool->lock, flags);
-
-	spool->used_hpages -= delta;
-
-	 /* minimum size accounting */
-	if (spool->min_hpages != -1 && spool->used_hpages < spool->min_hpages) {
-		/*
-		 * limit is the maximum number of reservations that
-		 * can be restored to this subpool.
-		 */
-		long limit = spool->min_hpages - spool->used_hpages;
-
-		if (spool->rsv_hpages + delta <= limit)
-			ret = 0;
-		else
-			ret = spool->rsv_hpages + delta - limit;
-
-		spool->rsv_hpages += delta;
-		if (spool->rsv_hpages > limit)
-			spool->rsv_hpages = limit;
-	}
-
-	/*
-	 * If hugetlbfs_put_super couldn't free spool due to an outstanding
-	 * quota reference, free it now.
-	 */
-	unlock_or_release_subpool(spool, flags);
-
-	return ret;
-}
 
 static inline struct hugepage_subpool *subpool_vma(struct vm_area_struct *vma)
 {
@@ -4602,7 +4452,7 @@ unsigned long hugetlb_total_pages(void)
 	return nr_total_pages;
 }
 
-static int hugetlb_acct_memory(struct hstate *h, long delta)
+int hugetlb_acct_memory(struct hstate *h, long delta)
 {
 	int ret = -ENOMEM;
 
