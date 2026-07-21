@@ -4523,6 +4523,32 @@ void unmap_mapping_pages(struct address_space *mapping, pgoff_t start,
 EXPORT_SYMBOL_GPL(unmap_mapping_pages);
 
 /**
+ * unmap_mapping_file() - Unmap all mmaps of an open file.
+ * @file: The file to unmap.
+ *
+ * Unmap every VMA with vm_file set to @file, regardless of the address
+ * space it is attached to.  This also covers files with f_mapping
+ * swapped to a different address space at open time, since such VMAs
+ * cannot be found through the file's own inode mapping.
+ */
+void unmap_mapping_file(struct file *file)
+{
+	struct address_space *mapping = file->f_mapping;
+	struct vm_area_struct *vma;
+
+	i_mmap_lock_read(mapping);
+	if (unlikely(mapping_mapped(mapping))) {
+		vma_interval_tree_foreach(vma, &mapping->i_mmap, 0, ULONG_MAX) {
+			if (vma->vm_file != file)
+				continue;
+			zap_vma(vma);
+		}
+	}
+	i_mmap_unlock_read(mapping);
+}
+EXPORT_SYMBOL_GPL(unmap_mapping_file);
+
+/**
  * unmap_mapping_range - unmap the portion of all mmaps in the specified
  * address_space corresponding to the specified byte range in the underlying
  * file.
