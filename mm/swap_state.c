@@ -829,7 +829,7 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	blk_start_plug(&plug);
 	for (offset = start_offset; offset <= end_offset ; offset++) {
 		ra_entry = swp_entry(swp_type(entry), offset);
-		if (swap_entry_synchronous(ra_entry)) {
+		if (swap_entry_synchronous(si, ra_entry)) {
 			has_sync = true;
 			continue;
 		}
@@ -844,13 +844,13 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	blk_finish_plug(&plug);
 	swap_read_unplug(splug);
 
-	if (!has_sync || swap_entry_synchronous(entry))
+	if (!has_sync || swap_entry_synchronous(si, entry))
 		goto drain;
 
 	/* Overlap the in flight IOs with the synchronous neighbours reads */
 	for (offset = start_offset; offset <= end_offset; offset++) {
 		ra_entry = swp_entry(swp_type(entry), offset);
-		if (!swap_entry_synchronous(ra_entry))
+		if (!swap_entry_synchronous(si, ra_entry))
 			continue;
 
 		folio = swap_cache_read_folio(ra_entry, gfp_mask, mpol, ilx,
@@ -968,7 +968,7 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 				continue;
 		}
 
-		if (swap_entry_synchronous(entry)) {
+		if (swap_entry_synchronous(si, entry)) {
 			sync_entries[nr_sync] = entry;
 			sync_ilx[nr_sync] = ilx;
 			nr_sync++;
@@ -990,7 +990,7 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 	blk_finish_plug(&plug);
 	swap_read_unplug(splug);
 
-	if (!nr_sync || swap_entry_synchronous(targ_entry))
+	if (!nr_sync || swap_entry_synchronous(NULL, targ_entry))
 		goto drain;
 
 	/* Overlap the in flight IOs with the synchronous neighbours reads */

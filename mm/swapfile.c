@@ -1985,11 +1985,13 @@ bool swap_entry_swapped(struct swap_info_struct *si, swp_entry_t entry)
 
 /**
  * swap_entry_synchronous - Check if @entry is served by a synchronous source.
+ * @si: the swap device of @entry, or NULL if it is not needed/held.
  * @entry: the swap entry.
  */
-bool swap_entry_synchronous(swp_entry_t entry)
+bool swap_entry_synchronous(struct swap_info_struct *si, swp_entry_t entry)
 {
-	return zswap_is_present(entry, 1);
+	return zswap_is_present(entry, 1) ||
+	       (si && data_race(si->flags & SWP_SYNCHRONOUS_IO));
 }
 
 /*
