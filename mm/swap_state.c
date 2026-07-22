@@ -844,7 +844,7 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	blk_finish_plug(&plug);
 	swap_read_unplug(splug);
 
-	if (!has_sync)
+	if (!has_sync || swap_entry_synchronous(entry))
 		goto drain;
 
 	/* Overlap the in flight IOs with the synchronous neighbours reads */
@@ -990,7 +990,7 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 	blk_finish_plug(&plug);
 	swap_read_unplug(splug);
 
-	if (!nr_sync)
+	if (!nr_sync || swap_entry_synchronous(targ_entry))
 		goto drain;
 
 	/* Overlap the in flight IOs with the synchronous neighbours reads */
