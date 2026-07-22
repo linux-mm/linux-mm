@@ -1983,6 +1983,15 @@ bool swap_entry_swapped(struct swap_info_struct *si, swp_entry_t entry)
 	return swp_tb_get_count(swp_tb) > 0;
 }
 
+/**
+ * swap_entry_synchronous - Check if @entry is served by a synchronous source.
+ * @entry: the swap entry.
+ */
+bool swap_entry_synchronous(swp_entry_t entry)
+{
+	return zswap_is_present(entry, 1);
+}
+
 /*
  * How many references to @entry are currently swapped out?
  * This returns exact answer.
