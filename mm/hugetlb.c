@@ -38,6 +38,7 @@
 #include <linux/mm_inline.h>
 #include <linux/padata.h>
 #include <linux/pgalloc.h>
+#include <linux/memcontrol.h>
 
 #include <asm/page.h>
 #include <asm/tlb.h>
@@ -2876,6 +2877,8 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 	int ret, idx;
 	struct hugetlb_cgroup *h_cg = NULL;
 	struct hugetlb_cgroup *h_cg_rsvd = NULL;
+	struct mem_cgroup *mem_cg = NULL;
+	struct obj_cgroup *obj_cg = NULL;
 	gfp_t gfp = htlb_alloc_mask(h) | __GFP_RETRY_MAYFAIL;
 
 	idx = hstate_index(h);
@@ -2935,6 +2938,11 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 	if (ret)
 		goto out_uncharge_cgroup_reservation;
 
+	ret = mem_cgroup_hugetlb_try_charge(pages_per_huge_page(h), gfp,
+					    &mem_cg, &obj_cg);
+	if (ret)
+		goto out_uncharge_cgroup;
+
 	spin_lock_irq(&hugetlb_lock);
 	/*
 	 * glb_chg is passed to indicate whether or not a page must be taken
@@ -2946,7 +2954,7 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 		spin_unlock_irq(&hugetlb_lock);
 		folio = alloc_buddy_hugetlb_folio_with_mpol(h, vma, addr);
 		if (!folio)
-			goto out_uncharge_cgroup;
+			goto out_uncharge_cgroup_memcg;
 		spin_lock_irq(&hugetlb_lock);
 		list_add(&folio->lru, &h->hugepage_activelist);
 		folio_ref_unfreeze(folio, 1);
@@ -2972,6 +2980,9 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 	}
 
 	spin_unlock_irq(&hugetlb_lock);
+
+	mem_cgroup_hugetlb_commit_charge(folio, mem_cg, obj_cg);
+	lruvec_stat_mod_folio(folio, NR_HUGETLB, pages_per_huge_page(h));
 
 	hugetlb_set_folio_subpool(folio, spool);
 
@@ -3000,21 +3011,10 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 		}
 	}
 
-	ret = mem_cgroup_charge_hugetlb(folio, gfp);
-	/*
-	 * Unconditionally increment NR_HUGETLB here. If it turns out that
-	 * mem_cgroup_charge_hugetlb failed, then immediately free the page and
-	 * decrement NR_HUGETLB.
-	 */
-	lruvec_stat_mod_folio(folio, NR_HUGETLB, pages_per_huge_page(h));
-
-	if (ret == -ENOMEM) {
-		free_huge_folio(folio);
-		goto err;
-	}
-
 	return folio;
 
+out_uncharge_cgroup_memcg:
+	mem_cgroup_hugetlb_cancel_charge(pages_per_huge_page(h), mem_cg, obj_cg);
 out_uncharge_cgroup:
 	hugetlb_cgroup_uncharge_cgroup(idx, pages_per_huge_page(h), h_cg);
 out_uncharge_cgroup_reservation:
@@ -3035,7 +3035,7 @@ out_subpool_put:
 out_end_reservation:
 	if (map_chg != MAP_CHG_ENFORCED)
 		vma_end_reservation(h, vma, addr);
-err:
+
 	/*
 	 * Return -ENOSPC when this function fails to allocate or charge a huge
 	 * page. If a standard (PAGE_SIZE) page allocation fails, the OOM killer
