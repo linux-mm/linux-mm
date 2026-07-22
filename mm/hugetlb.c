@@ -6566,12 +6566,13 @@ long hugetlb_reserve_pages(struct inode *inode,
 		struct vm_area_struct *vma,
 		vma_flags_t vma_flags)
 {
-	long chg = -1, add = -1, gbl_resv;
+	long chg = -1, add = -1;
 	struct hstate *h = hstate_inode(inode);
 	struct hugepage_subpool *spool = subpool_inode(inode);
 	struct resv_map *resv_map;
 	struct hugetlb_cgroup *h_cg = NULL;
-	long gbl_reserve, regions_needed = 0;
+	long gbl_resv_get, gbl_resv_put;
+	long regions_needed = 0;
 	int err;
 
 	/* This should never happen */
@@ -6646,9 +6647,9 @@ long hugetlb_reserve_pages(struct inode *inode,
 	 * the subpool has a minimum size, there may be some global
 	 * reservations already in place (gbl_reserve).
 	 */
-	gbl_resv = hugepage_subpool_get_pages(spool, chg);
-	if (gbl_resv < 0) {
-		err = gbl_resv;
+	gbl_resv_get = hugepage_subpool_get_pages(spool, chg);
+	if (gbl_resv_get < 0) {
+		err = gbl_resv_get;
 		goto out_uncharge_cgroup;
 	}
 
@@ -6656,7 +6657,7 @@ long hugetlb_reserve_pages(struct inode *inode,
 	 * Check enough hugepages are available for the reservation.
 	 * Hand the pages back to the subpool if there are not
 	 */
-	err = hugetlb_acct_memory(h, gbl_resv);
+	err = hugetlb_acct_memory(h, gbl_resv_get);
 	if (err < 0)
 		goto out_put_pages;
 
@@ -6675,7 +6676,7 @@ long hugetlb_reserve_pages(struct inode *inode,
 		add = region_add(resv_map, from, to, regions_needed, h, h_cg);
 
 		if (unlikely(add < 0)) {
-			hugetlb_acct_memory(h, -gbl_resv);
+			hugetlb_acct_memory(h, -gbl_resv_get);
 			err = add;
 			goto out_put_pages;
 		} else if (unlikely(chg > add)) {
@@ -6717,14 +6718,14 @@ long hugetlb_reserve_pages(struct inode *inode,
 	 * tell us the new number of reservations that need to be
 	 * returned to the global pool.
 	 */
-	gbl_reserve = hugepage_subpool_put_pages(spool, chg);
+	gbl_resv_put = hugepage_subpool_put_pages(spool, chg);
 	/*
 	 * There may be a difference between the number of
 	 * reservations to consume and the number to restore now if
 	 * there are multiple threads interacting with the subpool -
 	 * restore the difference.
 	 */
-	hugetlb_acct_memory(h, gbl_resv - gbl_reserve);
+	hugetlb_acct_memory(h, gbl_resv_get - gbl_resv_put);
 
 out_uncharge_cgroup:
 	hugetlb_cgroup_uncharge_cgroup_rsvd(hstate_index(h),
