@@ -2456,7 +2456,7 @@ static void print_cacheline(struct c2c_hists *c2c_hists,
 		hists__fprintf_headers(&c2c_hists->hists, out);
 		once = true;
 	} else {
-		fprintf(out, "\n");
+		fputc(out, '\n');
 	}
 
 	fprintf(out, "  ----------------------------------------------------------------------\n");
@@ -2535,15 +2535,15 @@ static void perf_c2c__hists_fprintf(FILE *out, struct perf_session *session)
 	setup_pager();
 
 	print_c2c__display_stats(out);
-	fprintf(out, "\n");
+	fputc(out, '\n');
 	print_shared_cacheline_info(out);
-	fprintf(out, "\n");
+	fputc(out, '\n');
 	print_c2c_info(out, session);
 
 	if (c2c.stats_only)
 		return;
 
-	fprintf(out, "\n");
+	fputc(out, '\n');
 	fprintf(out, "=================================================\n");
 	fprintf(out, "           Shared Data Cache Line Table          \n");
 	fprintf(out, "=================================================\n");
@@ -2551,7 +2551,7 @@ static void perf_c2c__hists_fprintf(FILE *out, struct perf_session *session)
 
 	hists__fprintf(&c2c.hists.hists, true, 0, 0, 0, stdout, true);
 
-	fprintf(out, "\n");
+	fputc(out, '\n');
 	fprintf(out, "=================================================\n");
 	fprintf(out, "      Shared Cache Line Distribution Pareto      \n");
 	fprintf(out, "=================================================\n");
