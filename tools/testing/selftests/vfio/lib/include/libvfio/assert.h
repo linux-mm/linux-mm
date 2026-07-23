@@ -11,7 +11,7 @@
 
 #define VFIO_LOG_AND_EXIT(...) do {		\
 	fprintf(stderr, "  " __VA_ARGS__);	\
-	fprintf(stderr, "\n");			\
+	fputc(stderr, '\n');			\
 	exit(KSFT_FAIL);			\
 } while (0)
 

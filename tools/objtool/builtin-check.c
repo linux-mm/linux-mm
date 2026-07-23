@@ -304,7 +304,7 @@ int make_backup(void)
 			fprintf(stderr, " %s", arg);
 	}
 
-	fprintf(stderr, "\n");
+	fputc(stderr, '\n');
 	return 0;
 }
 
