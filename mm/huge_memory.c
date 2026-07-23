@@ -3566,6 +3566,7 @@ static void __split_folio_to_order(struct folio *folio, int old_order,
 		 * unreferenced sub-pages of an anonymous THP: we can simply drop
 		 * PG_anon_exclusive (-> PG_mappedtodisk) for these here.
 		 */
+		hwpoison_rcu_lock_flags(&new_folio->flags.f);
 		new_folio->flags.f &= ~PAGE_FLAGS_CHECK_AT_PREP;
 		new_folio->flags.f |= (folio->flags.f &
 				((1L << PG_referenced) |
@@ -3586,6 +3587,7 @@ static void __split_folio_to_order(struct folio *folio, int old_order,
 				 (1L << PG_dirty) |
 				 (1L << PG_dropbehind) |
 				 LRU_GEN_MASK | LRU_REFS_MASK));
+		hwpoison_rcu_unlock_flags(&new_folio->flags.f);
 
 		new_folio->mapping = folio->mapping;
 		new_folio->index = folio->index + i;
