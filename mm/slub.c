@@ -9249,7 +9249,7 @@ static ssize_t ctor_show(struct kmem_cache *s, char *buf)
 {
 	if (!s->ctor)
 		return 0;
-	return sysfs_emit(buf, "%pS\n", s->ctor);
+	return sysfs_emit(buf, "%ps\n", s->ctor);
 }
 SLAB_ATTR_RO(ctor);
 
