@@ -4522,6 +4522,54 @@ void unmap_mapping_pages(struct address_space *mapping, pgoff_t start,
 }
 EXPORT_SYMBOL_GPL(unmap_mapping_pages);
 
+static inline bool should_zap_file_vma(struct file *file,
+				       struct vm_area_struct *vma)
+{
+	/* On the file's own inode mapping, zap every VMA */
+	if (file->f_mapping == file_inode(file)->i_mapping)
+		return true;
+
+	/* A swapped mapping also holds VMAs of unrelated files, zap only ours */
+	return vma->vm_file == file;
+}
+
+/**
+ * unmap_mapping_file() - Unmap folios from all mmaps of a file.
+ * @file: The file to unmap.
+ *
+ * Unmap the folios of @file from every process that has them mapped.
+ *
+ * If f_mapping is the file's own inode mapping, they are unmapped
+ * from every VMA on that mapping, as unmap_mapping_range() would do.
+ *
+ * However, if f_mapping was swapped to a different address space at
+ * open time, only the VMAs with vm_file set to @file are considered,
+ * since that address space also holds mappings of unrelated files.
+ *
+ * Must not be used on HugeTLB files.  HugeTLB VMAs are skipped with
+ * a warning.
+ */
+void unmap_mapping_file(struct file *file)
+{
+	struct address_space *mapping = file->f_mapping;
+	struct vm_area_struct *vma;
+
+	i_mmap_lock_read(mapping);
+	if (unlikely(mapping_mapped(mapping))) {
+		vma_interval_tree_foreach(vma, &mapping->i_mmap, 0, ULONG_MAX) {
+			cond_resched();
+
+			if (!should_zap_file_vma(file, vma))
+				continue;
+			/* Zapping HugeTLB VMAs needs i_mmap_rwsem held for write */
+			if (WARN_ON_ONCE(is_vm_hugetlb_page(vma)))
+				continue;
+			zap_vma(vma);
+		}
+	}
+	i_mmap_unlock_read(mapping);
+}
+
 /**
  * unmap_mapping_range - unmap the portion of all mmaps in the specified
  * address_space corresponding to the specified byte range in the underlying
