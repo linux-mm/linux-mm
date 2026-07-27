@@ -3773,11 +3773,14 @@ static int xswap_map_clusters(struct swap_info_struct *si,
 	struct page **pages;
 	unsigned long i;
 
+	mutex_lock(&si->xswap_lock);
+
 	if (vm_start >= vm_end) {
 		/* All requested clusters fall within already-mapped pages. */
 		for (i = start_idx; i < start_idx + nr; i++)
 			spin_lock_init(&si->cluster_info[i].lock);
 		WRITE_ONCE(si->nr_clusters_mapped, start_idx + nr);
+		mutex_unlock(&si->xswap_lock);
 		return 0;
 	}
 
@@ -3842,6 +3845,7 @@ static int xswap_map_clusters(struct swap_info_struct *si,
 	 * Pairs with READ_ONCE() in shrink/grow paths.
 	 */
 	WRITE_ONCE(si->nr_clusters_mapped, start_idx + nr);
+	mutex_unlock(&si->xswap_lock);
 	return 0;
 
 fail_nounmap:
@@ -3862,6 +3866,7 @@ fail_nounmap:
 		spin_lock_init(&si->cluster_info[i].lock);
 
 	WRITE_ONCE(si->nr_clusters_mapped, start_idx + nr);
+	mutex_unlock(&si->xswap_lock);
 	return 0;
 
 fail:
@@ -3871,6 +3876,7 @@ fail:
 			__free_page(pages[i]);
 	}
 	kfree(pages);
+	mutex_unlock(&si->xswap_lock);
 	return -ENOMEM;
 }
 
@@ -3910,8 +3916,12 @@ static void xswap_unmap_clusters(struct swap_info_struct *si,
 	struct xswap_page_data xpd;
 	int i;
 
-	if (vm_start >= vm_end)
+	mutex_lock(&si->xswap_lock);
+
+	if (vm_start >= vm_end) {
+		mutex_unlock(&si->xswap_lock);
 		goto out;
+	}
 
 	size = vm_end - vm_start;
 	npages = size >> PAGE_SHIFT;
@@ -3937,10 +3947,12 @@ static void xswap_unmap_clusters(struct swap_info_struct *si,
 			__free_page(xpd.pages[i]);
 		kfree(xpd.pages);
 	}
+
+	mutex_unlock(&si->xswap_lock);
+out:
 	/*
 	 * Pairs with READ_ONCE() in shrink/grow paths.
 	 */
-	out:
 	WRITE_ONCE(si->nr_clusters_mapped, start_idx);
 }
 
@@ -4142,6 +4154,7 @@ static int setup_swap_clusters_info(struct swap_info_struct *si,
 		/* All mapped clusters except cluster 0 are free at the tail */
 		si->nr_free_tail = si->nr_clusters_mapped - 1;
 
+		mutex_init(&si->xswap_lock);
 		INIT_WORK(&si->xswap_shrink_work, xswap_shrink_work_fn);
 		xswap_debugfs_add(si);
 		return 0;
