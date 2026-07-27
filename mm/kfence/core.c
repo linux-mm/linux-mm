@@ -636,14 +636,6 @@ static unsigned long kfence_init_pool(void)
 
 		page = pfn_to_page(start_pfn + i);
 		__SetPageSlab(page);
-#ifdef CONFIG_MEMCG
-		struct slab *slab = page_slab(page);
-		slab->obj_exts = (unsigned long)&kfence_metadata_init[i / 2 - 1].obj_exts |
-				 MEMCG_DATA_OBJEXTS;
-#ifdef CONFIG_64BIT
-		slab->obj_exts_needs_objcg = 1;
-#endif
-#endif
 	}
 
 	/*
@@ -707,10 +699,6 @@ reset_slab:
 			continue;
 
 		page = pfn_to_page(start_pfn + i);
-#ifdef CONFIG_MEMCG
-		struct slab *slab = page_slab(page);
-		slab->obj_exts = 0;
-#endif
 		__ClearPageSlab(page);
 	}
 
@@ -1251,9 +1239,6 @@ void __kfence_free(void *addr)
 {
 	struct kfence_metadata *meta = addr_to_metadata((unsigned long)addr);
 
-#ifdef CONFIG_MEMCG
-	KFENCE_WARN_ON(slab_obj_ext_objcg(&meta->obj_exts));
-#endif
 	/*
 	 * If the objects of the cache are SLAB_TYPESAFE_BY_RCU, defer freeing
 	 * the object, as the object page may be recycled for other-typed
