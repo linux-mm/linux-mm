@@ -3776,6 +3776,23 @@ fail:
 	return -ENOMEM;
 }
 
+struct xswap_page_data {
+	struct page **pages;
+	int nr;
+	int max;
+};
+
+static int xswap_collect_page(pte_t *pte, unsigned long addr, void *data)
+{
+	struct xswap_page_data *xpd = data;
+
+	if (!pte_present(*pte))
+		return 0;
+	if (xpd->nr < xpd->max)
+		xpd->pages[xpd->nr++] = pte_page(*pte);
+	return 0;
+}
+
 static void xswap_unmap_clusters(struct swap_info_struct *si,
 				 unsigned long start_idx, unsigned long nr)
 {
@@ -3785,21 +3802,43 @@ static void xswap_unmap_clusters(struct swap_info_struct *si,
 	/*
 	 * Round to page boundaries: start up (skip partial page that may
 	 * contain clusters still in use before start_idx), end up so the
-	 * entire range is covered.  vm_area_unmap_pages() operates on
-	 * whole pages.
+	 * entire range is covered.  vm_area_unmap_pages() and
+	 * apply_to_existing_page_range() operate on whole pages.
 	 */
 	unsigned long vm_start = PAGE_ALIGN(start_addr);
 	unsigned long vm_end = PAGE_ALIGN(end_addr);
+	unsigned long size;
+	unsigned long npages;
+	struct xswap_page_data xpd;
+	int i;
 
 	if (vm_start >= vm_end)
 		goto out;
 
-	vm_area_unmap_pages(si->cluster_vm, vm_start, vm_end);
+	size = vm_end - vm_start;
+	npages = size >> PAGE_SHIFT;
+
 	/*
-	 * vm_area_unmap_pages() only clears PTEs; it does not free the
-	 * physical pages.  Walk the page table to find and free them.
+	 * Walk the page table to collect physical pages before unmapping.
+	 * vm_area_unmap_pages() only clears PTEs and frees intermediate
+	 * page table pages — it does not free backing pages.
 	 */
-	/* TODO: free backing pages via page table walk or tracking bitmap */
+	xpd.pages = kmalloc_array(npages, sizeof(*xpd.pages), GFP_KERNEL);
+	if (xpd.pages) {
+		xpd.nr = 0;
+		xpd.max = npages;
+		apply_to_existing_page_range(&init_mm, vm_start, size,
+					     xswap_collect_page, &xpd);
+	}
+
+	vm_area_unmap_pages(si->cluster_vm, vm_start, vm_end);
+
+	/* Free the collected backing pages */
+	if (xpd.pages) {
+		for (i = 0; i < xpd.nr; i++)
+			__free_page(xpd.pages[i]);
+		kfree(xpd.pages);
+	}
 	/*
 	 * Pairs with READ_ONCE() in shrink/grow paths.
 	 */
