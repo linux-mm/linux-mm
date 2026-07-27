@@ -2100,6 +2100,9 @@ static inline void handle_failed_objexts_alloc(struct slab *slab,
 {
 	unsigned int stride;
 
+	if (!slab_obj_ext_has_codetag())
+		return;
+
 	/*
 	 * If vector previously failed to allocate then we have live
 	 * objects with no tag reference. Mark all references in this
