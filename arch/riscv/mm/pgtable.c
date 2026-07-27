@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <asm/pgalloc.h>
+#include <linux/cpufeature.h>
 #include <linux/gfp.h>
 #include <linux/kernel.h>
 #include <linux/pgtable.h>
 
-int ptep_set_access_flags(struct vm_area_struct *vma,
-			  unsigned long address, pte_t *ptep,
-			  pte_t entry, int dirty)
+int __ptep_set_access_flags(struct vm_area_struct *vma,
+			    unsigned long address, pte_t *ptep,
+			    pte_t entry, int dirty)
 {
 	if (riscv_has_extension_unlikely(RISCV_ISA_EXT_SVVPTC)) {
-		if (!pte_same(ptep_get(ptep), entry)) {
+		if (!pte_same(__ptep_get(ptep), entry)) {
 			__set_pte_at(vma->vm_mm, ptep, entry);
-			/* Here only not svadu is impacted */
 			flush_tlb_page(vma, address);
 			return true;
 		}
@@ -20,7 +20,7 @@ int ptep_set_access_flags(struct vm_area_struct *vma,
 		return false;
 	}
 
-	if (!pte_same(ptep_get(ptep), entry))
+	if (!pte_same(__ptep_get(ptep), entry))
 		__set_pte_at(vma->vm_mm, ptep, entry);
 	/*
 	 * update_mmu_cache will unconditionally execute, handling both
@@ -29,12 +29,46 @@ int ptep_set_access_flags(struct vm_area_struct *vma,
 	return true;
 }
 
-bool ptep_test_and_clear_young(struct vm_area_struct *vma,
-		unsigned long address, pte_t *ptep)
+int ptep_set_access_flags(struct vm_area_struct *vma,
+			  unsigned long address, pte_t *ptep,
+			  pte_t entry, int dirty)
 {
-	if (!pte_young(ptep_get(ptep)))
+	pte_t raw_pte;
+
+	entry = pte_mknonnapot(entry, address);
+
+	raw_pte = READ_ONCE(*ptep);
+	if (riscv_has_extension_unlikely(RISCV_ISA_EXT_SVNAPOT) &&
+	    pte_present_napot(raw_pte))
+		return napotpte_ptep_set_access_flags(vma, address, ptep, entry,
+					      dirty);
+
+	return __ptep_set_access_flags(vma, address, ptep, entry, dirty);
+}
+
+bool __ptep_test_and_clear_young(struct vm_area_struct *vma,
+				 unsigned long address,
+				 pte_t *ptep)
+{
+	if (!pte_young(__ptep_get(ptep)))
 		return false;
+
 	return test_and_clear_bit(_PAGE_ACCESSED_OFFSET, &pte_val(*ptep));
+}
+EXPORT_SYMBOL_GPL(__ptep_test_and_clear_young);
+
+bool ptep_test_and_clear_young(struct vm_area_struct *vma,
+			       unsigned long address,
+			       pte_t *ptep)
+{
+	pte_t raw_pte;
+
+	raw_pte = READ_ONCE(*ptep);
+	if (riscv_has_extension_unlikely(RISCV_ISA_EXT_SVNAPOT) &&
+	    pte_present_napot(raw_pte))
+		return napotpte_ptep_test_and_clear_young(vma, address, ptep);
+
+	return __ptep_test_and_clear_young(vma, address, ptep);
 }
 EXPORT_SYMBOL_GPL(ptep_test_and_clear_young);
 

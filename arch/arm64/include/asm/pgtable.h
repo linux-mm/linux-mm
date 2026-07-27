@@ -5,6 +5,13 @@
 #ifndef __ASM_PGTABLE_H
 #define __ASM_PGTABLE_H
 
+#ifndef __ASSEMBLY__
+#ifndef __LINUX_FPB_T
+#define __LINUX_FPB_T
+typedef int __bitwise fpb_t;
+#endif
+#endif
+
 #include <asm/bug.h>
 #include <asm/proc-fns.h>
 
@@ -1705,7 +1712,7 @@ static __always_inline void contpte_try_unfold(struct mm_struct *mm,
 }
 
 #define pte_batch_hint pte_batch_hint
-static inline unsigned int pte_batch_hint(pte_t *ptep, pte_t pte)
+static inline unsigned int pte_batch_hint(pte_t *ptep, pte_t pte, fpb_t flags)
 {
 	if (!pte_valid_cont(pte))
 		return 1;
@@ -1751,6 +1758,22 @@ static inline pte_t ptep_get_lockless(pte_t *ptep)
 		return pte;
 
 	return contpte_ptep_get_lockless(ptep);
+}
+
+#define gup_ptep_get_lockless gup_ptep_get_lockless
+static inline pte_t gup_ptep_get_lockless(pte_t *ptep, pte_t *rawp)
+{
+	pte_t pte = __ptep_get(ptep);
+
+	*rawp = pte;
+
+	return pte;
+}
+
+#define gup_ptep_revalidate gup_ptep_revalidate
+static inline bool gup_ptep_revalidate(pte_t *ptep, pte_t raw_pte)
+{
+	return pte_val(raw_pte) == pte_val(__ptep_get(ptep));
 }
 
 static inline void set_pte(pte_t *ptep, pte_t pte)
