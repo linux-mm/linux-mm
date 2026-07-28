@@ -55,6 +55,8 @@
 
 #include <trace/events/ipi.h>
 
+extern void idmap_cpu_replace_ttbr1(phys_addr_t pgdir);
+
 /*
  * as from 2.5, kernels no longer have an init_tasks structure
  * so we need some other way of telling a new secondary core
@@ -198,6 +200,12 @@ asmlinkage notrace void secondary_start_kernel(void)
 	struct mm_struct *mm = &init_mm;
 	const struct cpu_operations *ops;
 	unsigned int cpu = smp_processor_id();
+	typedef void (ttbr_replace_func)(phys_addr_t);
+	ttbr_replace_func *replace_ttbr;
+
+	phys_addr_t ttbr1 = phys_to_ttbr(virt_to_phys(percpu_pgd[cpu]));
+	replace_ttbr = (void *)__pa_symbol(idmap_cpu_replace_ttbr1);
+	replace_ttbr(ttbr1);
 
 	/*
 	 * All kernel threads share the same mm context; grab a
@@ -818,6 +826,42 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 		numa_store_cpu_info(cpu);
 	}
 }
+
+#ifdef CONFIG_NUMA
+extern int cpu_to_node_map[NR_CPUS];
+
+int early_cpu_to_node(int cpu)
+{
+	return cpu_to_node_map[cpu];
+}
+#endif
+
+#ifdef CONFIG_HAVE_SETUP_PER_CPU_AREA
+unsigned long __per_cpu_offset[NR_CPUS] __read_mostly;
+EXPORT_SYMBOL(__per_cpu_offset);
+/* Used to calculate pcpu local address, the offset is same for all CPUs */
+unsigned long __per_cpu_local_off __ro_after_init;
+EXPORT_SYMBOL(__per_cpu_local_off);
+
+void __init setup_per_cpu_areas(void)
+{
+	unsigned long delta;
+	unsigned int cpu;
+	int rc = -EINVAL;
+
+#ifdef CONFIG_NEED_PER_CPU_PAGE_FIRST_CHUNK
+	/* PCPU page table just can support PCPU_FC_PAGE */
+	rc = pcpu_page_first_chunk(PERCPU_MODULE_RESERVE, early_cpu_to_node);
+#endif
+	if (rc < 0)
+		panic("Failed to initialize percpu areas (err=%d).", rc);
+
+	delta = (unsigned long)pcpu_base_addr - (unsigned long)__per_cpu_start;
+	for_each_possible_cpu(cpu)
+		__per_cpu_offset[cpu] = delta + pcpu_unit_offsets[cpu];
+	__per_cpu_local_off = (unsigned long)pcpu_local_base - (unsigned long)__per_cpu_start;
+}
+#endif
 
 static const char *ipi_types[MAX_IPI] __tracepoint_string = {
 	[IPI_RESCHEDULE]	= "Rescheduling interrupts",

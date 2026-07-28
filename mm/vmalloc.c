@@ -80,6 +80,9 @@ bool is_vmalloc_addr(const void *x)
 {
 	unsigned long addr = (unsigned long)kasan_reset_tag(x);
 
+	if (is_percpu_addr(addr))
+		return true;
+
 	return addr >= VMALLOC_START && addr < VMALLOC_END;
 }
 EXPORT_SYMBOL(is_vmalloc_addr);
@@ -295,9 +298,9 @@ static int vmap_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 	return err;
 }
 
-static int vmap_range_noflush(unsigned long addr, unsigned long end,
-			phys_addr_t phys_addr, pgprot_t prot,
-			unsigned int max_page_shift)
+int vmap_range_noflush(pgd_t *pgdir, unsigned long addr, unsigned long end,
+		       phys_addr_t phys_addr, pgprot_t prot,
+		       unsigned int max_page_shift)
 {
 	pgd_t *pgd;
 	unsigned long start;
@@ -314,7 +317,7 @@ static int vmap_range_noflush(unsigned long addr, unsigned long end,
 	BUG_ON(addr >= end);
 
 	start = addr;
-	pgd = pgd_offset_k(addr);
+	pgd = pgd_offset_pgd(pgdir, addr);
 	do {
 		next = pgd_addr_end(addr, end);
 		err = vmap_p4d_range(pgd, addr, next, phys_addr, prot,
@@ -334,8 +337,8 @@ int vmap_page_range(unsigned long addr, unsigned long end,
 {
 	int err;
 
-	err = vmap_range_noflush(addr, end, phys_addr, pgprot_nx(prot),
-				 ioremap_max_page_shift);
+	err = vmap_range_noflush(init_mm.pgd, addr, end, phys_addr,
+				 pgprot_nx(prot), ioremap_max_page_shift);
 	flush_cache_vmap(addr, end);
 	if (!err)
 		err = kmsan_ioremap_page_range(addr, end, phys_addr, prot,
@@ -478,7 +481,7 @@ static void vunmap_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
  *
  * This is an internal function only. Do not use outside mm/.
  */
-void __vunmap_range_noflush(unsigned long start, unsigned long end)
+void __vunmap_range_noflush(pgd_t *pgdir, unsigned long start, unsigned long end)
 {
 	unsigned long next;
 	pgd_t *pgd;
@@ -486,7 +489,7 @@ void __vunmap_range_noflush(unsigned long start, unsigned long end)
 	pgtbl_mod_mask mask = 0;
 
 	BUG_ON(addr >= end);
-	pgd = pgd_offset_k(addr);
+	pgd = pgd_offset_pgd(pgdir, addr);
 	do {
 		next = pgd_addr_end(addr, end);
 		if (pgd_bad(*pgd))
@@ -503,7 +506,7 @@ void __vunmap_range_noflush(unsigned long start, unsigned long end)
 void vunmap_range_noflush(unsigned long start, unsigned long end)
 {
 	kmsan_vunmap_range_noflush(start, end);
-	__vunmap_range_noflush(start, end);
+	__vunmap_range_noflush(init_mm.pgd, start, end);
 }
 
 /**
@@ -670,9 +673,10 @@ int __vmap_pages_range_noflush(unsigned long addr, unsigned long end,
 	for (i = 0; i < nr; i += 1U << (page_shift - PAGE_SHIFT)) {
 		int err;
 
-		err = vmap_range_noflush(addr, addr + (1UL << page_shift),
-					page_to_phys(pages[i]), prot,
-					page_shift);
+		err = vmap_range_noflush(init_mm.pgd, addr,
+					 addr + (1UL << page_shift),
+					 page_to_phys(pages[i]), prot,
+					 page_shift);
 		if (err)
 			return err;
 
@@ -4919,14 +4923,24 @@ pvm_find_va_enclose_addr(unsigned long addr)
  *   in - the VA we start the search(reverse order);
  *   out - the VA with the highest aligned end address.
  * @align: alignment for required highest address
+ * @pcpu: whether request allocation from local percpu area
  *
  * Returns: determined end address within vmap_area
  */
 static unsigned long
-pvm_determine_end_from_reverse(struct vmap_area **va, unsigned long align)
+pvm_determine_end_from_reverse(struct vmap_area **va, unsigned long align, bool pcpu)
 {
-	unsigned long vmalloc_end = VMALLOC_END & ~(align - 1);
+	unsigned long vmalloc_end;
 	unsigned long addr;
+
+#ifdef CONFIG_HAVE_LOCAL_PER_CPU_MAP
+	if (pcpu)
+		vmalloc_end = LOCAL_PERCPU_END & ~(align - 1);
+	else
+		vmalloc_end = PERCPU_END & ~(align - 1);
+#else
+	vmalloc_end = VMALLOC_END & ~(align - 1);
+#endif
 
 	if (likely(*va)) {
 		list_for_each_entry_from_reverse((*va),
@@ -4968,13 +4982,21 @@ struct vm_struct **pcpu_get_vm_areas(const unsigned long *offsets,
 				     const size_t *sizes, int nr_vms,
 				     size_t align)
 {
-	const unsigned long vmalloc_start = ALIGN(VMALLOC_START, align);
-	const unsigned long vmalloc_end = VMALLOC_END & ~(align - 1);
+	unsigned long vmalloc_start;
+	unsigned long vmalloc_end;
 	struct vmap_area **vas, *va;
 	struct vm_struct **vms;
 	int area, area2, last_area, term_area;
 	unsigned long base, start, size, end, last_end, orig_start, orig_end;
 	bool purged = false;
+
+#ifdef CONFIG_HAVE_LOCAL_PER_CPU_MAP
+	vmalloc_start = ALIGN(PERCPU_START, align);
+	vmalloc_end = PERCPU_END & ~(align - 1);
+#else
+	vmalloc_start = ALIGN(VMALLOC_START, align);
+	vmalloc_end = VMALLOC_END & ~(align - 1);
+#endif
 
 	/* verify parameters and allocate data structures */
 	BUG_ON(offset_in_page(align) || !is_power_of_2(align));
@@ -5024,7 +5046,7 @@ retry:
 	end = start + sizes[area];
 
 	va = pvm_find_va_enclose_addr(vmalloc_end);
-	base = pvm_determine_end_from_reverse(&va, align) - end;
+	base = pvm_determine_end_from_reverse(&va, align, false) - end;
 
 	while (true) {
 		/*
@@ -5045,7 +5067,7 @@ retry:
 		 * base downwards and then recheck.
 		 */
 		if (base + end > va->va_end) {
-			base = pvm_determine_end_from_reverse(&va, align) - end;
+			base = pvm_determine_end_from_reverse(&va, align, false) - end;
 			term_area = area;
 			continue;
 		}
@@ -5055,7 +5077,7 @@ retry:
 		 */
 		if (base + start < va->va_start) {
 			va = node_to_va(rb_prev(&va->rb_node));
-			base = pvm_determine_end_from_reverse(&va, align) - end;
+			base = pvm_determine_end_from_reverse(&va, align, false) - end;
 			term_area = area;
 			continue;
 		}
@@ -5218,6 +5240,84 @@ void pcpu_free_vm_areas(struct vm_struct **vms, int nr_vms)
 		free_vm_area(vms[i]);
 	kfree(vms);
 }
+
+#ifdef CONFIG_HAVE_LOCAL_PER_CPU_MAP
+/* Find free vm area starts from hint */
+struct vm_struct *pcpu_get_local_vm_area(unsigned long hint,
+				     int unit_size, size_t align)
+{
+	struct vmap_area *tmp_va, *va;
+	struct vm_struct *vm;
+	struct vmap_node *vn;
+	unsigned long end;
+	int ret;
+
+	va = kmem_cache_zalloc(vmap_area_cachep, GFP_KERNEL);
+	vm = kzalloc(sizeof(struct vm_struct), GFP_KERNEL);
+	if (!va || !vm)
+		goto err_free;
+
+	spin_lock(&free_vmap_area_lock);
+
+	tmp_va = pvm_find_va_enclose_addr(hint);
+	if (!tmp_va) {
+		spin_unlock(&free_vmap_area_lock);
+		goto err_free;
+	}
+
+	end = pvm_determine_end_from_reverse(&tmp_va, align, true);
+
+	if (hint + unit_size > end) {
+		spin_unlock(&free_vmap_area_lock);
+		goto err_free;
+	}
+
+	ret = va_clip(&free_vmap_area_root,
+			&free_vmap_area_list, tmp_va, hint, unit_size);
+	if (ret) {
+		spin_unlock(&free_vmap_area_lock);
+		goto err_free;
+	}
+
+	va->va_start = hint;
+	va->va_end = hint + unit_size;
+
+	spin_unlock(&free_vmap_area_lock);
+
+	if (kasan_populate_vmalloc(va->va_start, unit_size, GFP_KERNEL))
+		goto err_free_shadow;
+
+	vn = addr_to_node(va->va_start);
+
+	spin_lock(&vn->busy.lock);
+	insert_vmap_area(va, &vn->busy.root, &vn->busy.head);
+	setup_vmalloc_vm(vm, va, VM_ALLOC,
+			 pcpu_get_local_vm_area);
+	spin_unlock(&vn->busy.lock);
+
+	kasan_unpoison_vmap_areas(&vm, 1, KASAN_VMALLOC_PROT_NORMAL);
+
+	return vm;
+
+err_free:
+	kmem_cache_free(vmap_area_cachep, va);
+	kfree(vm);
+
+	return NULL;
+
+err_free_shadow:
+	spin_lock(&free_vmap_area_lock);
+	va = merge_or_add_vmap_area_augment(va, &free_vmap_area_root,
+			&free_vmap_area_list);
+	if (va)
+		kasan_release_vmalloc(va->va_start, va->va_end, va->va_start, va->va_end,
+			       KASAN_VMALLOC_PAGE_RANGE | KASAN_VMALLOC_TLB_FLUSH);
+	kfree(vm);
+	spin_unlock(&free_vmap_area_lock);
+	return NULL;
+
+}
+#endif
 #endif	/* CONFIG_SMP */
 
 #ifdef CONFIG_PRINTK

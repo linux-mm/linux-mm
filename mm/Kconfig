@@ -1061,6 +1061,9 @@ config NEED_PER_CPU_PAGE_FIRST_CHUNK
 config USE_PERCPU_NUMA_NODE_ID
 	bool
 
+config HAVE_LOCAL_PER_CPU_MAP
+	bool
+
 config HAVE_SETUP_PER_CPU_AREA
 	bool
 
@@ -1508,6 +1511,12 @@ config LAZY_MMU_MODE_KUNIT_TEST
 	  architecture-specific behaviours).
 
 	  If unsure, say N.
+
+config ARCH_HAS_PMD_POPULATE_SYNC
+	bool
+
+config ARCH_HAS_PUD_POPULATE_SYNC
+	bool
 
 source "mm/damon/Kconfig"
 

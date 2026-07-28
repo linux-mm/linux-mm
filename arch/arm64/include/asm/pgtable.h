@@ -18,14 +18,35 @@
  * VMALLOC range.
  *
  * VMALLOC_START: beginning of the kernel vmalloc space
- * VMALLOC_END: extends to the available space below vmemmap
+ * VMALLOC_END: extends to the space below global percpu area
  */
 #define VMALLOC_START		(MODULES_END)
+#define VMALLOC_END		(PERCPU_START - SZ_8M)
+
+/*
+ * PERCPU range
+ *
+ * PERCPU_START: beginning of global percpu area
+ * PERCPU_END: end of global percpu area
+ * LOCAL_PERCPU_START: beginning of local percpu area
+ * LOCAL_PERCPU_END: end of local percpu area, extend to the available
+ *                   space below vmemmap
+ */
+#if defined(CONFIG_ARM64_4K_PAGES)
+#define PERCPU_SIZE		(2 * PGDIR_SIZE)
+#elif defined(CONFIG_ARM64_16K_PAGES)
+#define PERCPU_SIZE            (16 * PUD_SIZE)
+#elif defined(CONFIG_ARM64_64K_PAGES)
+#define PERCPU_SIZE            (PGDIR_SIZE)
+#endif
+#define PERCPU_START		(PERCPU_END - PERCPU_SIZE)
+#define PERCPU_END		(LOCAL_PERCPU_START)
+#define LOCAL_PERCPU_START	(LOCAL_PERCPU_END - PERCPU_SIZE)
 #if VA_BITS == VA_BITS_MIN
-#define VMALLOC_END		(VMEMMAP_START - SZ_8M)
+#define LOCAL_PERCPU_END	(ALIGN_DOWN(VMEMMAP_START, PERCPU_SIZE))
 #else
 #define VMEMMAP_UNUSED_NPAGES	((_PAGE_OFFSET(vabits_actual) - PAGE_OFFSET) >> PAGE_SHIFT)
-#define VMALLOC_END		(VMEMMAP_START + VMEMMAP_UNUSED_NPAGES * sizeof(struct page) - SZ_8M)
+#define LOCAL_PERCPU_END	(ALIGN_DOWN((VMEMMAP_START + VMEMMAP_UNUSED_NPAGES * sizeof(struct page)), PERCPU_SIZE))
 #endif
 
 #define vmemmap			((struct page *)VMEMMAP_START - (memstart_addr >> PAGE_SHIFT))
@@ -1215,6 +1236,16 @@ p4d_t *p4d_offset_lockless_folded(pgd_t *pgdp, pgd_t pgd, unsigned long addr)
 #define p4d_offset_lockless p4d_offset_lockless_folded
 
 #endif  /* CONFIG_PGTABLE_LEVELS > 4 */
+
+#if CONFIG_PGTABLE_LEVELS == 2
+#define ARCH_PAGE_TABLE_SYNC_MASK      PGTBL_PMD_MODIFIED
+#elif CONFIG_PGTABLE_LEVELS == 3
+#define ARCH_PAGE_TABLE_SYNC_MASK      PGTBL_PUD_MODIFIED
+#elif CONFIG_PGTABLE_LEVELS == 4
+#define ARCH_PAGE_TABLE_SYNC_MASK      PGTBL_P4D_MODIFIED
+#elif CONFIG_PGTABLE_LEVELS == 5
+#define ARCH_PAGE_TABLE_SYNC_MASK      PGTBL_PGD_MODIFIED
+#endif
 
 #define pgd_ERROR(e)	\
 	pr_err("%s:%d: bad pgd %016llx.\n", __FILE__, __LINE__, pgd_val(e))

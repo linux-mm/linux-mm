@@ -145,6 +145,8 @@ static unsigned int pcpu_high_unit_cpu __ro_after_init;
 
 /* the address of the first chunk which starts with the kernel static area */
 void *pcpu_base_addr __ro_after_init;
+/* The address of the first chunk local mapping */
+void *pcpu_local_base __ro_after_init;
 
 static const int *pcpu_unit_map __ro_after_init;		/* cpu -> unit */
 const unsigned long *pcpu_unit_offsets __ro_after_init;	/* cpu -> unit offset */
@@ -1338,6 +1340,7 @@ static void pcpu_init_md_blocks(struct pcpu_chunk *chunk)
 /**
  * pcpu_alloc_first_chunk - creates chunks that serve the first chunk
  * @tmp_addr: the start of the region served
+ * @local_tmp: the start of the local percpu region served
  * @map_size: size of the region served
  *
  * This is responsible for creating the chunks that serve the first chunk.  The
@@ -1349,15 +1352,16 @@ static void pcpu_init_md_blocks(struct pcpu_chunk *chunk)
  * Chunk serving the region at @tmp_addr of @map_size.
  */
 static struct pcpu_chunk * __init pcpu_alloc_first_chunk(unsigned long tmp_addr,
-							 int map_size)
+							 unsigned long local_tmp, int map_size)
 {
 	struct pcpu_chunk *chunk;
-	unsigned long aligned_addr;
+	unsigned long aligned_addr, aligned_local;
 	int start_offset, offset_bits, region_size, region_bits;
 	size_t alloc_size;
 
 	/* region calculations */
 	aligned_addr = tmp_addr & PAGE_MASK;
+	aligned_local = local_tmp & PAGE_MASK;
 
 	start_offset = tmp_addr - aligned_addr;
 	region_size = ALIGN(start_offset + map_size, PAGE_SIZE);
@@ -1370,6 +1374,7 @@ static struct pcpu_chunk * __init pcpu_alloc_first_chunk(unsigned long tmp_addr,
 	INIT_LIST_HEAD(&chunk->list);
 
 	chunk->base_addr = (void *)aligned_addr;
+	chunk->local_base = (void *)aligned_local;
 	chunk->start_offset = start_offset;
 	chunk->end_offset = region_size - chunk->start_offset - map_size;
 
@@ -2562,7 +2567,7 @@ static void pcpu_dump_alloc_info(const char *lvl,
  * and available for dynamic allocation like any other chunk.
  */
 void __init pcpu_setup_first_chunk(const struct pcpu_alloc_info *ai,
-				   void *base_addr)
+				   void *base_addr, void *local_base)
 {
 	size_t size_sum = ai->static_size + ai->reserved_size + ai->dyn_size;
 	size_t static_size, dyn_size;
@@ -2572,7 +2577,7 @@ void __init pcpu_setup_first_chunk(const struct pcpu_alloc_info *ai,
 	unsigned int cpu;
 	int *unit_map;
 	int group, unit, i;
-	unsigned long tmp_addr;
+	unsigned long tmp_addr, local_tmp = 0;
 	size_t alloc_size;
 
 #define PCPU_SETUP_BUG_ON(cond)	do {					\
@@ -2713,11 +2718,15 @@ void __init pcpu_setup_first_chunk(const struct pcpu_alloc_info *ai,
 	 *   chunk.
 	 */
 	tmp_addr = (unsigned long)base_addr + static_size;
+	if (local_base)
+		local_tmp = (unsigned long)local_base + static_size;
 	if (ai->reserved_size)
-		pcpu_reserved_chunk = pcpu_alloc_first_chunk(tmp_addr,
+		pcpu_reserved_chunk = pcpu_alloc_first_chunk(tmp_addr, local_tmp,
 						ai->reserved_size);
 	tmp_addr = (unsigned long)base_addr + static_size + ai->reserved_size;
-	pcpu_first_chunk = pcpu_alloc_first_chunk(tmp_addr, dyn_size);
+	if (local_base)
+		local_tmp = (unsigned long)local_base + static_size + ai->reserved_size;
+	pcpu_first_chunk = pcpu_alloc_first_chunk(tmp_addr, local_tmp, dyn_size);
 
 	pcpu_nr_empty_pop_pages = pcpu_first_chunk->nr_empty_pop_pages;
 	pcpu_chunk_relocate(pcpu_first_chunk, -1);
@@ -3108,7 +3117,7 @@ int __init pcpu_embed_first_chunk(size_t reserved_size, size_t dyn_size,
 		PFN_DOWN(size_sum), ai->static_size, ai->reserved_size,
 		ai->dyn_size, ai->unit_size);
 
-	pcpu_setup_first_chunk(ai, base);
+	pcpu_setup_first_chunk(ai, base, NULL);
 	goto out_free;
 
 out_free_areas:
@@ -3163,7 +3172,7 @@ void __init __weak pcpu_populate_pte(unsigned long addr)
 	pud = pud_offset(p4d, addr);
 	if (pud_none(*pud)) {
 		pmd = memblock_alloc_or_panic(PMD_TABLE_SIZE, PMD_TABLE_SIZE);
-		pud_populate(&init_mm, pud, pmd);
+		pud_populate_sync(addr, pud, pmd);
 	}
 
 	pmd = pmd_offset(pud, addr);
@@ -3171,7 +3180,7 @@ void __init __weak pcpu_populate_pte(unsigned long addr)
 		pte_t *new;
 
 		new = memblock_alloc_or_panic(PTE_TABLE_SIZE, PTE_TABLE_SIZE);
-		pmd_populate_kernel(&init_mm, pmd, new);
+		pmd_populate_sync(addr, pmd, new);
 	}
 
 	return;
@@ -3194,6 +3203,7 @@ void __init __weak pcpu_populate_pte(unsigned long addr)
 int __init pcpu_page_first_chunk(size_t reserved_size, pcpu_fc_cpu_to_node_fn_t cpu_to_nd_fn)
 {
 	static struct vm_struct vm;
+	static struct vm_struct pcpu_vm;
 	struct pcpu_alloc_info *ai;
 	char psize_str[16];
 	int unit_pages;
@@ -3243,11 +3253,28 @@ int __init pcpu_page_first_chunk(size_t reserved_size, pcpu_fc_cpu_to_node_fn_t 
 	}
 
 	/* allocate vm area, map the pages and copy static data */
+#ifdef CONFIG_HAVE_LOCAL_PER_CPU_MAP
+	vm.flags = VM_ALLOC;
+	vm.addr = (void *)ALIGN(PERCPU_START, PAGE_SIZE);
+	vm.size = num_possible_cpus() * ai->unit_size;
+	vm_area_add_early(&vm);
+	kasan_populate_early_vm_area_shadow(vm.addr, vm.size);
+
+	pcpu_vm.flags = VM_ALLOC;
+	pcpu_vm.addr = (void *)ALIGN(LOCAL_PERCPU_START, PAGE_SIZE);
+	pcpu_vm.size = ai->unit_size;
+	vm_area_add_early(&pcpu_vm);
+	kasan_populate_early_vm_area_shadow(pcpu_vm.addr, pcpu_vm.size);
+#else
 	vm.flags = VM_ALLOC;
 	vm.size = num_possible_cpus() * ai->unit_size;
 	vm_area_register_early(&vm, PAGE_SIZE);
 
+	pcpu_vm.addr = NULL;
+#endif
+
 	for (unit = 0; unit < num_possible_cpus(); unit++) {
+		unsigned int cpu = ai->groups[0].cpu_map[unit];
 		unsigned long unit_addr =
 			(unsigned long)vm.addr + unit * ai->unit_size;
 
@@ -3264,6 +3291,14 @@ int __init pcpu_page_first_chunk(size_t reserved_size, pcpu_fc_cpu_to_node_fn_t 
 
 		/* copy static data */
 		memcpy((void *)unit_addr, __per_cpu_start, ai->static_size);
+
+		/*
+		 * Map percpu data to PERCPU map.
+		 *
+		 * PCPU_FC_EMBED can't support it.
+		 */
+		map_local_percpu_first_chunk(cpu, (unsigned long)pcpu_vm.addr,
+				&pages[unit * unit_pages], unit_pages);
 	}
 
 	/* we're ready, commit */
@@ -3271,7 +3306,8 @@ int __init pcpu_page_first_chunk(size_t reserved_size, pcpu_fc_cpu_to_node_fn_t 
 		unit_pages, psize_str, ai->static_size,
 		ai->reserved_size, ai->dyn_size);
 
-	pcpu_setup_first_chunk(ai, vm.addr);
+	pcpu_setup_first_chunk(ai, vm.addr, pcpu_vm.addr);
+	pcpu_local_base = pcpu_vm.addr;
 	goto out_free_ar;
 
 enomem:
@@ -3353,7 +3389,7 @@ void __init setup_per_cpu_areas(void)
 	ai->groups[0].nr_units = 1;
 	ai->groups[0].cpu_map[0] = 0;
 
-	pcpu_setup_first_chunk(ai, fc);
+	pcpu_setup_first_chunk(ai, fc, NULL);
 	pcpu_free_alloc_info(ai);
 }
 
