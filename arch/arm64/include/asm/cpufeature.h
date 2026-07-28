@@ -367,6 +367,14 @@ struct arm64_cpu_capabilities {
 	 * routine must check it before taking any action.
 	 */
 	void (*cpu_enable)(const struct arm64_cpu_capabilities *cap);
+	/*
+	 * In rare cases, capabilities are *sometimes* optional for late CPUs.
+	 * This callback allows a capability to prevent onlining of
+	 * incompatible CPUs when the capability is in fact required.
+	 *
+	 * Returns true iff onlining the CPU is permitted.
+	 */
+	bool (*late_cpu_enable)(const struct arm64_cpu_capabilities *cap);
 	union {
 		struct {	/* To be used for erratum handling only */
 			struct midr_range midr_range;
@@ -885,6 +893,11 @@ static inline bool system_supports_bbml2_noabort(void)
 	return alternative_has_cap_unlikely(ARM64_HAS_BBML2_NOABORT);
 }
 
+static inline bool system_supports_hvo(void)
+{
+	return alternative_has_cap_unlikely(ARM64_HVO_COMPATIBLE);
+}
+
 int do_emulate_mrs(struct pt_regs *regs, u32 sys_reg, u32 rt);
 bool try_emulate_mrs(struct pt_regs *regs, u32 isn);
 
@@ -910,20 +923,34 @@ static inline u32 id_aa64mmfr0_parange_to_phys_shift(int parange)
 }
 
 /* Check whether hardware update of the Access flag is supported */
-static inline bool cpu_has_hw_af(void)
+static inline bool supports_hw_af(int scope)
 {
 	u64 mmfr1;
 
 	if (!IS_ENABLED(CONFIG_ARM64_HW_AFDBM))
 		return false;
 
-	/*
-	 * Use cached version to avoid emulated msr operation on KVM
-	 * guests.
-	 */
-	mmfr1 = read_sanitised_ftr_reg(SYS_ID_AA64MMFR1_EL1);
+	if (scope == SCOPE_SYSTEM) {
+		/*
+		 * Use cached version to avoid emulated msr operation on KVM
+		 * guests.
+		 */
+		mmfr1 = read_sanitised_ftr_reg(SYS_ID_AA64MMFR1_EL1);
+	} else {
+		mmfr1 = read_cpuid(ID_AA64MMFR1_EL1);
+	}
 	return cpuid_feature_extract_unsigned_field(mmfr1,
 						ID_AA64MMFR1_EL1_HAFDBS_SHIFT);
+}
+
+static inline bool system_has_hw_af(void)
+{
+	return supports_hw_af(SCOPE_SYSTEM);
+}
+
+static inline bool cpu_has_hw_af(void)
+{
+	return supports_hw_af(SCOPE_LOCAL_CPU);
 }
 
 static inline bool cpu_has_pan(void)

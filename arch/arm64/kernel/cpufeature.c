@@ -76,6 +76,7 @@
 #include <linux/kasan.h>
 #include <linux/percpu.h>
 #include <linux/sched/isolation.h>
+#include <linux/hugetlb_vmemmap.h>
 
 #include <asm/arm_pmuv3.h>
 #include <asm/cpu.h>
@@ -2172,6 +2173,31 @@ static bool has_bbml2_noabort(const struct arm64_cpu_capabilities *caps, int sco
 	return cpu_supports_bbml2_noabort();
 }
 
+static bool hvo_compatible(const struct arm64_cpu_capabilities *caps, int scope)
+{
+	/*
+	 * We need HW AF support to support changing vmemmap mapping level and
+	 * OA without taking faults.
+	 */
+	return supports_hw_af(scope);
+}
+
+static bool late_cpu_enable_hvo(const struct arm64_cpu_capabilities *__unused)
+{
+#ifdef CONFIG_HUGETLB_PAGE_OPTIMIZE_VMEMMAP
+	if (cpu_has_hw_af())
+		return true;
+
+	/*
+	 * If the CPU does not support HW AF, we cannot online it if HVO is
+	 * currently in use.
+	 */
+	return hugetlb_vmemmap_optimization_try_disable();
+#else
+	return true;
+#endif
+}
+
 static void cpu_enable_pan(const struct arm64_cpu_capabilities *__unused)
 {
 	/*
@@ -3068,6 +3094,15 @@ static const struct arm64_cpu_capabilities arm64_features[] = {
 		.matches = has_bbml2_noabort,
 	},
 	{
+		.desc = "HugeTLB Vmemmap Optimization Support",
+		.capability = ARM64_HVO_COMPATIBLE,
+		.type = ARM64_CPUCAP_SCOPE_SYSTEM |
+			ARM64_CPUCAP_OPTIONAL_FOR_LATE_CPU |
+			ARM64_CPUCAP_PERMITTED_FOR_LATE_CPU,
+		.matches = hvo_compatible,
+		.late_cpu_enable = late_cpu_enable_hvo,
+	},
+	{
 		.desc = "52-bit Virtual Addressing for KVM (LPA2)",
 		.capability = ARM64_HAS_LPA2,
 		.type = ARM64_CPUCAP_SYSTEM_FEATURE,
@@ -3669,6 +3704,14 @@ static void verify_local_cpu_caps(u16 scope_mask)
 			 */
 			if (!cpu_has_cap && !cpucap_late_cpu_optional(caps))
 				break;
+
+			/*
+			 * Some optional features may in fact be required due
+			 * to particular runtime conditions.
+			 */
+			if (caps->late_cpu_enable && !caps->late_cpu_enable(caps))
+				break;
+
 			/*
 			 * We have to issue cpu_enable() irrespective of
 			 * whether the CPU has it or not, as it is enabeld
