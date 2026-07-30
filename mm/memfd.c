@@ -95,8 +95,6 @@ struct folio *memfd_alloc_folio(struct file *memfd, pgoff_t idx)
 						    NULL,
 						    gfp_mask);
 		if (folio) {
-			u32 hash;
-
 			/*
 			 * Zero the folio to prevent information leaks to userspace.
 			 * Use folio_zero_user() which is optimized for huge/gigantic
@@ -116,14 +114,11 @@ struct folio *memfd_alloc_folio(struct file *memfd, pgoff_t idx)
 			 * races with concurrent allocations, as required by all other
 			 * callers of hugetlb_add_to_page_cache().
 			 */
-			hash = hugetlb_fault_mutex_hash(memfd->f_mapping, idx);
-			mutex_lock(&hugetlb_fault_mutex_table[hash]);
-
+			filemap_invalidate_lock(memfd->f_mapping);
 			err = hugetlb_add_to_page_cache(folio,
 							memfd->f_mapping,
 							idx);
-
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+			filemap_invalidate_unlock(memfd->f_mapping);
 
 			if (err) {
 				folio_put(folio);

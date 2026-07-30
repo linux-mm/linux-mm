@@ -790,7 +790,6 @@ static __always_inline ssize_t mfill_atomic_hugetlb(
 	struct folio *folio;
 	unsigned long vma_hpagesize;
 	pgoff_t idx;
-	u32 hash;
 	struct address_space *mapping;
 
 	/*
@@ -860,15 +859,14 @@ retry:
 		 */
 		idx = hugetlb_linear_page_index(dst_vma, dst_addr);
 		mapping = dst_vma->vm_file->f_mapping;
-		hash = hugetlb_fault_mutex_hash(mapping, idx);
-		mutex_lock(&hugetlb_fault_mutex_table[hash]);
+		filemap_invalidate_lock(mapping);
 		hugetlb_vma_lock_read(dst_vma);
 
 		err = -ENOMEM;
 		dst_pte = huge_pte_alloc(dst_mm, dst_vma, dst_addr, vma_hpagesize);
 		if (!dst_pte) {
 			hugetlb_vma_unlock_read(dst_vma);
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+			filemap_invalidate_unlock(mapping);
 			goto out_unlock;
 		}
 
@@ -878,7 +876,7 @@ retry:
 			if (!huge_pte_none(ptep) && !pte_is_uffd_marker(ptep)) {
 				err = -EEXIST;
 				hugetlb_vma_unlock_read(dst_vma);
-				mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+				filemap_invalidate_unlock(mapping);
 				goto out_unlock;
 			}
 		}
@@ -887,7 +885,7 @@ retry:
 					       src_addr, flags, &folio);
 
 		hugetlb_vma_unlock_read(dst_vma);
-		mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+		filemap_invalidate_unlock(mapping);
 
 		cond_resched();
 
