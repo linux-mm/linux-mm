@@ -245,8 +245,11 @@ retry:
 	}
 	WRITE_ONCE(huge_zero_pfn, folio_pfn(zero_folio));
 
-	/* We take additional reference here. It will be put back by shrinker */
-	atomic_set(&huge_zero_refcount, 2);
+	/*
+	 * Publish the folio and PFN before making them available to lockless
+	 * users. Pairs with a successful atomic_inc_not_zero() above.
+	 */
+	atomic_set_release(&huge_zero_refcount, 2);
 	preempt_enable();
 	count_vm_event(THP_ZERO_PAGE_ALLOC);
 	return true;
