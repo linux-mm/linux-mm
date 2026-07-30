@@ -474,6 +474,7 @@ static int locate_mem_hole_top_down(unsigned long start, unsigned long end,
 {
 	struct kimage *image = kbuf->image;
 	unsigned long temp_start, temp_end;
+	phys_addr_t poisoned_addr;
 
 	temp_end = min(end, kbuf->buf_max);
 	temp_start = temp_end - kbuf->memsz + 1;
@@ -503,6 +504,14 @@ static int locate_mem_hole_top_down(unsigned long start, unsigned long end,
 			continue;
 		}
 
+		if (range_contains_hwpoison(temp_start, temp_end - temp_start + 1,
+					    &poisoned_addr)) {
+			if (poisoned_addr < kbuf->memsz)
+				return 0;
+			temp_start = poisoned_addr - kbuf->memsz;
+			continue;
+		}
+
 		/* We found a suitable memory range */
 		break;
 	} while (1);
@@ -519,6 +528,7 @@ static int locate_mem_hole_bottom_up(unsigned long start, unsigned long end,
 {
 	struct kimage *image = kbuf->image;
 	unsigned long temp_start, temp_end;
+	phys_addr_t poisoned_addr;
 
 	temp_start = max(start, kbuf->buf_min);
 
@@ -542,6 +552,15 @@ static int locate_mem_hole_bottom_up(unsigned long start, unsigned long end,
 		/* Make sure this does not conflict with exclude range */
 		if (arch_check_excluded_range(image, temp_start, temp_end)) {
 			temp_start = temp_start + PAGE_SIZE;
+			continue;
+		}
+
+		/*
+		 * Avoid placing the next kernel on hardware-poisoned memory.
+		 */
+		if (range_contains_hwpoison(temp_start, temp_end - temp_start + 1,
+					    &poisoned_addr)) {
+			temp_start = poisoned_addr + PAGE_SIZE;
 			continue;
 		}
 
