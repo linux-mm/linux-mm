@@ -95,6 +95,13 @@ typedef int __bitwise fpi_t;
 /* free_pages_prepare() has already been called for page(s) being freed. */
 #define FPI_PREPARED		((__force fpi_t)BIT(3))
 
+/*
+ * Page(s) needs to go through free_pages_sanitize(), for example, because
+ * free_pages_prepare() cannot sanitize a high-order page block due to
+ * hardware error in some page(s).
+ */
+#define FPI_SANITIZE		((__force fpi_t)BIT(4))
+
 /* prevent >1 _updater_ of zone percpu pageset ->high and ->batch fields */
 static DEFINE_MUTEX(pcp_batch_high_lock);
 #define MIN_PERCPU_PAGELIST_HIGH_FRACTION (8)
@@ -212,6 +219,8 @@ gfp_t gfp_allowed_mask __read_mostly = GFP_BOOT_MASK;
 unsigned int pageblock_order __read_mostly;
 #endif
 
+static void free_has_hwpoisoned(struct page *page, unsigned int order,
+				fpi_t fpi_flags);
 static void __free_pages_ok(struct page *page, unsigned int order,
 			    fpi_t fpi_flags);
 static void reserve_highatomic_pageblock(struct page *page, int order,
@@ -1313,14 +1322,73 @@ static inline void pgalloc_tag_sub_pages(struct alloc_tag *tag, unsigned int nr)
 
 #endif /* CONFIG_MEM_ALLOC_PROFILING */
 
+/*
+ * Sanitize, which requires writing, a block of pages at the last moment of
+ * preparing to freeing them, i.e. __free_pages_prepare().
+ */
+static void free_pages_sanitize(struct page *page, unsigned int order)
+{
+	bool init = want_init_on_free();
+	/*
+	 * __kasan_unpoison_pages() sets kasan tag on every tail page, so
+	 * it is fine to use should_skip_kasan_poison() when pages here
+	 * were a set of tail pages from a compound folio.
+	 */
+	bool skip_kasan_poison = should_skip_kasan_poison(page);
+
+	kernel_poison_pages(page, 1 << order);
+
+	/*
+	 * As memory initialization might be integrated into KASAN,
+	 * KASAN poisoning and memory initialization code must be
+	 * kept together to avoid discrepancies in behavior.
+	 *
+	 * With hardware tag-based KASAN, memory tags must be set before the
+	 * page becomes unavailable via debug_pagealloc or arch_free_page.
+	 */
+	if (!skip_kasan_poison) {
+		kasan_poison_pages(page, order, init);
+
+		/* Memory is already initialized if KASAN did it internally. */
+		if (kasan_has_integrated_init())
+			init = false;
+	}
+	if (init)
+		clear_highpages_kasan_tagged(page, 1 << order);
+
+	/*
+	 * arch_free_page() can make the page's contents inaccessible.  s390
+	 * does this.  So nothing which can access the page's contents should
+	 * happen after this.
+	 */
+	arch_free_page(page, order);
+
+	debug_pagealloc_unmap_pages(page, 1 << order);
+}
+
+/*
+ * Returns
+ * - true: checks and preparations all good, caller can proceed freeing.
+ * - false: do not proceed freeing for one of the following reasons:
+ *   1. Some check failed so it is not safe to proceed freeing.
+ *   2. A compound page has some HWPoison pages. The healthy pages
+ *      are already safely freed, and the HWPoison ones isolated.
+ */
 static __always_inline bool __free_pages_prepare(struct page *page,
 		unsigned int order, fpi_t fpi_flags)
 {
 	int bad = 0;
-	bool skip_kasan_poison = should_skip_kasan_poison(page);
-	bool init = want_init_on_free();
 	bool compound = PageCompound(page);
 	struct folio *folio = page_folio(page);
+	/*
+	 * When dealing with compound page, PG_has_hwpoisoned is cleared
+	 * with PAGE_FLAGS_SECOND. So the check must be done first.
+	 *
+	 * Note we can't exclude PG_has_hwpoisoned from PAGE_FLAGS_SECOND.
+	 * Because PG_has_hwpoisoned == PG_active, free_page_is_bad() will
+	 * confuse and complaint that the first tail page is still active.
+	 */
+	bool should_fhh = compound && folio_test_has_hwpoisoned(folio);
 
 	if (fpi_flags & FPI_PREPARED)
 		return true;
@@ -1426,34 +1494,19 @@ static __always_inline bool __free_pages_prepare(struct page *page,
 					   PAGE_SIZE << order);
 	}
 
-	kernel_poison_pages(page, 1 << order);
-
 	/*
-	 * As memory initialization might be integrated into KASAN,
-	 * KASAN poisoning and memory initialization code must be
-	 * kept together to avoid discrepancies in behavior.
+	 * After breaking down compound page and dealing with page metadata
+	 * (e.g. page owner and page alloc tags), take a shortcut if this
+	 * was a compound page containing certain HWPoison subpages.
 	 *
-	 * With hardware tag-based KASAN, memory tags must be set before the
-	 * page becomes unavailable via debug_pagealloc or arch_free_page.
+	 * FPI_SANITIZE to remember free_pages_sanitize() healthy pages.
 	 */
-	if (!skip_kasan_poison) {
-		kasan_poison_pages(page, order, init);
-
-		/* Memory is already initialized if KASAN did it internally. */
-		if (kasan_has_integrated_init())
-			init = false;
+	if (should_fhh) {
+		free_has_hwpoisoned(page, order, fpi_flags | FPI_SANITIZE);
+		return false;
 	}
-	if (init)
-		clear_highpages_kasan_tagged(page, 1 << order);
 
-	/*
-	 * arch_free_page() can make the page's contents inaccessible.  s390
-	 * does this.  So nothing which can access the page's contents should
-	 * happen after this.
-	 */
-	arch_free_page(page, order);
-
-	debug_pagealloc_unmap_pages(page, 1 << order);
+	free_pages_sanitize(page, order);
 
 	return true;
 }
@@ -7006,8 +7059,8 @@ void __init page_alloc_sysctl_init(void)
 	register_sysctl_init("vm", page_alloc_sysctl_table);
 }
 
-static void free_prepared_contig_range(struct page *page,
-		unsigned long nr_pages)
+static void __free_prepared_contig_range(struct page *page,
+		unsigned long nr_pages, fpi_t fpi_flags)
 {
 	unsigned long pfn = page_to_pfn(page);
 
@@ -7023,13 +7076,25 @@ static void free_prepared_contig_range(struct page *page,
 		/*
 		 * Free the chunk as a single block. Our caller has already
 		 * called free_pages_prepare() for each order-0 page.
+		 *
+		 * If the original compound page has HWPoison page,
+		 * free_pages_prepare() has to skip sanitize at that time,
+		 * but now it is good time to do that.
 		 */
-		__free_frozen_pages(page, order, FPI_PREPARED);
+		if (fpi_flags & FPI_SANITIZE)
+			free_pages_sanitize(page, order);
+
+		__free_frozen_pages(page, order, fpi_flags | FPI_PREPARED);
 
 		pfn += 1UL << order;
 		page += 1UL << order;
 		nr_pages -= 1UL << order;
 	}
+}
+
+static void free_prepared_contig_range(struct page *page, unsigned long nr_pages)
+{
+	__free_prepared_contig_range(page, nr_pages, FPI_NONE);
 }
 
 static void __free_contig_range_common(unsigned long pfn, unsigned long nr_pages,
@@ -7103,6 +7168,61 @@ static void __free_contig_range_common(unsigned long pfn, unsigned long nr_pages
 void __free_contig_range(unsigned long pfn, unsigned long nr_pages)
 {
 	__free_contig_range_common(pfn, nr_pages, /* is_frozen= */ false);
+}
+
+/*
+ * Given some contiguous pages that have certain number of HWPoison page(s),
+ * free only the healthy ones.
+ *
+ * Used at the end of __free_pages_prepare(). Even if having HWPoison pages,
+ * breaking down compound page and clearing metadata (e.g. page owner, alloc
+ * tag) can be done together during __free_pages_prepare(), which simplifies
+ * the splitting here: unlike __split_unmapped_folio(), there is no need to
+ * turn split pages into a compound page or to carry metadata.
+ *
+ * It scans every raw page of the compound page and causes nontrivial overhead.
+ * So only use this when the compound page contains HWPoison page(s).
+ *
+ * It also works when order == 0, regardless of PageHWPoison() or not.
+ *
+ * This implementation needs rework in memdesc world.
+ */
+static void free_has_hwpoisoned(struct page *page, unsigned int order,
+				fpi_t fpi_flags)
+{
+	unsigned long curr = page_to_pfn(page);
+	unsigned long end_pfn = curr + (1 << order);
+	unsigned long next;
+	unsigned long total_freed = 0;
+	unsigned long total_hwp = 0;
+
+	while (curr < end_pfn) {
+		next = curr;
+
+		while (next < end_pfn && !PageHWPoison(pfn_to_page(next)))
+			++next;
+
+		if (next != end_pfn) {
+			/*
+			 * Avoid accounting error when the page is freed
+			 * by unpoison_memory().
+			 */
+			clear_page_tag_ref(pfn_to_page(next));
+			++total_hwp;
+		}
+
+		__free_prepared_contig_range(pfn_to_page(curr), next - curr,
+					     fpi_flags);
+		total_freed += next - curr;
+
+		if (next == end_pfn)
+			break;
+
+		curr = next + 1;
+	}
+
+	pr_info("Freed %#lx pages, excluded %#lx HWPoison pages\n",
+		total_freed, total_hwp);
 }
 
 #ifdef CONFIG_CONTIG_ALLOC
