@@ -1584,6 +1584,42 @@ static bool always_dump_vma(struct vm_area_struct *vma)
 #define DUMP_SIZE_MAYBE_ELFHDR_PLACEHOLDER 1
 
 /*
+ * Truncate the file_sz of the VMA to the last faulted page
+ */
+static unsigned long truncate_vma(struct vm_area_struct *vma)
+{
+	/*
+	 * Same logic as dump_user_range, where we enumerate the pages
+	 * in a VMA, but instead of skipping un-faulted pages, we move the VMA
+	 * end
+	 */
+	struct page *page;
+	unsigned long truncated_end;
+
+	/* We're already under the mmap lock */
+	int locked = 1;
+
+	for (truncated_end = vma->vm_end; truncated_end > vma->vm_start; truncated_end -= PAGE_SIZE) {
+		/*
+		 * Because we're iterating backwards, we need to
+		 * look at the page before the current address
+		 */
+		unsigned long probe_addr = truncated_end - PAGE_SIZE;
+
+		page = get_dump_page(probe_addr, &locked);
+		/*
+		 * We hit a faulted page, exit
+		 */
+		if (page) {
+			put_page(page);
+			break;
+		}
+	}
+
+	return truncated_end - vma->vm_start;
+}
+
+/*
  * Decide how much of @vma's contents should be included in a core dump.
  */
 static unsigned long vma_dump_size(struct vm_area_struct *vma,
@@ -1657,13 +1693,15 @@ static unsigned long vma_dump_size(struct vm_area_struct *vma,
 		return DUMP_SIZE_MAYBE_ELFHDR_PLACEHOLDER;
 	}
 
-#undef	FILTER
-
 	return 0;
 
 whole:
-	return vma->vm_end - vma->vm_start;
+	if (FILTER(TRUNCATE_SPARSE_VMAS))
+		return truncate_vma(vma);
+	else
+		return vma->vm_end - vma->vm_start;
 }
+#undef	FILTER
 
 /*
  * Helper function for iterating across a vma list.  It ensures that the caller
