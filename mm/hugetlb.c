@@ -27,7 +27,6 @@
 #include <linux/string_helpers.h>
 #include <linux/swap.h>
 #include <linux/leafops.h>
-#include <linux/jhash.h>
 #include <linux/numa.h>
 #include <linux/llist.h>
 #include <linux/cma.h>
@@ -5514,12 +5513,10 @@ retry_avoidcopy:
 		 */
 		if (cow_from_owner) {
 			struct address_space *mapping = vma->vm_file->f_mapping;
-			pgoff_t idx;
-			u32 hash;
 
 			folio_put(old_folio);
 			/*
-			 * Drop hugetlb_fault_mutex and vma_lock before
+			 * Release invalidate lock and vma_lock before
 			 * unmapping.  unmapping needs to hold vma_lock
 			 * in write mode.  Dropping vma_lock in read mode
 			 * here is OK as COW mappings do not interact with
@@ -5527,14 +5524,12 @@ retry_avoidcopy:
 			 *
 			 * Reacquire both after unmap operation.
 			 */
-			idx = vma_hugecache_offset(h, vma, vmf->address);
-			hash = hugetlb_fault_mutex_hash(mapping, idx);
 			hugetlb_vma_unlock_read(vma);
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+			filemap_invalidate_unlock(mapping);
 
 			unmap_ref_private(mm, vma, old_folio, vmf->address);
 
-			mutex_lock(&hugetlb_fault_mutex_table[hash]);
+			filemap_invalidate_lock(mapping);
 			hugetlb_vma_lock_read(vma);
 			spin_lock(vmf->ptl);
 			vmf->pte = hugetlb_walk(vma, vmf->address,
@@ -5662,16 +5657,13 @@ static inline vm_fault_t hugetlb_handle_userfault(struct vm_fault *vmf,
 						  struct address_space *mapping,
 						  unsigned long reason)
 {
-	u32 hash;
-
 	/*
-	 * vma_lock and hugetlb_fault_mutex must be dropped before handling
+	 * vma_lock and invalidate lock must be dropped before handling
 	 * userfault. Also mmap_lock could be dropped due to handling
 	 * userfault, any vma operation should be careful from here.
 	 */
 	hugetlb_vma_unlock_read(vmf->vma);
-	hash = hugetlb_fault_mutex_hash(mapping, vmf->pgoff);
-	mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+	filemap_invalidate_unlock(mapping);
 	return handle_userfault(vmf, reason);
 }
 
@@ -5695,7 +5687,6 @@ static bool hugetlb_pte_stable(struct hstate *h, struct mm_struct *mm, unsigned 
 static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 			struct vm_fault *vmf)
 {
-	u32 hash = hugetlb_fault_mutex_hash(mapping, vmf->pgoff);
 	bool new_folio, new_anon_folio = false;
 	struct vm_area_struct *vma = vmf->vma;
 	struct mm_struct *mm = vma->vm_mm;
@@ -5903,7 +5894,7 @@ out:
 	if (unlikely(ret & VM_FAULT_RETRY))
 		vma_end_read(vma);
 
-	mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+	filemap_invalidate_unlock(mapping);
 	return ret;
 
 backout:
@@ -5918,35 +5909,10 @@ backout_unlocked:
 	goto out;
 }
 
-#ifdef CONFIG_SMP
-u32 hugetlb_fault_mutex_hash(struct address_space *mapping, pgoff_t idx)
-{
-	unsigned long key[2];
-	u32 hash;
-
-	key[0] = (unsigned long) mapping;
-	key[1] = idx;
-
-	hash = jhash2((u32 *)&key, sizeof(key)/(sizeof(u32)), 0);
-
-	return hash & (num_fault_mutexes - 1);
-}
-#else
-/*
- * For uniprocessor systems we always use a single mutex, so just
- * return 0 and avoid the hashing overhead.
- */
-u32 hugetlb_fault_mutex_hash(struct address_space *mapping, pgoff_t idx)
-{
-	return 0;
-}
-#endif
-
 vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			unsigned long address, unsigned int flags)
 {
 	vm_fault_t ret;
-	u32 hash;
 	struct folio *folio = NULL;
 	struct hstate *h = hstate_vma(vma);
 	struct address_space *mapping;
@@ -5972,8 +5938,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * the same page in the page cache.
 	 */
 	mapping = vma->vm_file->f_mapping;
-	hash = hugetlb_fault_mutex_hash(mapping, vmf.pgoff);
-	mutex_lock(&hugetlb_fault_mutex_table[hash]);
+	filemap_invalidate_lock(mapping);
 
 	/*
 	 * Acquire vma lock before calling huge_pte_alloc and hold
@@ -5984,7 +5949,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	vmf.pte = huge_pte_alloc(mm, vma, vmf.address, huge_page_size(h));
 	if (!vmf.pte) {
 		hugetlb_vma_unlock_read(vma);
-		mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+		filemap_invalidate_unlock(mapping);
 		return VM_FAULT_OOM;
 	}
 
@@ -6027,7 +5992,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			 * migration_entry_wait_huge(). The vma lock will
 			 * be released there.
 			 */
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+			filemap_invalidate_unlock(mapping);
 			migration_entry_wait_huge(vma, vmf.address, vmf.pte);
 			return 0;
 		}
@@ -6067,7 +6032,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 		if (!userfaultfd_wp_async(vma)) {
 			spin_unlock(vmf.ptl);
 			hugetlb_vma_unlock_read(vma);
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+			filemap_invalidate_unlock(mapping);
 			return handle_userfault(&vmf, VM_UFFD_WP);
 		}
 
@@ -6115,7 +6080,7 @@ out_mutex:
 	if (unlikely(ret & VM_FAULT_RETRY))
 		vma_end_read(vma);
 
-	mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+	filemap_invalidate_unlock(mapping);
 	/*
 	 * hugetlb_wp drops all the locks, but the folio lock, before trying to
 	 * unmap the folio from other processes. During that window, if another

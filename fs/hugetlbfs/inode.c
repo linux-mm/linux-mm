@@ -561,27 +561,22 @@ static void remove_inode_hugepages(struct inode *inode, loff_t lstart,
 
 	folio_batch_init(&fbatch);
 	next = lstart >> PAGE_SHIFT;
+	filemap_invalidate_lock(mapping);
 	while (filemap_get_folios(mapping, &next, end - 1, &fbatch)) {
 		for (i = 0; i < folio_batch_count(&fbatch); ++i) {
 			struct folio *folio = fbatch.folios[i];
-			u32 hash = 0;
 
 			index = folio->index >> huge_page_order(h);
-			hash = hugetlb_fault_mutex_hash(mapping, index);
-			mutex_lock(&hugetlb_fault_mutex_table[hash]);
-
-			/*
-			 * Remove folio that was part of folio_batch.
-			 */
 			remove_inode_single_folio(h, inode, mapping, folio,
 						  index, truncate_op);
 			freed++;
-
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 		}
+		filemap_invalidate_unlock(mapping);
 		folio_batch_release(&fbatch);
 		cond_resched();
+		filemap_invalidate_lock(mapping);
 	}
+	filemap_invalidate_unlock(mapping);
 
 	if (truncate_op)
 		(void)hugetlb_unreserve_pages(inode,
@@ -710,7 +705,6 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 	unsigned long hpage_shift = huge_page_shift(h);
 	pgoff_t start, index, end;
 	int error;
-	u32 hash;
 
 	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE))
 		return -EOPNOTSUPP;
@@ -748,6 +742,7 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 	vm_flags_init(&pseudo_vma, VM_HUGETLB | VM_MAYSHARE | VM_SHARED);
 	pseudo_vma.vm_file = file;
 
+	filemap_invalidate_lock(mapping);
 	for (index = start; index < end; index++) {
 		/*
 		 * This is supposed to be the vaddr where the page is being
@@ -770,15 +765,10 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 		/* addr is the offset within the file (zero based) */
 		addr = index * hpage_size;
 
-		/* mutex taken here, fault path and hole punch */
-		hash = hugetlb_fault_mutex_hash(mapping, index);
-		mutex_lock(&hugetlb_fault_mutex_table[hash]);
-
 		/* See if already present in mapping to avoid alloc/free */
 		folio = filemap_get_folio(mapping, index << huge_page_order(h));
 		if (!IS_ERR(folio)) {
 			folio_put(folio);
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 			continue;
 		}
 
@@ -792,8 +782,8 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 		 */
 		folio = alloc_hugetlb_folio(&pseudo_vma, addr, false);
 		if (IS_ERR(folio)) {
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 			error = PTR_ERR(folio);
+			filemap_invalidate_unlock(mapping);
 			goto out;
 		}
 		folio_zero_user(folio, addr);
@@ -802,11 +792,9 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 		if (unlikely(error)) {
 			restore_reserve_on_error(h, &pseudo_vma, addr, folio);
 			folio_put(folio);
-			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
+			filemap_invalidate_unlock(mapping);
 			goto out;
 		}
-
-		mutex_unlock(&hugetlb_fault_mutex_table[hash]);
 
 		folio_set_hugetlb_migratable(folio);
 		/*
@@ -816,6 +804,7 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 		folio_unlock(folio);
 		folio_put(folio);
 	}
+	filemap_invalidate_unlock(mapping);
 
 	if (!(mode & FALLOC_FL_KEEP_SIZE) && offset + len > inode->i_size)
 		i_size_write(inode, offset + len);
