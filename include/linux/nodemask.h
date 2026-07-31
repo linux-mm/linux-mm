@@ -47,7 +47,6 @@
  *					MAX_NUMNODES
  *
  * nodemask_t nodemask_of_node(node)	Return nodemask with bit 'node' set
- * NODE_MASK_ALL			Initializer - all bits set
  * NODE_MASK_NONE			Initializer - no bits set
  * unsigned long *nodes_addr(mask)	Array of unsigned long's in mask
  *
@@ -295,25 +294,6 @@ static __always_inline unsigned int __first_unset_node(const nodemask_t *maskp)
 {
 	return min(MAX_NUMNODES, find_first_zero_bit(maskp->bits, MAX_NUMNODES));
 }
-
-#define NODE_MASK_LAST_WORD BITMAP_LAST_WORD_MASK(MAX_NUMNODES)
-
-#if MAX_NUMNODES <= BITS_PER_LONG
-
-#define NODE_MASK_ALL							\
-((nodemask_t) { {							\
-	[BITS_TO_LONGS(MAX_NUMNODES)-1] = NODE_MASK_LAST_WORD		\
-} })
-
-#else
-
-#define NODE_MASK_ALL							\
-((nodemask_t) { {							\
-	[0 ... BITS_TO_LONGS(MAX_NUMNODES)-2] = ~0UL,			\
-	[BITS_TO_LONGS(MAX_NUMNODES)-1] = NODE_MASK_LAST_WORD		\
-} })
-
-#endif
 
 #define NODE_MASK_NONE							\
 ((nodemask_t) { {							\
