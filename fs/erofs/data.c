@@ -251,7 +251,8 @@ void erofs_onlinefolio_init(struct folio *folio)
 		void *v;
 	} u = { .o = ATOMIC_INIT(1) };
 
-	folio->private = u.v;	/* valid only if file-backed folio is locked */
+	/* valid only if file-backed folio is locked */
+	folio_attach_private(folio, u.v);
 }
 
 void erofs_onlinefolio_split(struct folio *folio)
@@ -272,7 +273,7 @@ void erofs_onlinefolio_end(struct folio *folio, int err, bool dirty)
 
 	if (v & (BIT(EROFS_ONLINEFOLIO_DIRTY) - 1))
 		return;
-	folio->private = 0;
+	folio_detach_private(folio);
 	if (v & BIT(EROFS_ONLINEFOLIO_DIRTY))
 		flush_dcache_folio(folio);
 	folio_end_read(folio, !(v & BIT(EROFS_ONLINEFOLIO_EIO)));
