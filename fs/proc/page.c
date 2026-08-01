@@ -234,8 +234,7 @@ u64 stable_page_flags(const struct page *page)
 	u |= kpf_copy_bit(k, KPF_OWNER_2,	PG_owner_2);
 	/* preserve the original KPF_PRIVATE semantics by excluding non pagecache folios */
 	if (folio->mapping && !folio_test_anon(folio) &&
-	    (folio_get_private(folio) && !folio_test_swapcache(folio) &&
-	     !folio_test_hugetlb(folio)))
+	    folio_test_fs_private(folio))
 		u |= BIT_ULL(KPF_PRIVATE);
 	u |= kpf_copy_bit(k, KPF_PRIVATE_2,	PG_private_2);
 	u |= kpf_copy_bit(k, KPF_OWNER_PRIVATE,	PG_owner_priv_1);

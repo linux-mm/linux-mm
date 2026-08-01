@@ -3065,8 +3065,7 @@ static inline int folio_expected_ref_count(const struct folio *folio)
 		/* One reference per page from the pagecache. */
 		ref_count += !!folio->mapping << order;
 		/* One reference from filesystem private data. */
-		ref_count += !!folio->private && !folio_test_hugetlb(folio) &&
-			     !folio_test_swapcache(folio);
+		ref_count += folio_test_fs_private(folio);
 	}
 
 	/* One reference per page table mapping. */
