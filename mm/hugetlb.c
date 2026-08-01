@@ -1433,10 +1433,10 @@ void add_hugetlb_folio(struct hstate *h, struct folio *folio,
 	}
 
 	__folio_set_hugetlb(folio);
-	folio_change_private(folio, NULL);
+	folio->private = NULL;
 	/*
-	 * We have to set hugetlb_vmemmap_optimized again as above
-	 * folio_change_private(folio, NULL) cleared it.
+	 * We have to set hugetlb_vmemmap_optimized again as hugetlb page flags
+	 * are all cleared above.
 	 */
 	folio_set_hugetlb_vmemmap_optimized(folio);
 
