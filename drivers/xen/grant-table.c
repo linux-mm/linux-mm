@@ -875,7 +875,7 @@ int gnttab_pages_set_private(int nr_pages, struct page **pages)
 
 		set_page_private(pages[i], (unsigned long)foreign);
 #endif
-		SetPagePrivate(pages[i]);
+		/* Data is stored in page->private on 64-bit */
 	}
 
 	return 0;
@@ -1031,12 +1031,11 @@ void gnttab_pages_clear_private(int nr_pages, struct page **pages)
 	int i;
 
 	for (i = 0; i < nr_pages; i++) {
-		if (PagePrivate(pages[i])) {
 #if BITS_PER_LONG < 64
+		if (page_private(pages[i]))
 			kfree((void *)page_private(pages[i]));
 #endif
-			ClearPagePrivate(pages[i]);
-		}
+		set_page_private(pages[i], 0);
 	}
 }
 EXPORT_SYMBOL_GPL(gnttab_pages_clear_private);
