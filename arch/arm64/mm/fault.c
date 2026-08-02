@@ -612,6 +612,7 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
 	unsigned int mm_flags = FAULT_FLAG_DEFAULT;
 	unsigned long addr = untagged_addr(far);
 	struct vm_area_struct *vma;
+	bool uaccess = false;
 	int si_code;
 	int pkey = -1;
 
@@ -668,6 +669,7 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
 		if (!insn_may_access_user(regs->pc, esr))
 			die_kernel_fault("access to user memory outside uaccess routines",
 					 addr, esr, regs);
+		uaccess = true;
 	}
 
 	if (is_pkvm_stage2_abort(esr)) {
@@ -679,7 +681,7 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
 
 	perf_sw_event(PERF_COUNT_SW_PAGE_FAULTS, 1, regs, addr);
 
-	if (!(mm_flags & FAULT_FLAG_USER))
+	if (!(mm_flags & FAULT_FLAG_USER) && !uaccess)
 		goto lock_mmap;
 
 	vma = lock_vma_under_rcu(mm, addr);
