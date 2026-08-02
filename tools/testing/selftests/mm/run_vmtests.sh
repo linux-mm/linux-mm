@@ -415,6 +415,8 @@ CATEGORY="thp" run_test ./khugepaged_race -d 5 -m madvise
 
 CATEGORY="thp" run_test ./khugepaged_race -d 5 -m stepped -z
 
+CATEGORY="thp" run_test ./khugepaged_race -d 5 -m stepped -p
+
 CATEGORY="thp" run_test ./khugepaged
 
 CATEGORY="thp" run_test ./khugepaged -s 2
