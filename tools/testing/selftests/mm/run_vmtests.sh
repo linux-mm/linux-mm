@@ -47,6 +47,8 @@ separated by spaces:
 	tests for very large virtual address space
 - vmalloc
 	vmalloc smoke tests
+- vmstat
+	vmstat performance test
 - hmm
 	hmm smoke tests
 - madv_guard
@@ -336,6 +338,9 @@ fi # VADDR64
 
 # vmalloc stability smoke test
 CATEGORY="vmalloc" run_test bash ./test_vmalloc.sh smoke
+
+# vmstat performance test
+CATEGORY="vmstat" run_test bash ./test_vmstat.sh performance
 
 CATEGORY="mremap" run_test ./mremap_dontunmap
 
