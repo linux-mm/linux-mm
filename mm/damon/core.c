@@ -2816,10 +2816,16 @@ static __kernel_ulong_t damos_get_node_mem_bp(
 	}
 
 	si_meminfo_node(&i, goal->nid);
-	if (goal->metric == DAMOS_QUOTA_NODE_MEM_USED_BP)
+	if (!i.totalram)
+		return 10000;
+	if (goal->metric == DAMOS_QUOTA_NODE_MEM_USED_BP) {
 		numerator = i.totalram - i.freeram;
-	else	/* DAMOS_QUOTA_NODE_MEM_FREE_BP */
+	} else {
+		/* DAMOS_QUOTA_NODE_MEM_FREE_BP */
+		if (i.totalram < i.freeram)
+			return 0;
 		numerator = i.freeram;
+	}
 	return mult_frac(numerator, 10000, i.totalram);
 }
 
