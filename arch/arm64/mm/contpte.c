@@ -26,6 +26,11 @@ static inline pte_t *contpte_align_down(pte_t *ptep)
 	return PTR_ALIGN_DOWN(ptep, sizeof(*ptep) * CONT_PTES);
 }
 
+#define contpte_align_down(ptep)                                                       \
+	_Generic((ptep),                                                               \
+		 const pte_t *: (const pte_t *) contpte_align_down((pte_t *) (ptep)),  \
+		 pte_t *: contpte_align_down((pte_t *) ptep))
+
 static inline pte_t *contpte_align_addr_ptep(unsigned long *start,
 					     unsigned long *end, pte_t *ptep,
 					     unsigned int nr)
@@ -305,7 +310,7 @@ void __contpte_try_unfold(struct mm_struct *mm, unsigned long addr,
 }
 EXPORT_SYMBOL_GPL(__contpte_try_unfold);
 
-pte_t contpte_ptep_get(pte_t *ptep, pte_t orig_pte)
+pte_t contpte_ptep_get(const pte_t *ptep, pte_t orig_pte)
 {
 	/*
 	 * Gather access/dirty bits, which may be populated in any of the ptes
@@ -362,7 +367,7 @@ static inline bool contpte_is_consistent(pte_t pte, unsigned long pfn,
 			pgprot_val(prot) == pgprot_val(orig_prot);
 }
 
-pte_t contpte_ptep_get_lockless(pte_t *orig_ptep)
+pte_t contpte_ptep_get_lockless(const pte_t *orig_ptep)
 {
 	/*
 	 * The ptep_get_lockless() API requires us to read and return *orig_ptep
@@ -381,10 +386,10 @@ pte_t contpte_ptep_get_lockless(pte_t *orig_ptep)
 	 * because it is not part of a contpte range.
 	 */
 
+	const pte_t *ptep;
 	pgprot_t orig_prot;
 	unsigned long pfn;
 	pte_t orig_pte;
-	pte_t *ptep;
 	pte_t pte;
 	int i;
 
