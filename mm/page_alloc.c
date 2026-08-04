@@ -6926,7 +6926,7 @@ static int lowmem_reserve_ratio_sysctl_handler(const struct ctl_table *table,
 		int write, void *buffer, size_t *length, loff_t *ppos)
 {
 	struct ctl_table tmp = *table;
-	int ratio[MAX_NR_ZONES];
+	int ratio[ARRAY_SIZE(sysctl_lowmem_reserve_ratio)];
 	int rc;
 
 	if (!write)
