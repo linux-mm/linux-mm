@@ -4467,8 +4467,12 @@ int folio_split(struct folio *folio, unsigned int new_order,
  */
 unsigned int min_order_for_split(struct folio *folio)
 {
+	struct address_space *mapping;
+
 	if (folio_test_anon(folio))
 		return 0;
+
+	mapping = READ_ONCE(folio->mapping);
 
 	/*
 	 * If the folio got truncated, we don't know the previous mapping and
@@ -4476,10 +4480,10 @@ unsigned int min_order_for_split(struct folio *folio)
 	 * attempt will immediately fail with -EBUSY as the folio cannot get
 	 * split until freed.
 	 */
-	if (!folio->mapping)
+	if (!mapping)
 		return 0;
 
-	return mapping_min_folio_order(folio->mapping);
+	return mapping_min_folio_order(mapping);
 }
 
 int split_folio_to_list(struct folio *folio, struct list_head *list)
