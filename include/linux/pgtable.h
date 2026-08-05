@@ -1782,6 +1782,10 @@ void arch_sync_kernel_mappings(unsigned long start, unsigned long end);
  * because these macros can be used even if CONFIG_MMU is not defined.
  */
 
+#ifndef canon_pgprot
+#define canon_pgprot(prot)	(prot)
+#endif
+
 #ifndef pgprot_nx
 #define pgprot_nx(prot)	(prot)
 #endif
@@ -2105,6 +2109,46 @@ static inline int pud_write(pud_t pud)
 }
 #endif /* pud_write */
 
+#ifndef p4d_write
+static inline int p4d_write(p4d_t p4d)
+{
+	BUG();
+	return 0;
+}
+#endif /* p4d_write */
+
+#ifndef pmd_exec
+static inline int pmd_exec(pmd_t pmd)
+{
+	BUG();
+	return 0;
+}
+#endif /* pmd_exec */
+
+#ifndef pud_exec
+static inline int pud_exec(pud_t pud)
+{
+	BUG();
+	return 0;
+}
+#endif /* pud_exec */
+
+#ifndef p4d_exec
+static inline int p4d_exec(p4d_t p4d)
+{
+	BUG();
+	return 0;
+}
+#endif /* p4d_exec */
+
+#ifndef pgd_exec
+static inline int pgd_exec(pgd_t pgd)
+{
+	BUG();
+	return 0;
+}
+#endif /* pgd_exec */
+
 #if !defined(CONFIG_TRANSPARENT_HUGEPAGE) || \
 	!defined(CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD)
 static inline int pud_trans_huge(pud_t pud)
@@ -2295,16 +2339,20 @@ static inline bool arch_has_pfn_modify_check(void)
 typedef unsigned int pgtbl_mod_mask;
 
 enum pgtable_level {
-	PGTABLE_LEVEL_PTE = 0,
+	PGTABLE_LEVEL_NONE = 0,
+	PGTABLE_LEVEL_PTE,
 	PGTABLE_LEVEL_PMD,
 	PGTABLE_LEVEL_PUD,
 	PGTABLE_LEVEL_P4D,
 	PGTABLE_LEVEL_PGD,
+	PGTABLE_LEVEL_NUM,
 };
 
 static inline const char *pgtable_level_to_str(enum pgtable_level level)
 {
 	switch (level) {
+	case PGTABLE_LEVEL_NONE:
+		return "none";
 	case PGTABLE_LEVEL_PTE:
 		return "pte";
 	case PGTABLE_LEVEL_PMD:
@@ -2318,6 +2366,28 @@ static inline const char *pgtable_level_to_str(enum pgtable_level level)
 	default:
 		return "unknown";
 	}
+}
+
+/* Size of the memory mapped by a single leaf entry at @level */
+static inline unsigned long pgtable_level_size(enum pgtable_level level)
+{
+	switch (level) {
+	case PGTABLE_LEVEL_PTE:
+		return PAGE_SIZE;
+	case PGTABLE_LEVEL_PMD:
+		return PMD_SIZE;
+	case PGTABLE_LEVEL_PUD:
+		return PUD_SIZE;
+	case PGTABLE_LEVEL_P4D:
+		return P4D_SIZE;
+	default:
+		return PGDIR_SIZE;
+	}
+}
+
+static inline unsigned long pgtable_level_mask(enum pgtable_level level)
+{
+	return ~(pgtable_level_size(level) - 1);
 }
 
 #endif /* !__ASSEMBLY__ */
