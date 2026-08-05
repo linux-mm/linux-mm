@@ -131,11 +131,12 @@ def assert_scheme_committed(scheme, dump):
             'hugepage': 3,
             'nohugeapge': 4,
             'collapse': 5,
-            'lru_prio': 6,
-            'lru_deprio': 7,
-            'migrate_hot': 8,
-            'migrate_cold': 9,
-            'stat': 10,
+            'split': 6,
+            'lru_prio': 7,
+            'lru_deprio': 8,
+            'migrate_hot': 9,
+            'migrate_cold': 10,
+            'stat': 11,
             }
     assert_true(dump['action'] == action_val[scheme.action], 'action', dump)
     assert_true(dump['apply_interval_us'] == scheme. apply_interval_us,

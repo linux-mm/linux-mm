@@ -567,6 +567,7 @@ struct damos *damon_new_scheme(struct damos_access_pattern *pattern,
 		return NULL;
 	scheme->pattern = *pattern;
 	scheme->action = action;
+	scheme->order = 0;
 	scheme->apply_interval_us = apply_interval_us;
 	/*
 	 * next_apply_sis will be set when kdamond starts.  While kdamond is
@@ -1281,6 +1282,7 @@ static int damos_commit(struct damos *dst, struct damos *src)
 
 	dst->pattern = src->pattern;
 	dst->action = src->action;
+	dst->order = src->order;
 	dst->apply_interval_us = src->apply_interval_us;
 
 	err = damos_commit_quota(&dst->quota, &src->quota);

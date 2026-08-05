@@ -524,6 +524,11 @@ that supports each action are as below.
    Supported by ``vaddr`` and ``fvaddr`` operations set. When
    TRANSPARENT_HUGEPAGE is disabled, the application of the action will just
    fail.
+ - ``split``: Split each large folio in the region down to the order specified
+   by the scheme's ``target_order`` (``0`` for order-0 base pages, or
+   ``2..HPAGE_PMD_ORDER-1``).  Supported by ``vaddr`` and ``fvaddr`` operations
+   set. When TRANSPARENT_HUGEPAGE is disabled, the application of the action
+   will just fail.
  - ``lru_prio``: Prioritize the region on its LRU lists.
    Supported by ``paddr`` operations set.
  - ``lru_deprio``: Deprioritize the region on its LRU lists.
