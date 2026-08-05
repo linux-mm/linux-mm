@@ -811,6 +811,7 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	struct blk_plug plug;
 	struct swap_iocb *splug = NULL;
 	swp_entry_t ra_entry;
+	bool has_sync = false;
 
 	mask = swapin_nr_pages(offset) - 1;
 	if (!mask)
@@ -824,10 +825,16 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	if (end_offset >= si->max)
 		end_offset = si->max - 1;
 
+	/* first, issue the asynchronous device reads */
 	blk_start_plug(&plug);
 	for (offset = start_offset; offset <= end_offset ; offset++) {
-		/* Ok, do the async read-ahead now */
 		ra_entry = swp_entry(swp_type(entry), offset);
+		if (swap_entry_synchronous(si, ra_entry)) {
+			has_sync = true;
+			continue;
+		}
+
+		/* Ok, do the async read-ahead now */
 		folio = swap_cache_read_folio(ra_entry, gfp_mask, mpol, ilx,
 					      &splug, offset != entry_offset);
 		if (!folio)
@@ -836,6 +843,24 @@ struct folio *swap_cluster_readahead(swp_entry_t entry, gfp_t gfp_mask,
 	}
 	blk_finish_plug(&plug);
 	swap_read_unplug(splug);
+
+	if (!has_sync || swap_entry_synchronous(si, entry))
+		goto drain;
+
+	/* Overlap the in flight IOs with the synchronous neighbours reads */
+	for (offset = start_offset; offset <= end_offset; offset++) {
+		ra_entry = swp_entry(swp_type(entry), offset);
+		if (!swap_entry_synchronous(si, ra_entry))
+			continue;
+
+		folio = swap_cache_read_folio(ra_entry, gfp_mask, mpol, ilx,
+					      NULL, true);
+		if (!folio)
+			continue;
+
+		folio_put(folio);
+	}
+drain:
 	lru_add_drain();	/* Push any new pages onto the LRU now */
 skip:
 	/* The page was likely read above, so no need for plugging here */
@@ -899,11 +924,13 @@ static int swap_vma_ra_win(struct vm_fault *vmf, unsigned long *start,
 static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 		struct mempolicy *mpol, pgoff_t targ_ilx, struct vm_fault *vmf)
 {
+	softleaf_t sync_entries[1 << SWAP_RA_ORDER_CEILING];
+	pgoff_t sync_ilx[1 << SWAP_RA_ORDER_CEILING];
 	struct blk_plug plug;
 	struct swap_iocb *splug = NULL;
 	struct folio *folio;
 	pte_t *pte = NULL, pentry;
-	int win;
+	int win, i, nr_sync = 0;
 	unsigned long start, end, addr;
 	pgoff_t ilx = targ_ilx;
 
@@ -913,6 +940,7 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 
 	ilx = targ_ilx - PFN_DOWN(vmf->address - start);
 
+	/* first, issue the asynchronous device reads */
 	blk_start_plug(&plug);
 	for (addr = start; addr < end; ilx++, addr += PAGE_SIZE) {
 		struct swap_info_struct *si = NULL;
@@ -939,6 +967,16 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 			if (!si)
 				continue;
 		}
+
+		if (swap_entry_synchronous(si, entry)) {
+			sync_entries[nr_sync] = entry;
+			sync_ilx[nr_sync] = ilx;
+			nr_sync++;
+			if (si)
+				put_swap_device(si);
+			continue;
+		}
+
 		folio = swap_cache_read_folio(entry, gfp_mask, mpol, ilx,
 					      &splug, addr != vmf->address);
 		if (si)
@@ -951,6 +989,31 @@ static struct folio *swap_vma_readahead(swp_entry_t targ_entry, gfp_t gfp_mask,
 		pte_unmap(pte);
 	blk_finish_plug(&plug);
 	swap_read_unplug(splug);
+
+	if (!nr_sync || swap_entry_synchronous(NULL, targ_entry))
+		goto drain;
+
+	/* Overlap the in flight IOs with the synchronous neighbours reads */
+	for (i = 0; i < nr_sync; i++) {
+		struct swap_info_struct *si = NULL;
+
+		if (swp_type(sync_entries[i]) != swp_type(targ_entry)) {
+			si = get_swap_device(sync_entries[i]);
+			if (!si)
+				continue;
+		}
+
+		folio = swap_cache_read_folio(sync_entries[i], gfp_mask, mpol,
+					      sync_ilx[i], NULL, true);
+		if (si)
+			put_swap_device(si);
+
+		if (!folio)
+			continue;
+
+		folio_put(folio);
+	}
+drain:
 	lru_add_drain();
 skip:
 	/* The folio was likely read above, so no need for plugging here */
