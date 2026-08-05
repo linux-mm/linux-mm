@@ -57,6 +57,9 @@
  */
 #define ALLOC_NO_CODETAG       0x1000
 
+/* Select the N_MEMORY_PRIVATE zonelist family (see select_zonelist()). */
+#define ALLOC_ZONELIST_PRIVATE 0x2000
+
 /* Flags that allow allocations below the min watermark. */
 #define ALLOC_RESERVES (ALLOC_NON_BLOCK|ALLOC_MIN_RESERVE|ALLOC_HIGHATOMIC|ALLOC_OOM)
 
@@ -94,6 +97,29 @@ struct alloc_context {
 	/* Only flags that are global to the whole allocation go here. */
 	unsigned int alloc_flags;
 };
+
+#ifdef CONFIG_NUMA
+static_assert(ZONELIST_PRIVATE + 1 == ZONELIST_PRIVATE_NOFALLBACK);
+#endif
+
+/*
+ * select_zonelist - resolve the zonelist for an allocation
+ *
+ * The default matches node_zonelist(); ALLOC_ZONELIST_PRIVATE selects the
+ * private-node family so an allocation may reach an N_MEMORY_PRIVATE node.
+ */
+static inline struct zonelist *
+select_zonelist(int nid, gfp_t gfp, unsigned int alloc_flags)
+{
+#ifdef CONFIG_NUMA
+	if (alloc_flags & ALLOC_ZONELIST_PRIVATE) {
+		int idx = ZONELIST_PRIVATE + !!(gfp & __GFP_THISNODE);
+
+		return &NODE_DATA(nid)->node_zonelists[idx];
+	}
+#endif
+	return node_zonelist(nid, gfp);
+}
 
 /*
  * This function returns the order of a free page in the buddy system. In
@@ -257,6 +283,14 @@ void free_frozen_pages_nolock(struct page *page, unsigned int order);
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
 		nodemask_t *nodemask, unsigned int alloc_flags);
 #define __alloc_pages(...)			alloc_hooks(__alloc_pages_noprof(__VA_ARGS__))
+
+struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
+		nodemask_t *nodemask, unsigned int alloc_flags);
+#define __folio_alloc(...)			alloc_hooks(__folio_alloc_noprof(__VA_ARGS__))
+
+unsigned long __alloc_pages_bulk_noprof(gfp_t gfp, unsigned int alloc_flags,
+		int preferred_nid, nodemask_t *nodemask, int nr_pages,
+		struct page **page_array);
 
 extern void zone_pcp_reset(struct zone *zone);
 extern void zone_pcp_disable(struct zone *zone);
