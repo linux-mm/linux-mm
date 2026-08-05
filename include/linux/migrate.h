@@ -107,10 +107,11 @@ static inline void softleaf_entry_wait_on_locked(softleaf_t entry, spinlock_t *p
 
 #endif /* CONFIG_MIGRATION */
 
-#ifdef CONFIG_NUMA_BALANCING
+#if defined(CONFIG_NUMA_BALANCING) || defined(CONFIG_PGHOT)
 int migrate_misplaced_folio_prepare(struct folio *folio,
 		struct vm_area_struct *vma, int node);
 int migrate_misplaced_folio(struct folio *folio, int node);
+int promote_misplaced_memcg_folios(struct list_head *folio_list, int node);
 #else
 static inline int migrate_misplaced_folio_prepare(struct folio *folio,
 		struct vm_area_struct *vma, int node)
@@ -121,7 +122,11 @@ static inline int migrate_misplaced_folio(struct folio *folio, int node)
 {
 	return -EAGAIN; /* can't migrate now */
 }
-#endif /* CONFIG_NUMA_BALANCING */
+static inline int promote_misplaced_memcg_folios(struct list_head *folio_list, int node)
+{
+	return -EAGAIN; /* can't migrate now */
+}
+#endif /* CONFIG_NUMA_BALANCING || CONFIG_PGHOT */
 
 #ifdef CONFIG_MIGRATION
 

@@ -1509,6 +1509,40 @@ config LAZY_MMU_MODE_KUNIT_TEST
 
 	  If unsure, say N.
 
+config PGHOT
+	bool "Hot page tracking and promotion"
+	default y if NUMA_BALANCING
+	depends on NUMA_MIGRATION && SPARSEMEM
+	help
+	  A sub-system to track page accesses in lower tier memory and
+	  maintain hot page information. Promotes hot pages from lower
+	  tiers to top tier by using the memory access information provided
+	  by various sources. Asynchronous promotion is done by per-node
+	  kernel threads.
+
+	  This adds 1 byte of metadata overhead per page in lower-tier
+	  memory nodes.
+
+config PGHOT_PRECISE
+	bool "Hot page tracking precision mode"
+	default n
+	depends on PGHOT
+	help
+	  Enables precision mode for tracking hot pages with pghot sub-system.
+	  Adds fine-grained access time tracking and explicit toptier target
+	  NID tracking. Precise hot page tracking comes at the cost of using
+	  4 bytes per page against the default one byte per page. Preferable
+	  to enable this on systems with multiple nodes in toptier.
+
+config HWMEM_PROFILER
+	bool
+	depends on PGHOT
+	help
+	  Umbrella symbol enabled by any in-kernel driver that forwards
+	  hardware-observed memory accesses to the pghot subsystem (for
+	  example AMD_IBS_MEMPROF on x86_64). Drivers select this; users
+	  do not enable it directly.
+
 source "mm/damon/Kconfig"
 
 endmenu
