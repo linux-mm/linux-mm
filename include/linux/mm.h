@@ -4138,20 +4138,42 @@ unsigned long randomize_stack_top(unsigned long stack_top);
 unsigned long randomize_page(unsigned long start, unsigned long range);
 
 unsigned long
-__get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
-		    unsigned long pgoff, unsigned long flags, vm_flags_t vm_flags);
+__get_unmapped_area(struct mm_struct *mm, struct file *file,
+		    unsigned long addr, unsigned long len,
+		    unsigned long pgoff, unsigned long flags,
+		    vm_flags_t vm_flags);
 
 static inline unsigned long
 get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 		  unsigned long pgoff, unsigned long flags)
 {
-	return __get_unmapped_area(file, addr, len, pgoff, flags, 0);
+	return __get_unmapped_area(current->mm, file, addr, len, pgoff,
+				   flags, 0);
 }
 
 extern unsigned long do_mmap(struct file *file, unsigned long addr,
 	unsigned long len, unsigned long prot, unsigned long flags,
 	vm_flags_t vm_flags, unsigned long pgoff, unsigned long *populate,
 	struct list_head *uf);
+#ifdef CONFIG_MMU
+unsigned long vm_mmap_remote(struct mm_struct *mm, struct file *file,
+	unsigned long addr, unsigned long len, unsigned long prot,
+	unsigned long flags, unsigned long pgoff, vm_flags_t vm_flags);
+int vm_munmap_remote(struct mm_struct *mm, unsigned long start, size_t len);
+#else
+static inline unsigned long vm_mmap_remote(struct mm_struct *mm,
+	struct file *file, unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags, unsigned long pgoff,
+	vm_flags_t vm_flags)
+{
+	return -EOPNOTSUPP;
+}
+static inline int vm_munmap_remote(struct mm_struct *mm, unsigned long start,
+	size_t len)
+{
+	return -EOPNOTSUPP;
+}
+#endif
 extern int do_vmi_munmap(struct vma_iterator *vmi, struct mm_struct *mm,
 			 unsigned long start, size_t len, struct list_head *uf,
 			 bool unlock);
@@ -4194,7 +4216,8 @@ struct vm_unmapped_area_info {
 	unsigned long start_gap;
 };
 
-extern unsigned long vm_unmapped_area(struct vm_unmapped_area_info *info);
+extern unsigned long vm_unmapped_area(struct mm_struct *mm,
+				      struct vm_unmapped_area_info *info);
 
 /* truncate.c */
 void truncate_inode_pages(struct address_space *mapping, loff_t lstart);
