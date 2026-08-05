@@ -2505,11 +2505,16 @@ try_again:
 		res = -EOPNOTSUPP;
 		goto unlock_mutex;
 	}
+
 	folio_unlock(folio);
 
 	if (folio_test_large(folio)) {
-		const int new_order = min_order_for_split(folio);
+		const int new_order;
 		int err;
+
+		folio_lock(folio);
+		new_order = min_order_for_split(folio);
+		folio_unlock(folio);
 
 		/*
 		 * The flag must be set after the refcount is bumped
@@ -2861,8 +2866,11 @@ static int soft_offline_in_use_page(struct page *page)
 	};
 
 	if (!huge && folio_test_large(folio)) {
-		const int new_order = min_order_for_split(folio);
+		const int new_order;
 
+		folio_lock(folio);
+		new_order = min_order_for_split(folio);
+		folio_unlock(folio);
 		/*
 		 * If new_order (target split order) is not 0, do not split the
 		 * folio at all to retain the still accessible large folio.
