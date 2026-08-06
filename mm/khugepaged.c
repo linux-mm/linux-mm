@@ -665,7 +665,7 @@ static void release_pte_folio(struct folio *folio)
 	folio_putback_lru(folio);
 }
 
-static void release_pte_pages(pte_t *pte, pte_t *_pte,
+static void release_pte_pages(hw_pte_t *pte, hw_pte_t *_pte,
 		struct list_head *compound_pagelist)
 {
 	struct folio *folio, *tmp;
@@ -811,13 +811,14 @@ static enum pte_check_result collapse_check_pte(pte_t pteval,
 }
 
 static enum scan_result __collapse_huge_page_isolate(struct vm_area_struct *vma,
-		unsigned long start_addr, pte_t *pte, struct collapse_control *cc,
+		unsigned long start_addr, hw_pte_t *pte, struct collapse_control *cc,
 		unsigned int order, struct list_head *compound_pagelist)
 {
 	const unsigned long nr_pages = 1UL << order;
 	struct folio *folio = NULL;
 	unsigned long addr = start_addr;
-	pte_t *_pte, pteval;
+	hw_pte_t *_pte;
+	pte_t pteval;
 	int referenced = 0;
 	enum scan_result result = SCAN_FAIL;
 	enum pte_check_result pte_check;
@@ -929,7 +930,7 @@ out:
 	return result;
 }
 
-static void __collapse_huge_page_copy_succeeded(pte_t *pte,
+static void __collapse_huge_page_copy_succeeded(hw_pte_t *pte,
 		struct vm_area_struct *vma, unsigned long address,
 		spinlock_t *ptl, unsigned int order,
 		struct list_head *compound_pagelist)
@@ -938,7 +939,7 @@ static void __collapse_huge_page_copy_succeeded(pte_t *pte,
 	unsigned long end = address + (PAGE_SIZE * nr_pages);
 	struct folio *src, *tmp;
 	pte_t pteval;
-	pte_t *_pte;
+	hw_pte_t *_pte;
 	unsigned int nr_ptes;
 
 	for (_pte = pte; _pte < pte + nr_pages; _pte += nr_ptes,
@@ -993,7 +994,7 @@ static void __collapse_huge_page_copy_succeeded(pte_t *pte,
 	}
 }
 
-static void __collapse_huge_page_copy_failed(pte_t *pte,
+static void __collapse_huge_page_copy_failed(hw_pte_t *pte,
 		pmd_t *pmd, pmd_t orig_pmd, struct vm_area_struct *vma,
 		unsigned int order, struct list_head *compound_pagelist)
 {
@@ -1031,7 +1032,7 @@ static void __collapse_huge_page_copy_failed(pte_t *pte,
  * @ptl: lock on raw pages' PTEs
  * @compound_pagelist: list that stores compound pages
  */
-static enum scan_result __collapse_huge_page_copy(pte_t *pte, struct folio *folio,
+static enum scan_result __collapse_huge_page_copy(hw_pte_t *pte, struct folio *folio,
 		pmd_t *pmd, pmd_t orig_pmd, struct vm_area_struct *vma,
 		unsigned long address, spinlock_t *ptl, unsigned int order,
 		struct list_head *compound_pagelist)
@@ -1253,7 +1254,7 @@ static enum scan_result __collapse_huge_page_swapin(struct mm_struct *mm,
 	vm_fault_t ret = 0;
 	unsigned long addr, end = start_addr + (PAGE_SIZE << order);
 	enum scan_result result;
-	pte_t *pte = NULL;
+	hw_pte_t *pte = NULL;
 	spinlock_t *ptl;
 
 	for (addr = start_addr; addr < end; addr += PAGE_SIZE) {
@@ -1381,7 +1382,7 @@ static enum scan_result collapse_huge_page(struct mm_struct *mm, unsigned long s
 	const unsigned long end_addr = start_addr + (PAGE_SIZE << order);
 	LIST_HEAD(compound_pagelist);
 	pmd_t *pmd, _pmd;
-	pte_t *pte = NULL;
+	hw_pte_t *pte = NULL;
 	pgtable_t pgtable;
 	struct folio *folio;
 	spinlock_t *pmd_ptl, *pte_ptl;
@@ -1692,7 +1693,8 @@ static enum scan_result collapse_scan_pmd(struct mm_struct *mm,
 {
 	enum tva_type tva_flags = cc->is_khugepaged ? TVA_KHUGEPAGED : TVA_FORCED_COLLAPSE;
 	pmd_t *pmd;
-	pte_t *pte, *_pte, pteval;
+	hw_pte_t *pte, *_pte;
+	pte_t pteval;
 	int i;
 	struct folio *folio = NULL;
 	int referenced = 0;
@@ -1887,7 +1889,7 @@ static enum scan_result try_collapse_pte_mapped_thp(struct mm_struct *mm, unsign
 	unsigned long end = haddr + HPAGE_PMD_SIZE;
 	struct vm_area_struct *vma = vma_lookup(mm, haddr);
 	struct folio *folio;
-	pte_t *start_pte, *pte;
+	hw_pte_t *start_pte, *pte;
 	pmd_t *pmd, pgt_pmd;
 	spinlock_t *pml = NULL, *ptl;
 	int i;
