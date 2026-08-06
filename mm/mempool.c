@@ -486,25 +486,28 @@ static inline gfp_t mempool_adjust_gfp(gfp_t *gfp_mask)
 /**
  * mempool_alloc_bulk - allocate multiple elements from a memory pool
  * @pool:	pointer to the memory pool
- * @elems:	partially or fully populated elements array
- * @count:	number of entries in @elem that need to be allocated
+ * @elems:	pointer to array into which the element pointers will be stored
+ * @count:	number of elements to allocate
+ * @gfp_mask:	GFP_* flags.  %__GFP_ZERO is not supported.  If this mask
+ *		includes %__GFP_DIRECT_RECLAIM, then the allocation is retried
+ *		indefinitely until it succeeds and the return value is always
+ *		%true.  If the mask doesn't include %__GFP_DIRECT_RECLAIM, then
+ *		failure is allowed and %false can be returned.
  *
  * Allocate @count elements into @elems.  This is done by first calling into the
  * alloc_fn supplied at pool initialization time, and dipping into the reserved
- * pool when alloc_fn fails to allocate an element.
+ * pool to atomically allocate the remaining elements if alloc_fn fails.
  *
- * On return all @count elements in @elems will be populated.
- *
- * Return: Always 0.  If it wasn't for %$#^$ alloc tags, it would return void.
+ * Return: %true if the allocation succeeded, or %false if it failed.
  */
-int mempool_alloc_bulk_noprof(struct mempool *pool, void **elems,
-		unsigned int count)
+bool mempool_alloc_bulk_noprof(struct mempool *pool, void **elems,
+		unsigned int count, gfp_t gfp_mask)
 {
-	gfp_t gfp_mask = GFP_KERNEL;
 	gfp_t gfp_temp = mempool_adjust_gfp(&gfp_mask);
 	unsigned int allocated = 0;
 
 	VM_WARN_ON_ONCE(count > pool->min_nr);
+	VM_WARN_ON_ONCE(gfp_mask & __GFP_ZERO);
 	might_alloc(gfp_mask);
 
 	/*
@@ -529,13 +532,26 @@ repeat_alloc:
 		allocated++;
 	}
 
-	return 0;
+	return true;
 
 use_pool:
+	/* Try to atomically allocate the remaining elements from the pool. */
 	if (mempool_alloc_from_pool(pool, elems, count, allocated, gfp_temp))
-		return 0;
-	gfp_temp = gfp_mask;
-	goto repeat_alloc;
+		return true;
+	/* Retry if this was just the opportunistic first pass. */
+	if (gfp_temp != gfp_mask) {
+		gfp_temp = gfp_mask;
+		goto repeat_alloc;
+	}
+	/* Retry indefinitely if __GFP_DIRECT_RECLAIM is set. */
+	if (gfp_mask & __GFP_DIRECT_RECLAIM)
+		goto repeat_alloc;
+	/* On failure, roll back any successful allocations from ->alloc(). */
+	while (allocated--) {
+		pool->free(elems[allocated], pool->pool_data);
+		elems[allocated] = NULL;
+	}
+	return false;
 }
 EXPORT_SYMBOL_GPL(mempool_alloc_bulk_noprof);
 

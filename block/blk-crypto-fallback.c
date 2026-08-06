@@ -172,7 +172,6 @@ static void blk_crypto_fallback_encrypt_endio(struct bio *enc_bio)
 static struct bio *blk_crypto_alloc_enc_bio(struct bio *bio_src,
 		unsigned int nr_segs, struct page ***pages_ret)
 {
-	unsigned int memflags = memalloc_noio_save();
 	unsigned int nr_allocated;
 	struct page **pages;
 	struct bio *bio;
@@ -206,12 +205,11 @@ static struct bio *blk_crypto_alloc_enc_bio(struct bio *bio_src,
 	 * any non-zero slot already contains a valid allocation.
 	 */
 	memset(pages, 0, sizeof(struct page *) * nr_segs);
-	nr_allocated = alloc_pages_bulk(GFP_KERNEL, nr_segs, pages);
+	nr_allocated = alloc_pages_bulk(GFP_NOIO, nr_segs, pages);
 	if (nr_allocated < nr_segs)
 		mempool_alloc_bulk(blk_crypto_bounce_page_pool,
 				(void **)pages + nr_allocated,
-				nr_segs - nr_allocated);
-	memalloc_noio_restore(memflags);
+				nr_segs - nr_allocated, GFP_NOIO);
 	*pages_ret = pages;
 	return bio;
 }
