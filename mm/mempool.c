@@ -422,7 +422,7 @@ out:
 }
 EXPORT_SYMBOL(mempool_resize);
 
-static unsigned int mempool_alloc_from_pool(struct mempool *pool, void **elems,
+static bool mempool_alloc_from_pool(struct mempool *pool, void **elems,
 		unsigned int count, unsigned int allocated,
 		gfp_t gfp_mask)
 {
@@ -445,7 +445,7 @@ static unsigned int mempool_alloc_from_pool(struct mempool *pool, void **elems,
 	 */
 	for (i = 0; i < count; i++)
 		kmemleak_update_trace(elems[i]);
-	return allocated;
+	return true;
 
 fail:
 	if (gfp_mask & __GFP_DIRECT_RECLAIM) {
@@ -467,7 +467,7 @@ fail:
 		spin_unlock_irqrestore(&pool->lock, flags);
 	}
 
-	return allocated;
+	return false;
 }
 
 /*
@@ -532,8 +532,8 @@ repeat_alloc:
 	return 0;
 
 use_pool:
-	allocated = mempool_alloc_from_pool(pool, elems, count, allocated,
-			gfp_temp);
+	if (mempool_alloc_from_pool(pool, elems, count, allocated, gfp_temp))
+		return 0;
 	gfp_temp = gfp_mask;
 	goto repeat_alloc;
 }
