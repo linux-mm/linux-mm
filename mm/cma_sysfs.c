@@ -116,8 +116,8 @@ static int __init cma_sysfs_init(void)
 	if (!cma_kobj_root)
 		return -ENOMEM;
 
-	for (i = 0; i < cma_area_count; i++) {
-		cma = &cma_areas[i];
+	for (i = 0; i < cma_early_area_count; i++) {
+		cma = &cma_early_areas[i];
 		if (!test_bit(CMA_ACTIVATED, &cma->flags))
 			continue;
 
@@ -140,7 +140,7 @@ static int __init cma_sysfs_init(void)
 	return 0;
 out:
 	while (--i >= 0) {
-		cma = &cma_areas[i];
+		cma = &cma_early_areas[i];
 		if (cma->cma_kobj)
 			kobject_put(&cma->cma_kobj->kobj);
 	}

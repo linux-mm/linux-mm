@@ -2214,7 +2214,7 @@ bool __init deferred_grow_zone(struct zone *zone, unsigned int order)
 #endif /* CONFIG_DEFERRED_STRUCT_PAGE_INIT */
 
 #ifdef CONFIG_CMA
-void __init init_cma_reserved_pageblock(struct page *page)
+void init_cma_reserved_pageblock(struct page *page)
 {
 	unsigned i = pageblock_nr_pages;
 	struct page *p = page;
@@ -2236,7 +2236,7 @@ void __init init_cma_reserved_pageblock(struct page *page)
 /*
  * Similar to above, but only set the migrate type and stats.
  */
-void __init init_cma_pageblock(struct page *page)
+void init_cma_pageblock(struct page *page)
 {
 	init_pageblock_migratetype(page, MIGRATE_CMA, false);
 	adjust_managed_page_count(page, pageblock_nr_pages);
