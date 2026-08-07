@@ -1259,6 +1259,20 @@ void __kfence_free(void *addr)
 	}
 }
 
+struct llist_node *kfence_obj_to_llnode(void *addr)
+{
+	struct kfence_metadata *meta = addr_to_metadata((unsigned long)addr);
+
+	return &meta->llnode;
+}
+
+void *kfence_llnode_to_obj(struct llist_node *llnode)
+{
+	struct kfence_metadata *meta = container_of(llnode, struct kfence_metadata, llnode);
+
+	return (void *)meta->addr;
+}
+
 bool kfence_handle_page_fault(unsigned long addr, bool is_write, struct pt_regs *regs)
 {
 	const int page_index = (addr - (unsigned long)__kfence_pool) / PAGE_SIZE;

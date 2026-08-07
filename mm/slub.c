@@ -4105,6 +4105,7 @@ static void flush_all(struct kmem_cache *s)
 
 struct deferred_percpu_work {
 	struct llist_head objects;
+	struct llist_head objects_kfence;
 	struct llist_head objects_by_rcu;
 	struct llist_head rcu_sheaves;
 	struct irq_work work;
@@ -4114,6 +4115,7 @@ static void deferred_percpu_work_fn(struct irq_work *work);
 
 static DEFINE_PER_CPU(struct deferred_percpu_work, deferred_percpu_work) = {
 	.objects = LLIST_HEAD_INIT(objects),
+	.objects_kfence = LLIST_HEAD_INIT(objects_kfence),
 	.objects_by_rcu = LLIST_HEAD_INIT(objects_by_rcu),
 	.rcu_sheaves = LLIST_HEAD_INIT(rcu_sheaves),
 	.work = IRQ_WORK_INIT(deferred_percpu_work_fn),
@@ -6444,6 +6446,13 @@ static void deferred_percpu_work_fn(struct irq_work *work)
 		stat(s, FREE_SLOWPATH);
 	}
 
+	llnode = llist_del_all(&dpw->objects_kfence);
+	llist_for_each_safe(pos, t, llnode) {
+		void *obj = kfence_llnode_to_obj(pos);
+
+		__kfence_free(obj);
+	}
+
 	llnode = llist_del_all(&dpw->objects_by_rcu);
 	llist_for_each_safe(pos, t, llnode) {
 		void *head = pos;
@@ -6473,6 +6482,21 @@ static void defer_free(struct kmem_cache *s, void *obj)
 
 	dpw = this_cpu_ptr(&deferred_percpu_work);
 	if (llist_add(llnode, &dpw->objects))
+		irq_work_queue(&dpw->work);
+}
+
+static void defer_free_kfence(void *obj)
+{
+	struct deferred_percpu_work *dpw;
+	struct llist_node *llnode;
+
+	/* kasan_reset_tag() is not necessary, kfence objects are not tagged */
+	llnode = kfence_obj_to_llnode(obj);
+
+	guard(preempt)();
+
+	dpw = this_cpu_ptr(&deferred_percpu_work);
+	if (llist_add(llnode, &dpw->objects_kfence))
 		irq_work_queue(&dpw->work);
 }
 
@@ -6803,10 +6827,13 @@ EXPORT_SYMBOL(kfree);
 /*
  * Can be called while holding raw_spinlock_t or from IRQ and NMI,
  * but ONLY for objects allocated by kmalloc_nolock().
- * Debug checks (like kmemleak and kfence) were skipped on allocation,
- * hence
+ *
+ * In case kmemleak is enabled,
+ *
  * obj = kmalloc(); kfree_nolock(obj);
- * will miss kmemleak/kfence book keeping and will cause false positives.
+ *
+ * will miss kmemleak book keeping and will cause false positives.
+ *
  * large_kmalloc is not supported either.
  */
 void kfree_nolock(const void *object)
@@ -6838,6 +6865,12 @@ void kfree_nolock(const void *object)
 	 * since they take spinlocks or not safe from any context.
 	 */
 	kmsan_slab_free(s, x);
+
+	if (is_kfence_address(x)) {
+		defer_free_kfence(x);
+		return;
+	}
+
 	/*
 	 * If KASAN finds a kernel bug it will do kasan_report_invalid_free()
 	 * which will call raw_spin_lock_irqsave() which is technically
