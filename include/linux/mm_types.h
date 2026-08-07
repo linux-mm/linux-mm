@@ -1395,6 +1395,17 @@ struct mm_struct {
 			 * page table walkers cleared the corresponding bits.
 			 */
 			unsigned long bitmap;
+			/*
+			 * Cross-node empty-walk suppression: bit N set means
+			 * node N's last aging walk of this mm found no folio
+			 * for this lruvec (pure waste). Skip the mm on node N
+			 * for up to K generations, then force a rescan.
+			 * empty_map_seq is the oldest max_seq among the set
+			 * bits (min(), conservative), so a bit is cleared when
+			 * max_seq >= empty_map_seq + K.
+			 */
+			unsigned long empty_map;
+			unsigned long empty_map_seq;
 #ifdef CONFIG_MEMCG
 			/* points to the memcg of "owner" above */
 			struct mem_cgroup *memcg;
@@ -1488,6 +1499,8 @@ static inline void lru_gen_init_mm(struct mm_struct *mm)
 {
 	INIT_LIST_HEAD(&mm->lru_gen.list);
 	mm->lru_gen.bitmap = 0;
+	mm->lru_gen.empty_map = 0;
+	mm->lru_gen.empty_map_seq = ~0UL;
 #ifdef CONFIG_MEMCG
 	mm->lru_gen.memcg = NULL;
 #endif
@@ -1501,6 +1514,20 @@ static inline void lru_gen_use_mm(struct mm_struct *mm)
 	 * walking the page tables of this mm_struct to clear the accessed bit.
 	 */
 	WRITE_ONCE(mm->lru_gen.bitmap, -1);
+}
+
+/*
+ * A page of this mm appeared on (or was accessed on) node @nid — e.g. a page
+ * fault or a migration. Set that node's bitmap bit so the aging walker walks
+ * the mm, and clear the empty-walk skip so a page that just appeared on a node
+ * previously marked empty is not ignored for up to K generations.
+ */
+static inline void lru_gen_mm_accessed(struct mm_struct *mm, int nid)
+{
+	unsigned long key = nid % BITS_PER_TYPE(mm->lru_gen.bitmap);
+
+	set_bit(key, &mm->lru_gen.bitmap);
+	clear_bit(key, &mm->lru_gen.empty_map);
 }
 
 #else /* !CONFIG_LRU_GEN_WALKS_MMU */
@@ -1522,6 +1549,10 @@ static inline void lru_gen_init_mm(struct mm_struct *mm)
 }
 
 static inline void lru_gen_use_mm(struct mm_struct *mm)
+{
+}
+
+static inline void lru_gen_mm_accessed(struct mm_struct *mm, int nid)
 {
 }
 

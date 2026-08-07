@@ -2849,6 +2849,9 @@ static struct lru_gen_mm_state *get_mm_state(struct lruvec *lruvec)
 	return &lruvec->mm_state;
 }
 
+/* tunable empty-walk skip threshold; defined later, get_next_mm() needs it */
+static unsigned long mglru_empty_skip_gens;
+
 static struct mm_struct *get_next_mm(struct lru_gen_mm_walk *walk)
 {
 	int key;
@@ -2859,8 +2862,26 @@ static struct mm_struct *get_next_mm(struct lru_gen_mm_walk *walk)
 	mm = list_entry(mm_state->head, struct mm_struct, lru_gen.list);
 	key = pgdat->node_id % BITS_PER_TYPE(mm->lru_gen.bitmap);
 
+	/* skip if this mm hasn't been used on this node since the last walk */
 	if (!walk->force_scan && !test_bit(key, &mm->lru_gen.bitmap))
 		return NULL;
+
+	/*
+	 * Skip if this node's last walk of this mm was empty and fewer than K
+	 * generations have passed; after K, clear the bit to force a rescan.
+	 * empty_map_seq tracks the oldest marking via min(), so the rescan
+	 * never fires later than K generations on any node.
+	 */
+	if (!walk->force_scan && test_bit(key, &mm->lru_gen.empty_map)) {
+		DEFINE_MAX_SEQ(walk->lruvec);
+		unsigned long empty_seq = READ_ONCE(mm->lru_gen.empty_map_seq);
+
+		if (max_seq < empty_seq + READ_ONCE(mglru_empty_skip_gens))
+			return NULL;		/* skip: < K gens since empty */
+
+		/* K generations passed → force rescan */
+		clear_bit(key, &mm->lru_gen.empty_map);
+	}
 
 	clear_bit(key, &mm->lru_gen.bitmap);
 	mmgrab(mm);
@@ -3510,6 +3531,8 @@ restart:
 		if (!folio)
 			continue;
 
+		walk->mm_stats[MM_LEAF_ELIGIBLE]++;
+
 		if (folio_test_large(folio)) {
 			const unsigned int max_nr = (end - addr) >> PAGE_SHIFT;
 
@@ -3609,6 +3632,8 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area
 		folio = get_pfn_folio(pfn, memcg, pgdat);
 		if (!folio)
 			goto next;
+
+		walk->mm_stats[MM_LEAF_ELIGIBLE]++;
 
 		if (!pmdp_test_and_clear_young_notify(vma, addr, pmd + i))
 			goto next;
@@ -4034,8 +4059,46 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long seq,
 
 	do {
 		success = iterate_mm_list(walk, &mm);
-		if (mm)
+		if (mm) {
+			int nid = lruvec_pgdat(lruvec)->node_id;
+			int key = nid % BITS_PER_TYPE(mm->lru_gen.bitmap);
+			bool empty = false;
+
 			walk_mm(mm, walk);
+
+			/*
+			 * Any walk that found no folio for this lruvec is empty -
+			 * even if the PMD-level Bloom filter kept MM_LEAF_TOTAL at 0
+			 * (the common case for a foreign mm). Mark it so get_next_mm()
+			 * skips it next time; otherwise the empty-walk skip never
+			 * engages for the walks that matter most.
+			 */
+			if (walk->mm_stats[MM_LEAF_ELIGIBLE] == 0) {
+				set_bit(key, &mm->lru_gen.empty_map);
+				/* track the oldest marking (conservative) */
+				WRITE_ONCE(mm->lru_gen.empty_map_seq,
+					min(READ_ONCE(mm->lru_gen.empty_map_seq),
+					    walk->seq));
+				empty = true;
+			} else {
+				/* found eligible folios: clear the marking */
+				clear_bit(key, &mm->lru_gen.empty_map);
+			}
+
+			/* measurement stats keep the leaf_total gate */
+			if (walk->mm_stats[MM_LEAF_TOTAL]) {
+				walk->mm_stats[MM_WALK_TOTAL]++;
+				if (empty) {
+					walk->mm_stats[MM_WALK_EMPTY]++;
+					walk->mm_stats[MM_LEAF_TOTAL_EMPTY] +=
+						walk->mm_stats[MM_LEAF_TOTAL];
+				}
+			}
+			trace_mm_vmscan_lru_gen_walk(
+					lruvec_pgdat(lruvec)->node_id, walk->seq,
+					walk->mm_stats[MM_LEAF_TOTAL],
+					walk->mm_stats[MM_LEAF_ELIGIBLE], empty);
+		}
 	} while (mm);
 done:
 	if (success) {
@@ -4130,6 +4193,15 @@ static bool lruvec_is_reclaimable(struct lruvec *lruvec, struct scan_control *sc
 
 /* to protect the working set of the last N jiffies */
 static unsigned long lru_gen_min_ttl __read_mostly;
+
+/*
+ * Cross-node empty-walk skip threshold: skip an mm on node N for up to
+ * @mglru_empty_skip_gens generations after an empty walk, then force-rescan
+ * (closes migration/mlock/NUMA-balancing windows). Default 4 matches
+ * MAX_NR_GENS; 0 disables the suppression. Tunable via:
+ * echo "skip_empty <N>" > /sys/kernel/debug/lru_gen
+ */
+static unsigned long mglru_empty_skip_gens __read_mostly = 4;
 
 static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 {
@@ -5492,14 +5564,14 @@ static void lru_gen_seq_show_full(struct seq_file *m, struct lruvec *lruvec,
 
 	seq_puts(m, "                      ");
 	for (i = 0; i < NR_MM_STATS; i++) {
-		const char *s = "xxxx";
+		const char *s = "xxxxxxxx";
 		unsigned long n = 0;
 
 		if (seq == max_seq && NR_HIST_GENS == 1) {
-			s = "TYFA";
+			s = "TYFALWEE";
 			n = READ_ONCE(mm_state->stats[hist][i]);
 		} else if (seq != max_seq && NR_HIST_GENS > 1) {
-			s = "tyfa";
+			s = "tyfalwee";
 			n = READ_ONCE(mm_state->stats[hist][i]);
 		}
 
@@ -5705,6 +5777,25 @@ static ssize_t lru_gen_seq_write(struct file *file, const char __user *src,
 		cur = skip_spaces(cur);
 		if (!*cur)
 			continue;
+
+		/*
+		 * set/show the empty-walk skip threshold: "skip_empty <N>"
+		 */
+		if (!strncmp(cur, "skip_empty", 10)) {
+			cur += 10;
+			cur = skip_spaces(cur);
+			if (*cur) {
+				unsigned long val;
+
+				if (sscanf(cur, "%lu", &val) == 1)
+					WRITE_ONCE(mglru_empty_skip_gens, val);
+			} else {
+				pr_info("MGLRU empty skip threshold: %lu generations (0=disabled)\n",
+					READ_ONCE(mglru_empty_skip_gens));
+			}
+			err = 0;
+			continue;
+		}
 
 		n = sscanf(cur, "%c %llu %u %lu %n %4s %n %lu %n", &cmd, &memcg_id, &nid,
 			   &seq, &end, swap_string, &end, &opt, &end);

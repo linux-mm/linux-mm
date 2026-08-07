@@ -5376,6 +5376,9 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 		folio_put(folio);
 		return handle_userfault(vmf, VM_UFFD_MISSING);
 	}
+	/* a new page of this mm lands on this node: invalidate any empty skip */
+	lru_gen_mm_accessed(vma->vm_mm, folio_nid(folio));
+
 	map_anon_folio_pte_pf(folio, vmf->pte, vma, addr,
 			      vmf_orig_pte_uffd_wp(vmf));
 unlock:
@@ -5636,6 +5639,10 @@ fallback:
 		page = vmf->page;
 
 	folio = page_folio(page);
+
+	/* mapping a page of this mm on this node: invalidate any empty skip */
+	lru_gen_mm_accessed(vma->vm_mm, folio_nid(folio));
+
 	/*
 	 * check even for read faults because we might have lost our CoWed
 	 * page
