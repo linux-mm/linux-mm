@@ -6416,16 +6416,12 @@ static void free_to_pcs_bulk(struct kmem_cache *s, size_t size, void **p)
 static void deferred_percpu_work_fn(struct irq_work *work)
 {
 	struct deferred_percpu_work *dpw;
-	struct llist_head *objs, *objs_by_rcu, *rcu_sheaves;
 	struct llist_node *llnode, *pos, *t;
 	struct slab_sheaf *sheaf, *next;
 
 	dpw = container_of(work, struct deferred_percpu_work, work);
-	rcu_sheaves = &dpw->rcu_sheaves;
-	objs = &dpw->objects;
-	objs_by_rcu = &dpw->objects_by_rcu;
 
-	llnode = llist_del_all(objs);
+	llnode = llist_del_all(&dpw->objects);
 	llist_for_each_safe(pos, t, llnode) {
 		struct kmem_cache *s;
 		struct slab *slab;
@@ -6448,7 +6444,7 @@ static void deferred_percpu_work_fn(struct irq_work *work)
 		stat(s, FREE_SLOWPATH);
 	}
 
-	llnode = llist_del_all(objs_by_rcu);
+	llnode = llist_del_all(&dpw->objects_by_rcu);
 	llist_for_each_safe(pos, t, llnode) {
 		void *head = pos;
 		void *objp = kvmalloc_obj_start_addr(head);
@@ -6456,21 +6452,27 @@ static void deferred_percpu_work_fn(struct irq_work *work)
 		kvfree_call_rcu(head, objp);
 	}
 
-	llnode = llist_del_all(rcu_sheaves);
+	llnode = llist_del_all(&dpw->rcu_sheaves);
 	llist_for_each_entry_safe(sheaf, next, llnode, llnode)
 		call_rcu(&sheaf->rcu_head, rcu_free_sheaf);
 }
 
-static void defer_free(struct kmem_cache *s, void *head)
+static void defer_free(struct kmem_cache *s, void *obj)
 {
 	struct deferred_percpu_work *dpw;
+	struct llist_node *llnode;
+
+	/*
+	 * Place the llist node where the freepointer would be if we freed the
+	 * object immediately. That means we can write there safely, only need
+	 * to remove kasan tag first.
+	 */
+	llnode = kasan_reset_tag(obj) + s->offset;
 
 	guard(preempt)();
 
-	head = kasan_reset_tag(head);
-
 	dpw = this_cpu_ptr(&deferred_percpu_work);
-	if (llist_add(head + s->offset, &dpw->objects))
+	if (llist_add(llnode, &dpw->objects))
 		irq_work_queue(&dpw->work);
 }
 
