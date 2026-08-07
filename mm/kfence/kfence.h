@@ -58,7 +58,10 @@ struct kfence_track {
 /* KFENCE metadata per guarded allocation. */
 struct kfence_metadata {
 	struct list_head list __guarded_by(&kfence_freelist_lock);	/* Freelist node. */
-	struct rcu_head rcu_head;	/* For delayed freeing. */
+	union {
+		struct rcu_head rcu_head;	/* For delayed freeing. */
+		struct llist_node llnode;	/* For kfree_nolock(). */
+	};
 
 	/*
 	 * Lock protecting below data; to ensure consistency of the below data,

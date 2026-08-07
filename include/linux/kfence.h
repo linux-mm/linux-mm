@@ -188,6 +188,9 @@ static __always_inline __must_check bool kfence_free(void *addr)
 	return true;
 }
 
+struct llist_node *kfence_obj_to_llnode(void *addr);
+void *kfence_llnode_to_obj(struct llist_node *llnode);
+
 /**
  * kfence_handle_page_fault() - perform page fault handling for KFENCE pages
  * @addr: faulting address
@@ -235,6 +238,8 @@ static inline size_t kfence_ksize(const void *addr) { return 0; }
 static inline void *kfence_object_start(const void *addr) { return NULL; }
 static inline void __kfence_free(void *addr) { }
 static inline bool __must_check kfence_free(void *addr) { return false; }
+static inline struct llist_node *kfence_obj_to_llnode(void *addr) { return NULL; }
+static inline void *kfence_llnode_to_obj(struct llist_node *llnode) { return NULL; }
 static inline bool __must_check kfence_handle_page_fault(unsigned long addr, bool is_write,
 							 struct pt_regs *regs)
 {

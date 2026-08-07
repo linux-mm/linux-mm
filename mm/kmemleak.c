@@ -1169,6 +1169,48 @@ void __ref kmemleak_free(const void *ptr)
 EXPORT_SYMBOL_GPL(kmemleak_free);
 
 /**
+ * kmemleak_may_need_free - check if object is registered
+ * @ptr:	pointer to beginning of the object
+ *
+ * This function is called from the kernel allocator when an object should be
+ * freed but the caller context might be unsafe to spin on the internal locks.
+ *
+ * It will therefore only use trylock and thus might return a false positive
+ * if the trylock fails and the status cannot be determined.
+ *
+ * For objects that (might) need free, the allocator has to defer the actual
+ * freeing to a safe context.
+ *
+ * The assumption is that most objects freed from the unsafe context are also
+ * allocated in such context and thus are not registered in kmemleak, so it's
+ * unlikely the defered freeing will be necessary just because kmemleak is
+ * enabled.
+ */
+bool __ref kmemleak_may_need_free(const void *ptr)
+{
+	unsigned long flags;
+	struct kmemleak_object *object;
+
+	pr_debug("%s(0x%px)\n", __func__, ptr);
+
+	if (!kmemleak_free_enabled || !ptr || IS_ERR(ptr))
+		return false;
+
+	/* On UP, raw_spin_trylock() always succeeds even when it is locked */
+	if (!IS_ENABLED(CONFIG_SMP) && in_nmi())
+		return true;
+
+	if (!raw_spin_trylock_irqsave(&kmemleak_lock, flags))
+		return true;
+
+	object = __lookup_object((unsigned long)ptr, 0, 0);
+
+	raw_spin_unlock_irqrestore(&kmemleak_lock, flags);
+
+	return !!object;
+}
+
+/**
  * kmemleak_free_part - partially unregister a previously registered object
  * @ptr:	pointer to the beginning or inside the object. This also
  *		represents the start of the range to be freed
