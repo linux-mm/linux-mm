@@ -459,12 +459,6 @@ static void damon_destroy_region(struct damon_region *r,
 	damon_free_region(r);
 }
 
-static bool damon_is_last_region(struct damon_region *r,
-		struct damon_target *t)
-{
-	return list_is_last(&r->list, &t->regions_list);
-}
-
 /**
  * damon_probe_hits_wsum() - Returns probe hits weighted sum of a region.
  * @r:		region to get the weighted sum of.
@@ -2779,8 +2773,7 @@ static void damon_do_apply_schemes(struct damon_ctx *c,
 		if (damos_valid_target(c, r, s))
 			damos_apply_scheme(c, t, r, s);
 
-		if (damon_is_last_region(r, t))
-			s->stat.nr_snapshots++;
+		s->tried_applied = true;
 	}
 }
 
@@ -3397,6 +3390,9 @@ static void kdamond_apply_schemes(struct damon_ctx *c)
 	damon_for_each_scheme(s, c) {
 		if (time_before(c->passed_sample_intervals, s->next_apply_sis))
 			continue;
+		if (s->tried_applied)
+			s->stat.nr_snapshots++;
+		s->tried_applied = false;
 		damos_walk_complete(c, s);
 		damos_set_next_apply_sis(s, c);
 		s->last_applied = NULL;
