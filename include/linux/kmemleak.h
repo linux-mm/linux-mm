@@ -22,6 +22,7 @@ extern void kmemleak_alloc_percpu(const void __percpu *ptr, size_t size,
 extern void kmemleak_vmalloc(const struct vm_struct *area, size_t size,
 			     gfp_t gfp) __ref;
 extern void kmemleak_free(const void *ptr) __ref;
+bool kmemleak_may_need_free(const void *ptr) __ref;
 extern void kmemleak_free_part(const void *ptr, size_t size) __ref;
 extern void kmemleak_free_percpu(const void __percpu *ptr) __ref;
 extern void kmemleak_update_trace(const void *ptr) __ref;
@@ -48,6 +49,14 @@ static inline void kmemleak_free_recursive(const void *ptr, slab_flags_t flags)
 {
 	if (!(flags & SLAB_NOLEAKTRACE))
 		kmemleak_free(ptr);
+}
+
+static inline bool kmemleak_may_need_free_recursive(const void *ptr, slab_flags_t flags)
+{
+	if (!(flags & SLAB_NOLEAKTRACE))
+		return kmemleak_may_need_free(ptr);
+
+	return false;
 }
 
 static inline void kmemleak_erase(void **ptr)
@@ -85,6 +94,14 @@ static inline void kmemleak_free_part(const void *ptr, size_t size)
 }
 static inline void kmemleak_free_recursive(const void *ptr, slab_flags_t flags)
 {
+}
+static inline bool kmemleak_may_need_free(const void *ptr)
+{
+	return false;
+}
+static inline bool kmemleak_may_need_free_recursive(const void *ptr, slab_flags_t flags)
+{
+	return false;
 }
 static inline void kmemleak_free_percpu(const void __percpu *ptr)
 {

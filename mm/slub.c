@@ -6435,6 +6435,8 @@ static void deferred_percpu_work_fn(struct irq_work *work)
 		/* Point 'x' back to the beginning of allocated object */
 		x -= s->offset;
 
+		kmemleak_free_recursive(x, s->flags);
+
 		/*
 		 * We used freepointer in 'x' to link 'x' into df->objects.
 		 * Clear it to NULL to avoid false positive detection
@@ -6448,7 +6450,14 @@ static void deferred_percpu_work_fn(struct irq_work *work)
 
 	llnode = llist_del_all(&dpw->objects_kfence);
 	llist_for_each_safe(pos, t, llnode) {
+		struct kmem_cache *s;
+		struct slab *slab;
 		void *obj = kfence_llnode_to_obj(pos);
+
+		slab = virt_to_slab(obj);
+		s = slab->slab_cache;
+
+		kmemleak_free_recursive(obj, s->flags);
 
 		__kfence_free(obj);
 	}
@@ -6826,15 +6835,10 @@ EXPORT_SYMBOL(kfree);
 
 /*
  * Can be called while holding raw_spinlock_t or from IRQ and NMI,
- * but ONLY for objects allocated by kmalloc_nolock().
+ * but may defer freeing to irq_work() in some cases.
  *
- * In case kmemleak is enabled,
- *
- * obj = kmalloc(); kfree_nolock(obj);
- *
- * will miss kmemleak book keeping and will cause false positives.
- *
- * large_kmalloc is not supported either.
+ * Intended mainly for objects allocated from kmalloc_nolock(), but can handle
+ * also kmem_cache_alloc() and kmalloc() objects, except large_kmalloc.
  */
 void kfree_nolock(const void *object)
 {
@@ -6889,9 +6893,23 @@ void kfree_nolock(const void *object)
 	 */
 	kasan_slab_free(s, x, false, false, /* skip quarantine */true);
 
+	/*
+	 * with kfree() the kmemleak handling happens much sooner, but for
+	 * defering we need to write llnode to the object's freepointer so
+	 * we should have it in the state when it's no longer treated as
+	 * allocated by kasan etc.
+	 *
+	 * defer_free will also reset the pointer tag, but it's ok to do a
+	 * deferred kmemleak_free() using the untagged pointer, because
+	 * __lookup_object() resets the tag anyway
+	 */
+	if (unlikely(kmemleak_may_need_free_recursive(x, s->flags)))
+		goto defer;
+
 	if (likely(can_free_to_pcs(slab)) && likely(free_to_pcs(s, x, false)))
 		return;
 
+defer:
 	/*
 	 * __slab_free() can locklessly cmpxchg16 into a slab, but then it might
 	 * need to take spin_lock for further processing.
