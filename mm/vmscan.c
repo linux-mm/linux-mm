@@ -2643,14 +2643,6 @@ static bool should_clear_pmd_young(void)
 	return arch_has_hw_nonleaf_pmd_young() && get_cap(LRU_GEN_NONLEAF_YOUNG);
 }
 
-/*
- * Cross-node empty walk suppression. lru_gen_use_mm() marks an mm used on all
- * nodes, so aging on a node where the mm has no memory wastes a full page table
- * walk. Skip such an mm for up to MGLRU_EMPTY_SKIP_GENS generations after an
- * empty walk, then force-rescan to close migration/mlock/NUMA-balancing windows.
- */
-#define MGLRU_EMPTY_SKIP_GENS 4
-
 /******************************************************************************
  *                          shorthand helpers
  ******************************************************************************/
@@ -2857,6 +2849,9 @@ static struct lru_gen_mm_state *get_mm_state(struct lruvec *lruvec)
 	return &lruvec->mm_state;
 }
 
+/* tunable empty-walk skip threshold; defined later, get_next_mm() needs it */
+static unsigned long mglru_empty_skip_gens;
+
 static struct mm_struct *get_next_mm(struct lru_gen_mm_walk *walk)
 {
 	int key;
@@ -2881,7 +2876,7 @@ static struct mm_struct *get_next_mm(struct lru_gen_mm_walk *walk)
 		DEFINE_MAX_SEQ(walk->lruvec);
 		unsigned long empty_seq = READ_ONCE(mm->lru_gen.empty_map_seq);
 
-		if (max_seq < empty_seq + MGLRU_EMPTY_SKIP_GENS)
+		if (max_seq < empty_seq + READ_ONCE(mglru_empty_skip_gens))
 			return NULL;		/* skip: < K gens since empty */
 
 		/* K generations passed → force rescan */
@@ -4198,6 +4193,15 @@ static bool lruvec_is_reclaimable(struct lruvec *lruvec, struct scan_control *sc
 
 /* to protect the working set of the last N jiffies */
 static unsigned long lru_gen_min_ttl __read_mostly;
+
+/*
+ * Cross-node empty-walk skip threshold: skip an mm on node N for up to
+ * @mglru_empty_skip_gens generations after an empty walk, then force-rescan
+ * (closes migration/mlock/NUMA-balancing windows). Default 4 matches
+ * MAX_NR_GENS; 0 disables the suppression. Tunable via:
+ * echo "skip_empty <N>" > /sys/kernel/debug/lru_gen
+ */
+static unsigned long mglru_empty_skip_gens __read_mostly = 4;
 
 static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 {
@@ -5773,6 +5777,25 @@ static ssize_t lru_gen_seq_write(struct file *file, const char __user *src,
 		cur = skip_spaces(cur);
 		if (!*cur)
 			continue;
+
+		/*
+		 * set/show the empty-walk skip threshold: "skip_empty <N>"
+		 */
+		if (!strncmp(cur, "skip_empty", 10)) {
+			cur += 10;
+			cur = skip_spaces(cur);
+			if (*cur) {
+				unsigned long val;
+
+				if (sscanf(cur, "%lu", &val) == 1)
+					WRITE_ONCE(mglru_empty_skip_gens, val);
+			} else {
+				pr_info("MGLRU empty skip threshold: %lu generations (0=disabled)\n",
+					READ_ONCE(mglru_empty_skip_gens));
+			}
+			err = 0;
+			continue;
+		}
 
 		n = sscanf(cur, "%c %llu %u %lu %n %4s %n %lu %n", &cmd, &memcg_id, &nid,
 			   &seq, &end, swap_string, &end, &opt, &end);
