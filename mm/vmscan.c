@@ -2643,6 +2643,14 @@ static bool should_clear_pmd_young(void)
 	return arch_has_hw_nonleaf_pmd_young() && get_cap(LRU_GEN_NONLEAF_YOUNG);
 }
 
+/*
+ * Cross-node empty walk suppression. lru_gen_use_mm() marks an mm used on all
+ * nodes, so aging on a node where the mm has no memory wastes a full page table
+ * walk. Skip such an mm for up to MGLRU_EMPTY_SKIP_GENS generations after an
+ * empty walk, then force-rescan to close migration/mlock/NUMA-balancing windows.
+ */
+#define MGLRU_EMPTY_SKIP_GENS 4
+
 /******************************************************************************
  *                          shorthand helpers
  ******************************************************************************/
@@ -2859,8 +2867,26 @@ static struct mm_struct *get_next_mm(struct lru_gen_mm_walk *walk)
 	mm = list_entry(mm_state->head, struct mm_struct, lru_gen.list);
 	key = pgdat->node_id % BITS_PER_TYPE(mm->lru_gen.bitmap);
 
+	/* skip if this mm hasn't been used on this node since the last walk */
 	if (!walk->force_scan && !test_bit(key, &mm->lru_gen.bitmap))
 		return NULL;
+
+	/*
+	 * Skip if this node's last walk of this mm was empty and fewer than K
+	 * generations have passed; after K, clear the bit to force a rescan.
+	 * empty_map_seq tracks the oldest marking via min(), so the rescan
+	 * never fires later than K generations on any node.
+	 */
+	if (!walk->force_scan && test_bit(key, &mm->lru_gen.empty_map)) {
+		DEFINE_MAX_SEQ(walk->lruvec);
+		unsigned long empty_seq = READ_ONCE(mm->lru_gen.empty_map_seq);
+
+		if (max_seq < empty_seq + MGLRU_EMPTY_SKIP_GENS)
+			return NULL;		/* skip: < K gens since empty */
+
+		/* K generations passed → force rescan */
+		clear_bit(key, &mm->lru_gen.empty_map);
+	}
 
 	clear_bit(key, &mm->lru_gen.bitmap);
 	mmgrab(mm);
@@ -4039,18 +4065,38 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long seq,
 	do {
 		success = iterate_mm_list(walk, &mm);
 		if (mm) {
+			int nid = lruvec_pgdat(lruvec)->node_id;
+			int key = nid % BITS_PER_TYPE(mm->lru_gen.bitmap);
 			bool empty = false;
 
 			walk_mm(mm, walk);
-			/* A walk that traversed page tables but found no folio
-			 * belonging to this lruvec (node+memcg) is pure waste. */
+
+			/*
+			 * Any walk that found no folio for this lruvec is empty -
+			 * even if the PMD-level Bloom filter kept MM_LEAF_TOTAL at 0
+			 * (the common case for a foreign mm). Mark it so get_next_mm()
+			 * skips it next time; otherwise the empty-walk skip never
+			 * engages for the walks that matter most.
+			 */
+			if (walk->mm_stats[MM_LEAF_ELIGIBLE] == 0) {
+				set_bit(key, &mm->lru_gen.empty_map);
+				/* track the oldest marking (conservative) */
+				WRITE_ONCE(mm->lru_gen.empty_map_seq,
+					min(READ_ONCE(mm->lru_gen.empty_map_seq),
+					    walk->seq));
+				empty = true;
+			} else {
+				/* found eligible folios: clear the marking */
+				clear_bit(key, &mm->lru_gen.empty_map);
+			}
+
+			/* measurement stats keep the leaf_total gate */
 			if (walk->mm_stats[MM_LEAF_TOTAL]) {
 				walk->mm_stats[MM_WALK_TOTAL]++;
-				if (walk->mm_stats[MM_LEAF_ELIGIBLE] == 0) {
+				if (empty) {
 					walk->mm_stats[MM_WALK_EMPTY]++;
 					walk->mm_stats[MM_LEAF_TOTAL_EMPTY] +=
 						walk->mm_stats[MM_LEAF_TOTAL];
-					empty = true;
 				}
 			}
 			trace_mm_vmscan_lru_gen_walk(

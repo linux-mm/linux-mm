@@ -1395,6 +1395,17 @@ struct mm_struct {
 			 * page table walkers cleared the corresponding bits.
 			 */
 			unsigned long bitmap;
+			/*
+			 * Cross-node empty-walk suppression: bit N set means
+			 * node N's last aging walk of this mm found no folio
+			 * for this lruvec (pure waste). Skip the mm on node N
+			 * for up to K generations, then force a rescan.
+			 * empty_map_seq is the oldest max_seq among the set
+			 * bits (min(), conservative), so a bit is cleared when
+			 * max_seq >= empty_map_seq + K.
+			 */
+			unsigned long empty_map;
+			unsigned long empty_map_seq;
 #ifdef CONFIG_MEMCG
 			/* points to the memcg of "owner" above */
 			struct mem_cgroup *memcg;
@@ -1488,6 +1499,8 @@ static inline void lru_gen_init_mm(struct mm_struct *mm)
 {
 	INIT_LIST_HEAD(&mm->lru_gen.list);
 	mm->lru_gen.bitmap = 0;
+	mm->lru_gen.empty_map = 0;
+	mm->lru_gen.empty_map_seq = ~0UL;
 #ifdef CONFIG_MEMCG
 	mm->lru_gen.memcg = NULL;
 #endif
