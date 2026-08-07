@@ -2886,12 +2886,7 @@ static inline bool task_allowed_on_cpu(struct task_struct *p, int cpu)
 
 static inline cpumask_t *alloc_user_cpus_ptr(int node)
 {
-	/*
-	 * See set_cpus_allowed_force() above for the rcu_head usage.
-	 */
-	int size = max_t(int, cpumask_size(), sizeof(struct rcu_head));
-
-	return kmalloc_node(size, GFP_KERNEL, node);
+	return kmalloc_node(cpumask_size(), GFP_KERNEL, node);
 }
 
 static inline struct task_struct *get_push_task(struct rq *rq)
