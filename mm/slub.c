@@ -4106,6 +4106,7 @@ static void flush_all(struct kmem_cache *s)
 struct deferred_percpu_work {
 	struct llist_head objects;
 	struct llist_head objects_kfence;
+	struct llist_head objects_large_kmalloc;
 	struct llist_head objects_by_rcu;
 	struct llist_head rcu_sheaves;
 	struct irq_work work;
@@ -4116,6 +4117,7 @@ static void deferred_percpu_work_fn(struct irq_work *work);
 static DEFINE_PER_CPU(struct deferred_percpu_work, deferred_percpu_work) = {
 	.objects = LLIST_HEAD_INIT(objects),
 	.objects_kfence = LLIST_HEAD_INIT(objects_kfence),
+	.objects_large_kmalloc = LLIST_HEAD_INIT(objects_large_kmalloc),
 	.objects_by_rcu = LLIST_HEAD_INIT(objects_by_rcu),
 	.rcu_sheaves = LLIST_HEAD_INIT(rcu_sheaves),
 	.work = IRQ_WORK_INIT(deferred_percpu_work_fn),
@@ -6410,6 +6412,21 @@ static void free_to_pcs_bulk(struct kmem_cache *s, size_t size, void **p)
 	}
 }
 
+static inline void
+__free_large_kmalloc_page(struct page *page, unsigned int free_flags)
+{
+	unsigned int order = compound_order(page);
+
+	mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
+			      -(PAGE_SIZE << order));
+	__ClearPageLargeKmalloc(page);
+
+	if (free_flags & SLAB_FREE_NOLOCK)
+		free_frozen_pages_nolock(page, order);
+	else
+		free_frozen_pages(page, order);
+}
+
 /*
  * In PREEMPT_RT irq_work runs in per-cpu kthread, so it's safe
  * to take sleeping spin_locks from __slab_free().
@@ -6462,6 +6479,15 @@ static void deferred_percpu_work_fn(struct irq_work *work)
 		__kfence_free(obj);
 	}
 
+	llnode = llist_del_all(&dpw->objects_large_kmalloc);
+	llist_for_each_safe(pos, t, llnode) {
+		struct page *page = virt_to_page(pos);
+
+		kmemleak_free(pos);
+
+		__free_large_kmalloc_page(page, SLAB_FREE_DEFAULT);
+	}
+
 	llnode = llist_del_all(&dpw->objects_by_rcu);
 	llist_for_each_safe(pos, t, llnode) {
 		void *head = pos;
@@ -6506,6 +6532,24 @@ static void defer_free_kfence(void *obj)
 
 	dpw = this_cpu_ptr(&deferred_percpu_work);
 	if (llist_add(llnode, &dpw->objects_kfence))
+		irq_work_queue(&dpw->work);
+}
+
+static void defer_free_large_kmalloc(void *obj)
+{
+	struct deferred_percpu_work *dpw;
+	struct llist_node *llnode;
+
+	/*
+	 * we can simply use the first word of the large kmalloc object
+	 * for the llnode, as there's no ctor or TYPESAFE_BY_RCU
+	 */
+	llnode = kasan_reset_tag(obj);
+
+	guard(preempt)();
+
+	dpw = this_cpu_ptr(&deferred_percpu_work);
+	if (llist_add(llnode, &dpw->objects_large_kmalloc))
 		irq_work_queue(&dpw->work);
 }
 
@@ -6757,9 +6801,11 @@ size_t ksize(const void *objp)
 }
 EXPORT_SYMBOL(ksize);
 
-static void free_large_kmalloc(struct page *page, void *object)
+static void free_large_kmalloc(struct page *page, void *object,
+			       unsigned int free_flags)
 {
 	unsigned int order = compound_order(page);
+	bool nolock = free_flags & SLAB_FREE_NOLOCK;
 
 	if (WARN_ON_ONCE(!PageLargeKmalloc(page))) {
 		dump_page(page, "Not a kmalloc allocation");
@@ -6769,14 +6815,16 @@ static void free_large_kmalloc(struct page *page, void *object)
 	if (WARN_ON_ONCE(order == 0))
 		pr_warn_once("object pointer: 0x%p\n", object);
 
-	kmemleak_free(object);
+	if (!nolock)
+		kmemleak_free(object);
+
 	kasan_kfree_large(object);
 	kmsan_kfree_large(object);
 
-	mod_lruvec_page_state(page, NR_SLAB_UNRECLAIMABLE_B,
-			      -(PAGE_SIZE << order));
-	__ClearPageLargeKmalloc(page);
-	free_frozen_pages(page, order);
+	if (unlikely(nolock && kmemleak_may_need_free(object)))
+		defer_free_large_kmalloc(object);
+	else
+		__free_large_kmalloc_page(page, free_flags);
 }
 
 /*
@@ -6798,7 +6846,7 @@ void kvfree_rcu_cb(struct rcu_head *head)
 		if (slab)
 			slab_free(slab->slab_cache, slab, obj, _RET_IP_);
 		else
-			free_large_kmalloc(page, obj);
+			free_large_kmalloc(page, obj, SLAB_FREE_DEFAULT);
 	}
 }
 
@@ -6824,7 +6872,7 @@ void kfree(const void *object)
 	slab = page_slab(page);
 	if (!slab) {
 		/* kmalloc_nolock() doesn't support large kmalloc */
-		free_large_kmalloc(page, (void *)object);
+		free_large_kmalloc(page, (void *)object, SLAB_FREE_DEFAULT);
 		return;
 	}
 
@@ -6838,10 +6886,11 @@ EXPORT_SYMBOL(kfree);
  * but may defer freeing to irq_work() in some cases.
  *
  * Intended mainly for objects allocated from kmalloc_nolock(), but can handle
- * also kmem_cache_alloc() and kmalloc() objects, except large_kmalloc.
+ * also kmem_cache_alloc() and kmalloc() objects, including large_kmalloc.
  */
 void kfree_nolock(const void *object)
 {
+	struct page *page;
 	struct slab *slab;
 	struct kmem_cache *s;
 	void *x = (void *)object;
@@ -6849,9 +6898,10 @@ void kfree_nolock(const void *object)
 	if (unlikely(ZERO_OR_NULL_PTR(object)))
 		return;
 
-	slab = virt_to_slab(object);
+	page = virt_to_page(object);
+	slab = page_slab(page);
 	if (unlikely(!slab)) {
-		WARN_ONCE(1, "large_kmalloc is not supported by kfree_nolock()");
+		free_large_kmalloc(page, (void *)object, SLAB_FREE_NOLOCK);
 		return;
 	}
 
@@ -7212,7 +7262,7 @@ int build_detached_freelist(struct kmem_cache *s, size_t size,
 	if (!s) {
 		/* Handle kalloc'ed objects */
 		if (!slab) {
-			free_large_kmalloc(page, object);
+			free_large_kmalloc(page, object, SLAB_FREE_DEFAULT);
 			df->slab = NULL;
 			return size;
 		}
