@@ -160,6 +160,11 @@ struct zswap_pool {
 	char tfm_name[CRYPTO_MAX_ALG_NAME];
 };
 
+struct zswap_shrink_walk_arg {
+	unsigned long bytes_written;
+	bool encountered_page_in_swapcache;
+};
+
 /* Global LRU lists shared by all zswap pools. */
 static struct list_lru zswap_list_lru;
 
@@ -1091,8 +1096,9 @@ static enum lru_status shrink_memcg_cb(struct list_head *item, struct list_lru_o
 				       void *arg)
 {
 	struct zswap_entry *entry = container_of(item, struct zswap_entry, lru);
-	bool *encountered_page_in_swapcache = (bool *)arg;
+	struct zswap_shrink_walk_arg *walk_arg = arg;
 	swp_entry_t swpentry;
+	unsigned int length;
 	enum lru_status ret = LRU_REMOVED_RETRY;
 	int writeback_result;
 
@@ -1135,10 +1141,11 @@ static enum lru_status shrink_memcg_cb(struct list_head *item, struct list_lru_o
 
 	/*
 	 * Once the lru lock is dropped, the entry might get freed. The
-	 * swpentry is copied to the stack, and entry isn't deref'd again
-	 * until the entry is verified to still be alive in the tree.
+	 * needed fields are copied to the stack, and entry isn't deref'd
+	 * again until it is verified to still be alive in the tree.
 	 */
 	swpentry = entry->swpentry;
+	length = entry->length;
 
 	/*
 	 * It's safe to drop the lock here because we return either
@@ -1157,12 +1164,13 @@ static enum lru_status shrink_memcg_cb(struct list_head *item, struct list_lru_o
 		 * into the warmer region. We should terminate shrinking (if we're in the dynamic
 		 * shrinker context).
 		 */
-		if (writeback_result == -EEXIST && encountered_page_in_swapcache) {
+		if (writeback_result == -EEXIST) {
 			ret = LRU_STOP;
-			*encountered_page_in_swapcache = true;
+			walk_arg->encountered_page_in_swapcache = true;
 		}
 	} else {
 		zswap_written_back_pages++;
+		walk_arg->bytes_written += length;
 	}
 
 	return ret;
@@ -1171,8 +1179,11 @@ static enum lru_status shrink_memcg_cb(struct list_head *item, struct list_lru_o
 static unsigned long zswap_shrinker_scan(struct shrinker *shrinker,
 		struct shrink_control *sc)
 {
+	struct zswap_shrink_walk_arg walk_arg = {
+		.bytes_written = 0,
+		.encountered_page_in_swapcache = false,
+	};
 	unsigned long shrink_ret;
-	bool encountered_page_in_swapcache = false;
 
 	if (!zswap_shrinker_enabled ||
 			!mem_cgroup_zswap_writeback_enabled(sc->memcg)) {
@@ -1181,9 +1192,9 @@ static unsigned long zswap_shrinker_scan(struct shrinker *shrinker,
 	}
 
 	shrink_ret = list_lru_shrink_walk(&zswap_list_lru, sc, &shrink_memcg_cb,
-		&encountered_page_in_swapcache);
+		&walk_arg);
 
-	if (encountered_page_in_swapcache)
+	if (walk_arg.encountered_page_in_swapcache)
 		return SHRINK_STOP;
 
 	return shrink_ret ? shrink_ret : SHRINK_STOP;
@@ -1277,9 +1288,31 @@ static struct shrinker *zswap_alloc_shrinker(void)
 	return shrinker;
 }
 
-static int shrink_memcg(struct mem_cgroup *memcg)
+#define NR_ZSWAP_WB_BATCH	64UL
+
+/*
+ * Scan up to @nr_to_scan pages across the per-node zswap LRUs of @memcg
+ * and write back the reclaimable ones.
+ *
+ * Since the second-chance algorithm rotates referenced entries to the
+ * LRU tail, the per-node scan is capped at the current LRU length so
+ * each entry is scanned at most once per call. It is up to the caller
+ * to handle retries, deciding whether to scan another memcg to complete
+ * the full iteration, or to rescan the current memcg to drain its zswap
+ * entries.
+ *
+ * Return: The number of compressed bytes written back (>= 0), or -ENOENT
+ * if @memcg has writeback disabled, is a zombie cgroup, or has empty
+ * zswap LRUs.
+ */
+static long shrink_memcg(struct mem_cgroup *memcg, unsigned long nr_to_scan)
 {
-	int nid, shrunk = 0, scanned = 0;
+	struct zswap_shrink_walk_arg walk_arg = {
+		.bytes_written = 0,
+		.encountered_page_in_swapcache = false,
+	};
+	unsigned long nr_remaining = nr_to_scan;
+	int nid;
 
 	if (!mem_cgroup_zswap_writeback_enabled(memcg))
 		return -ENOENT;
@@ -1292,23 +1325,97 @@ static int shrink_memcg(struct mem_cgroup *memcg)
 		return -ENOENT;
 
 	for_each_node_state(nid, N_NORMAL_MEMORY) {
-		unsigned long nr_to_walk = 1;
+		unsigned long nr_to_walk;
 
-		shrunk += list_lru_walk_one(&zswap_list_lru, nid, memcg,
-					    &shrink_memcg_cb, NULL, &nr_to_walk);
-		scanned += 1 - nr_to_walk;
+		/*
+		 * Cap the scan at per-node LRU length so each entry is scanned
+		 * at most once per call.
+		 */
+		nr_to_walk = min(nr_remaining,
+				 list_lru_count_one(&zswap_list_lru, nid, memcg));
+		if (!nr_to_walk)
+			continue;
+
+		nr_remaining -= nr_to_walk;
+		list_lru_walk_one(&zswap_list_lru, nid, memcg, &shrink_memcg_cb,
+				  &walk_arg, &nr_to_walk);
+		/* Return the unused share of the budget to the pool. */
+		nr_remaining += nr_to_walk;
+
+		if (!nr_remaining)
+			break;
 	}
 
-	if (!scanned)
+	/* Nothing was scanned: every LRU under @memcg was empty. */
+	if (nr_remaining == nr_to_scan)
 		return -ENOENT;
 
-	return shrunk ? 0 : -EAGAIN;
+	return walk_arg.bytes_written;
+}
+
+/* Track progress of a memcg-tree writeback walk. */
+struct zswap_shrink_state {
+	int scans;
+	int failures;
+};
+
+/*
+ * Take one step of a memcg-tree writeback walk driven by the caller's
+ * iterator, and fold the result into @s, the retry bookkeeping shared
+ * across steps. @memcg is the iterator's current memcg, or NULL once
+ * it has wrapped around after a full pass over the tree.
+ *
+ * The function returns -EBUSY to signal the caller to abort the walk after
+ * encountering either of the following MAX_RECLAIM_RETRIES times:
+ * - No writeback-candidate memcgs were found in a memcg tree walk.
+ * - Shrinking a writeback-candidate memcg failed.
+ *
+ * Return: The number of compressed bytes written back (>= 0), or -EBUSY
+ * when the caller should abort the walk.
+ */
+static long zswap_shrink_one_memcg(struct mem_cgroup *memcg,
+				   struct zswap_shrink_state *s)
+{
+	long shrunk;
+
+	/*
+	 * Reaching a NULL memcg means a full hierarchy pass completed.
+	 * Exclude the memcg-disabled case, where it is always NULL, and
+	 * fall through to shrink the root LRU directly.
+	 */
+	if (!memcg && !mem_cgroup_disabled()) {
+		/*
+		 * Continue shrinking without incrementing failures if we found
+		 * candidate memcgs in the last tree walk.
+		 */
+		if (!s->scans && ++s->failures == MAX_RECLAIM_RETRIES)
+			return -EBUSY;
+		s->scans = 0;
+		return 0;
+	}
+
+	shrunk = shrink_memcg(memcg, NR_ZSWAP_WB_BATCH);
+
+	/*
+	 * There are no writeback-candidate pages in the memcg. With memcg
+	 * enabled this is not an issue as long as we can find another memcg
+	 * with pages in zswap, so skip without counting it as a candidate.
+	 * With memcg disabled the root LRU is the only target, so we should
+	 * abort if it has no writeback-candidate pages.
+	 */
+	if (shrunk == -ENOENT)
+		return mem_cgroup_disabled() ? -EBUSY : 0;
+	s->scans++;
+
+	if (shrunk <= 0 && ++s->failures == MAX_RECLAIM_RETRIES)
+		return -EBUSY;
+
+	return shrunk;
 }
 
 static void shrink_worker(struct work_struct *w)
 {
-	struct mem_cgroup *memcg;
-	int ret, failures = 0, attempts = 0;
+	struct zswap_shrink_state s = {};
 	unsigned long thr;
 
 	/* Reclaim down to the accept threshold */
@@ -1319,11 +1426,6 @@ static void shrink_worker(struct work_struct *w)
 	 * online memcgs, but memcgs that have no pages in zswap and
 	 * writeback-disabled memcgs (memory.zswap.writeback=0) are not
 	 * candidates for shrinking.
-	 *
-	 * Shrinking will be aborted if we encounter the following
-	 * MAX_RECLAIM_RETRIES times:
-	 * - No writeback-candidate memcgs found in a memcg tree walk.
-	 * - Shrinking a writeback-candidate memcg failed.
 	 *
 	 * We save iteration cursor memcg into zswap_next_shrink,
 	 * which can be modified by the offline memcg cleaner
@@ -1339,7 +1441,11 @@ static void shrink_worker(struct work_struct *w)
 	 * offline memcg left in zswap_next_shrink will hold the reference
 	 * until the next run of shrink_worker().
 	 */
-	do {
+	while (zswap_total_pages() > thr) {
+		struct mem_cgroup *memcg;
+		long ret;
+
+		cond_resched();
 		/*
 		 * Start shrinking from the next memcg after zswap_next_shrink.
 		 * When the offline cleaner has already advanced the cursor,
@@ -1358,37 +1464,12 @@ static void shrink_worker(struct work_struct *w)
 		} while (memcg && !mem_cgroup_tryget_online(memcg));
 		spin_unlock(&zswap_shrink_lock);
 
-		if (!memcg) {
-			/*
-			 * Continue shrinking without incrementing failures if
-			 * we found candidate memcgs in the last tree walk.
-			 */
-			if (!attempts && ++failures == MAX_RECLAIM_RETRIES)
-				break;
-
-			attempts = 0;
-			goto resched;
-		}
-
-		ret = shrink_memcg(memcg);
+		ret = zswap_shrink_one_memcg(memcg, &s);
 		/* drop the extra reference */
 		mem_cgroup_put(memcg);
-
-		/*
-		 * There are no writeback-candidate pages in the memcg.
-		 * This is not an issue as long as we can find another memcg
-		 * with pages in zswap. Skip this without incrementing attempts
-		 * and failures.
-		 */
-		if (ret == -ENOENT)
-			continue;
-		++attempts;
-
-		if (ret && ++failures == MAX_RECLAIM_RETRIES)
+		if (ret == -EBUSY)
 			break;
-resched:
-		cond_resched();
-	} while (zswap_total_pages() > thr);
+	}
 }
 
 /*********************************
@@ -1494,7 +1575,7 @@ bool zswap_store(struct folio *folio)
 	objcg = get_obj_cgroup_from_folio(folio);
 	if (objcg && !obj_cgroup_may_zswap(objcg)) {
 		memcg = get_mem_cgroup_from_objcg(objcg);
-		if (shrink_memcg(memcg)) {
+		if (shrink_memcg(memcg, num_node_state(N_NORMAL_MEMORY)) <= 0) {
 			mem_cgroup_put(memcg);
 			goto put_objcg;
 		}
@@ -1632,6 +1713,58 @@ int zswap_load(struct folio *folio)
 
 	folio_unlock(folio);
 	return 0;
+}
+
+int zswap_proactive_writeback(struct mem_cgroup *memcg, u64 bytes_to_writeback)
+{
+	struct zswap_shrink_state s = {};
+	struct mem_cgroup *iter = NULL;
+	u64 bytes_written = 0;
+	int ret = 0;
+
+	if (!memcg)
+		return -EINVAL;
+	if (!mem_cgroup_zswap_writeback_enabled(memcg))
+		return -EINVAL;
+	if (!bytes_to_writeback)
+		return 0;
+
+	while (bytes_written < bytes_to_writeback) {
+		long shrunk;
+
+		cond_resched();
+
+		if (signal_pending(current)) {
+			ret = -EINTR;
+			break;
+		}
+
+		/*
+		 * Use a local iterator to walk the memcg and its online descendants
+		 * in a round-robin manner. Upon exiting the loop, mem_cgroup_iter_break()
+		 * must be called to drop the iterator reference.
+		 */
+		do {
+			iter = mem_cgroup_iter(memcg, iter, NULL);
+		} while (iter && !mem_cgroup_tryget_online(iter));
+
+		shrunk = zswap_shrink_one_memcg(iter, &s);
+		if (shrunk > 0) {
+			bytes_written += shrunk;
+			mod_memcg_state(iter, MEMCG_ZSWPWB_PROACTIVE_B, shrunk);
+		}
+
+		/* drop the extra reference taken by mem_cgroup_tryget_online() */
+		mem_cgroup_put(iter);
+
+		if (shrunk == -EBUSY) {
+			ret = -EAGAIN;
+			break;
+		}
+	}
+
+	mem_cgroup_iter_break(memcg, iter);
+	return ret;
 }
 
 void zswap_invalidate(swp_entry_t swp)
