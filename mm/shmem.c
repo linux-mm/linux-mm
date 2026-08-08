@@ -2681,7 +2681,7 @@ static vm_fault_t shmem_falloc_wait(struct vm_fault *vmf, struct inode *inode)
 		DEFINE_WAIT_FUNC(shmem_fault_wait, synchronous_wake_function);
 
 		ret = VM_FAULT_NOPAGE;
-		fpin = maybe_unlock_mmap_for_io(vmf, NULL);
+		fpin = maybe_unlock_mmap_for_io(vmf);
 		shmem_falloc_waitq = shmem_falloc->waitq;
 		prepare_to_wait(shmem_falloc_waitq, &shmem_fault_wait,
 				TASK_UNINTERRUPTIBLE);

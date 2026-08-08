@@ -2820,26 +2820,18 @@ static inline unsigned int userfaultfd_get_blocking_state(unsigned int flags)
 	if (flags & FAULT_FLAG_INTERRUPTIBLE)
 		return TASK_INTERRUPTIBLE;
 
-	if (flags & FAULT_FLAG_KILLABLE)
-		return TASK_KILLABLE;
-
-	return TASK_UNINTERRUPTIBLE;
+	return TASK_KILLABLE;
 }
 
 /*
- * The locking rules involved in returning VM_FAULT_RETRY depending on
- * FAULT_FLAG_ALLOW_RETRY, FAULT_FLAG_RETRY_NOWAIT and
- * FAULT_FLAG_KILLABLE are not straightforward. The "Caution"
- * recommendation in __lock_page_or_retry is not an understatement.
+ * The locking rules involved in returning VM_FAULT_RETRY depending
+ * on FAULT_FLAG_ALLOW_RETRY and FAULT_FLAG_RETRY_NOWAIT are not
+ * straightforward. The "Caution" recommendation in __folio_lock_or_retry
+ * is not an understatement.
  *
- * If FAULT_FLAG_ALLOW_RETRY is set, the mmap_lock must be released
+ * If FAULT_FLAG_ALLOW_RETRY is set, the fault lock must be released
  * before returning VM_FAULT_RETRY only if FAULT_FLAG_RETRY_NOWAIT is
  * not set.
- *
- * If FAULT_FLAG_ALLOW_RETRY is set but FAULT_FLAG_KILLABLE is not
- * set, VM_FAULT_RETRY can still be returned if and only if there are
- * fatal_signal_pending()s, and the mmap_lock must be released before
- * returning it.
  */
 vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 {

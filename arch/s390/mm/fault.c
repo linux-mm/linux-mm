@@ -303,9 +303,8 @@ static void do_exception(struct pt_regs *regs, int access)
 		return handle_fault_error_nolock(regs, SEGV_ACCERR);
 	}
 	fault = handle_mm_fault(vma, address, flags | FAULT_FLAG_VMA_LOCK, regs);
-	if (!(fault & (VM_FAULT_RETRY | VM_FAULT_COMPLETED)))
-		vma_end_read(vma);
 	if (!(fault & VM_FAULT_RETRY)) {
+		vma_end_read(vma);
 		count_vm_vma_lock_event(VMA_LOCK_SUCCESS);
 		goto done;
 	}
@@ -331,9 +330,6 @@ retry:
 			handle_fault_error_nolock(regs, 0);
 		return;
 	}
-	/* The fault is fully completed (including releasing mmap lock) */
-	if (fault & VM_FAULT_COMPLETED)
-		return;
 	if (fault & VM_FAULT_RETRY) {
 		flags |= FAULT_FLAG_TRIED;
 		goto retry;

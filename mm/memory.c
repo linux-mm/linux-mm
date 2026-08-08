@@ -3833,9 +3833,9 @@ static vm_fault_t do_page_mkwrite(struct vm_fault *vmf, struct folio *folio)
 /*
  * Handle dirtying of a page in shared file mapping on a write fault.
  *
- * The function expects the page to be locked and unlocks it.
+ * The function expects the folio to be locked and unlocks it.
  */
-static vm_fault_t fault_dirty_shared_page(struct vm_fault *vmf)
+static void fault_dirty_shared_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct address_space *mapping;
@@ -3861,23 +3861,10 @@ static vm_fault_t fault_dirty_shared_page(struct vm_fault *vmf)
 	 * Throttle page dirtying rate down to writeback speed.
 	 *
 	 * mapping may be NULL here because some device drivers do not
-	 * set page.mapping but still dirty their pages
-	 *
-	 * Drop the mmap_lock before waiting on IO, if we can. The file
-	 * is pinning the mapping, as per above.
+	 * set folio->mapping but still dirty their pages
 	 */
-	if ((dirtied || page_mkwrite) && mapping) {
-		struct file *fpin;
-
-		fpin = maybe_unlock_mmap_for_io(vmf, NULL);
+	if ((dirtied || page_mkwrite) && mapping)
 		balance_dirty_pages_ratelimited(mapping);
-		if (fpin) {
-			fput(fpin);
-			return VM_FAULT_COMPLETED;
-		}
-	}
-
-	return 0;
 }
 
 /*
@@ -4230,7 +4217,7 @@ static vm_fault_t wp_page_shared(struct vm_fault *vmf, struct folio *folio)
 		wp_page_reuse(vmf, folio);
 		folio_lock(folio);
 	}
-	ret |= fault_dirty_shared_page(vmf);
+	fault_dirty_shared_page(vmf);
 	folio_put(folio);
 
 	return ret;
@@ -6090,7 +6077,7 @@ static vm_fault_t do_shared_fault(struct vm_fault *vmf)
 		return ret;
 	}
 
-	ret |= fault_dirty_shared_page(vmf);
+	fault_dirty_shared_page(vmf);
 	return ret;
 }
 

@@ -1098,7 +1098,7 @@ static int faultin_page(struct vm_area_struct *vma,
 	if (flags & FOLL_REMOTE)
 		fault_flags |= FAULT_FLAG_REMOTE;
 	if (flags & FOLL_UNLOCKABLE) {
-		fault_flags |= FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+		fault_flags |= FAULT_FLAG_ALLOW_RETRY;
 		/*
 		 * FAULT_FLAG_INTERRUPTIBLE is opt-in. GUP callers must set
 		 * FOLL_INTERRUPTIBLE to enable FAULT_FLAG_INTERRUPTIBLE.
@@ -1124,25 +1124,6 @@ static int faultin_page(struct vm_area_struct *vma,
 	}
 
 	ret = handle_mm_fault(vma, address, fault_flags, NULL);
-
-	if (ret & VM_FAULT_COMPLETED) {
-		/*
-		 * With FAULT_FLAG_RETRY_NOWAIT we'll never release the
-		 * mmap lock in the page fault handler. Sanity check this.
-		 */
-		WARN_ON_ONCE(fault_flags & FAULT_FLAG_RETRY_NOWAIT);
-		*locked = 0;
-
-		/*
-		 * We should do the same as VM_FAULT_RETRY, but let's not
-		 * return -EBUSY since that's not reflecting the reality of
-		 * what has happened - we've just fully completed a page
-		 * fault, with the mmap lock released.  Use -EAGAIN to show
-		 * that we want to take the mmap lock _again_.
-		 */
-		return -EAGAIN;
-	}
-
 	if (ret & VM_FAULT_ERROR) {
 		int err = vm_fault_to_errno(ret, flags);
 
@@ -1431,7 +1412,6 @@ retry:
 			case 0:
 				goto retry;
 			case -EBUSY:
-			case -EAGAIN:
 				ret = 0;
 				fallthrough;
 			case -EFAULT:
@@ -1571,7 +1551,7 @@ int fixup_user_fault(struct mm_struct *mm,
 	address = untagged_addr_remote(mm, address);
 
 	if (unlocked)
-		fault_flags |= FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+		fault_flags |= FAULT_FLAG_ALLOW_RETRY;
 
 retry:
 	vma = gup_vma_lookup(mm, address);
@@ -1581,23 +1561,10 @@ retry:
 	if (!vma_permits_fault(vma, fault_flags))
 		return -EFAULT;
 
-	if ((fault_flags & FAULT_FLAG_KILLABLE) &&
-	    fatal_signal_pending(current))
+	if (fatal_signal_pending(current))
 		return -EINTR;
 
 	ret = handle_mm_fault(vma, address, fault_flags, NULL);
-
-	if (ret & VM_FAULT_COMPLETED) {
-		/*
-		 * NOTE: it's a pity that we need to retake the lock here
-		 * to pair with the unlock() in the callers. Ideally we
-		 * could tell the callers so they do not need to unlock.
-		 */
-		mmap_read_lock(mm);
-		*unlocked = true;
-		return 0;
-	}
-
 	if (ret & VM_FAULT_ERROR) {
 		int err = vm_fault_to_errno(ret, 0);
 
@@ -1697,7 +1664,7 @@ static __always_inline long __get_user_pages_locked(struct mm_struct *mm,
 			break;
 		}
 
-		/* VM_FAULT_RETRY or VM_FAULT_COMPLETED cannot return errors */
+		/* VM_FAULT_RETRY cannot return errors */
 		VM_WARN_ON_ONCE(!*locked && (ret < 0 || ret >= nr_pages));
 
 		if (ret > 0) {

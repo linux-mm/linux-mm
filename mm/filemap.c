@@ -1752,13 +1752,11 @@ static int __folio_lock_async(struct folio *folio, struct wait_page_queue *wait)
  *     mmap_lock or per-VMA lock has been released (mmap_read_unlock() or
  *     vma_end_read()), unless flags had both FAULT_FLAG_ALLOW_RETRY and
  *     FAULT_FLAG_RETRY_NOWAIT set, in which case the lock is still held.
- *
- * If neither ALLOW_RETRY nor KILLABLE are set, will always return 0
- * with the folio locked and the mmap_lock/per-VMA lock is left unperturbed.
  */
 vm_fault_t __folio_lock_or_retry(struct folio *folio, struct vm_fault *vmf)
 {
 	unsigned int flags = vmf->flags;
+	bool ret;
 
 	if (fault_flag_allow_retry_first(flags)) {
 		/*
@@ -1769,22 +1767,14 @@ vm_fault_t __folio_lock_or_retry(struct folio *folio, struct vm_fault *vmf)
 			return VM_FAULT_RETRY;
 
 		release_fault_lock(vmf);
-		if (flags & FAULT_FLAG_KILLABLE)
-			folio_wait_locked_killable(folio);
-		else
-			folio_wait_locked(folio);
+		folio_wait_locked_killable(folio);
 		return VM_FAULT_RETRY;
 	}
-	if (flags & FAULT_FLAG_KILLABLE) {
-		bool ret;
 
-		ret = __folio_lock_killable(folio);
-		if (ret) {
-			release_fault_lock(vmf);
-			return VM_FAULT_RETRY;
-		}
-	} else {
-		__folio_lock(folio);
+	ret = __folio_lock_killable(folio);
+	if (ret) {
+		release_fault_lock(vmf);
+		return VM_FAULT_RETRY;
 	}
 
 	return 0;
@@ -1963,7 +1953,11 @@ repeat:
 				return ERR_PTR(-EAGAIN);
 			}
 		} else {
-			folio_lock(folio);
+			int err = folio_lock_killable(folio);
+			if (err) {
+				folio_put(folio);
+				return ERR_PTR(err);
+			}
 		}
 
 		/* Has the page been truncated? */
@@ -2000,7 +1994,7 @@ no_page:
 			gfp &= ~GFP_KERNEL;
 			gfp |= GFP_NOWAIT;
 		}
-		if (WARN_ON_ONCE(!(fgp_flags & (FGP_LOCK | FGP_FOR_MMAP))))
+		if (WARN_ON_ONCE(!(fgp_flags & FGP_LOCK)))
 			fgp_flags |= FGP_LOCK;
 
 		if (order > mapping_max_folio_order(mapping))
@@ -2047,12 +2041,6 @@ no_page:
 				err = -EAGAIN;
 			return ERR_PTR(err);
 		}
-		/*
-		 * filemap_add_folio locks the page, and for mmap
-		 * we expect an unlocked page.
-		 */
-		if (folio && (fgp_flags & FGP_FOR_MMAP))
-			folio_unlock(folio);
 	}
 
 	if (!folio)
@@ -3274,65 +3262,18 @@ unlock:
 #ifdef CONFIG_MMU
 #define MMAP_LOTSAMISS  (100)
 /*
- * lock_folio_maybe_drop_mmap - lock the page, possibly dropping the mmap_lock
- * @vmf - the vm_fault for this fault.
- * @folio - the folio to lock.
- * @fpin - the pointer to the file we may pin (or is already pinned).
- *
- * This works similar to lock_folio_or_retry in that it can drop the
- * mmap_lock.  It differs in that it actually returns the folio locked
- * if it returns 1 and 0 if it couldn't lock the folio.  If we did have
- * to drop the mmap_lock then fpin will point to the pinned file and
- * needs to be fput()'ed at a later point.
- */
-static int lock_folio_maybe_drop_mmap(struct vm_fault *vmf, struct folio *folio,
-				     struct file **fpin)
-{
-	if (folio_trylock(folio))
-		return 1;
-
-	/*
-	 * NOTE! This will make us return with VM_FAULT_RETRY, but with
-	 * the fault lock still held. That's how FAULT_FLAG_RETRY_NOWAIT
-	 * is supposed to work. We have way too many special cases..
-	 */
-	if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
-		return 0;
-
-	*fpin = maybe_unlock_mmap_for_io(vmf, *fpin);
-	if (vmf->flags & FAULT_FLAG_KILLABLE) {
-		if (__folio_lock_killable(folio)) {
-			/*
-			 * We didn't have the right flags to drop the
-			 * fault lock, but all fault_handlers only check
-			 * for fatal signals if we return VM_FAULT_RETRY,
-			 * so we need to drop the fault lock here and
-			 * return 0 if we don't have a fpin.
-			 */
-			if (*fpin == NULL)
-				release_fault_lock(vmf);
-			return 0;
-		}
-	} else
-		__folio_lock(folio);
-
-	return 1;
-}
-
-/*
  * Synchronous readahead happens when we don't even find a page in the page
  * cache at all.  We don't want to perform IO under the mmap sem, so if we have
  * to drop the mmap sem we return the file that was pinned in order for us to do
  * that.  If we didn't pin a file then we return NULL.  The file that is
  * returned needs to be fput()'ed when we're done with it.
  */
-static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
+static void do_sync_mmap_readahead(struct vm_fault *vmf)
 {
 	struct file *file = vmf->vma->vm_file;
 	struct file_ra_state *ra = &file->f_ra;
 	struct address_space *mapping = file->f_mapping;
 	DEFINE_READAHEAD(ractl, file, ra, mapping, vmf->pgoff);
-	struct file *fpin = NULL;
 	vm_flags_t vm_flags = vmf->vma->vm_flags;
 	bool force_thp_readahead = false;
 	unsigned int thp_order = 0;
@@ -3360,15 +3301,14 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 		 * VM_EXEC case below is already intended for random access.
 		 */
 		if ((vm_flags & (VM_RAND_READ | VM_EXEC)) == VM_RAND_READ)
-			return fpin;
+			return;
 
 		if (!ra->ra_pages)
-			return fpin;
+			return;
 
 		if (vm_flags & VM_SEQ_READ) {
-			fpin = maybe_unlock_mmap_for_io(vmf, fpin);
 			page_cache_sync_ra(&ractl, ra->ra_pages);
-			return fpin;
+			return;
 		}
 	}
 
@@ -3383,13 +3323,12 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 		 * stop bothering with read-ahead. It will only hurt.
 		 */
 		if (mmap_miss > MMAP_LOTSAMISS)
-			return fpin;
+			return;
 	}
 
 	if (force_thp_readahead) {
 		unsigned long folio_nr_pages = 1UL << thp_order;
 
-		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
 		ractl._index &= ~(folio_nr_pages - 1);
 		ra->size = folio_nr_pages;
 		/*
@@ -3401,7 +3340,7 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 		ra->async_size = folio_nr_pages;
 		ra->order = thp_order;
 		page_cache_ra_order(&ractl, ra);
-		return fpin;
+		return;
 	}
 
 	if (vm_flags & VM_EXEC) {
@@ -3438,29 +3377,25 @@ static struct file *do_sync_mmap_readahead(struct vm_fault *vmf)
 		ra->order = 0;
 	}
 
-	fpin = maybe_unlock_mmap_for_io(vmf, fpin);
 	ractl._index = ra->start;
 	page_cache_ra_order(&ractl, ra);
-	return fpin;
 }
 
 /*
- * Asynchronous readahead happens when we find the page and PG_readahead,
- * so we want to possibly extend the readahead further.  We return the file that
- * was pinned if we have to drop the mmap_lock in order to do IO.
+ * Asynchronous readahead happens when the folio has the readahead flag set
+ * so we want to possibly extend the readahead further.
  */
-static struct file *do_async_mmap_readahead(struct vm_fault *vmf,
+static void do_async_mmap_readahead(struct vm_fault *vmf,
 					    struct folio *folio)
 {
 	struct file *file = vmf->vma->vm_file;
 	struct file_ra_state *ra = &file->f_ra;
 	DEFINE_READAHEAD(ractl, file, ra, file->f_mapping, vmf->pgoff);
-	struct file *fpin = NULL;
 	unsigned short mmap_miss;
 
 	/* If we don't want any read-ahead, don't bother */
 	if (vmf->vma->vm_flags & VM_RAND_READ || !ra->ra_pages)
-		return fpin;
+		return;
 
 	/*
 	 * If the folio is locked, we're likely racing against another fault.
@@ -3479,11 +3414,8 @@ static struct file *do_async_mmap_readahead(struct vm_fault *vmf,
 			WRITE_ONCE(ra->mmap_miss, --mmap_miss);
 	}
 
-	if (folio_test_readahead(folio)) {
-		fpin = maybe_unlock_mmap_for_io(vmf, fpin);
+	if (folio_test_readahead(folio))
 		page_cache_async_ra(&ractl, folio, ra->ra_pages);
-	}
-	return fpin;
 }
 
 static vm_fault_t filemap_fault_recheck_pte_none(struct vm_fault *vmf)
@@ -3542,8 +3474,8 @@ static vm_fault_t filemap_fault_recheck_pte_none(struct vm_fault *vmf)
  *
  * vma->vm_mm->mmap_lock must be held on entry.
  *
- * If our return value has VM_FAULT_RETRY set, it's because the mmap_lock
- * may be dropped before doing I/O or by lock_folio_maybe_drop_mmap().
+ * If our return value has VM_FAULT_RETRY set, it's because the fault lock
+ * may be dropped before doing I/O or by folio_lock_or_retry().
  *
  * If our return value does not have VM_FAULT_RETRY set, the mmap_lock
  * has not been released.
@@ -3556,7 +3488,6 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 {
 	int error;
 	struct file *file = vmf->vma->vm_file;
-	struct file *fpin = NULL;
 	struct address_space *mapping = file->f_mapping;
 	struct inode *inode = mapping->host;
 	pgoff_t max_idx, index = vmf->pgoff;
@@ -3580,12 +3511,25 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 		 * the lock.
 		 */
 		if (!(vmf->flags & FAULT_FLAG_TRIED))
-			fpin = do_async_mmap_readahead(vmf, folio);
+			do_async_mmap_readahead(vmf, folio);
 		if (unlikely(!folio_test_uptodate(folio))) {
 			filemap_invalidate_lock_shared(mapping);
 			mapping_locked = true;
 		}
+
+		ret |= folio_lock_or_retry(folio, vmf);
+		if (ret & VM_FAULT_RETRY)
+			goto out_retry;
+
+		/* Did it get truncated? */
+		if (unlikely(folio->mapping != mapping)) {
+			folio_unlock(folio);
+			folio_put(folio);
+			goto retry_find;
+		}
 	} else {
+		fgf_t fgf;
+
 		ret = filemap_fault_recheck_pte_none(vmf);
 		if (unlikely(ret))
 			return ret;
@@ -3594,7 +3538,7 @@ vm_fault_t filemap_fault(struct vm_fault *vmf)
 		count_vm_event(PGMAJFAULT);
 		count_memcg_event_mm(vmf->vma->vm_mm, PGMAJFAULT);
 		ret = VM_FAULT_MAJOR;
-		fpin = do_sync_mmap_readahead(vmf);
+		do_sync_mmap_readahead(vmf);
 retry_find:
 		/*
 		 * See comment in filemap_create_folio() why we need
@@ -3604,26 +3548,18 @@ retry_find:
 			filemap_invalidate_lock_shared(mapping);
 			mapping_locked = true;
 		}
-		folio = __filemap_get_folio(mapping, index,
-					  FGP_CREAT|FGP_FOR_MMAP,
-					  vmf->gfp_mask);
+		fgf = FGP_CREAT | FGP_LOCK;
+		if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
+			fgf |= FGP_NOWAIT;
+		folio = __filemap_get_folio(mapping, index, fgf, vmf->gfp_mask);
 		if (IS_ERR(folio)) {
-			if (fpin)
-				goto out_retry;
 			filemap_invalidate_unlock_shared(mapping);
+			if (vmf->flags & FAULT_FLAG_RETRY_NOWAIT)
+				return VM_FAULT_RETRY;
 			return VM_FAULT_OOM;
 		}
 	}
 
-	if (!lock_folio_maybe_drop_mmap(vmf, folio, &fpin))
-		goto out_retry;
-
-	/* Did it get truncated? */
-	if (unlikely(folio->mapping != mapping)) {
-		folio_unlock(folio);
-		folio_put(folio);
-		goto retry_find;
-	}
 	VM_BUG_ON_FOLIO(!folio_contains(folio, index), folio);
 
 	/*
@@ -3652,21 +3588,12 @@ retry_find:
 		goto page_not_uptodate;
 	}
 
-	/*
-	 * We've made it this far and we had to drop our mmap_lock, now is the
-	 * time to return to the upper layer and have it re-find the vma and
-	 * redo the fault.
-	 */
-	if (fpin) {
-		folio_unlock(folio);
-		goto out_retry;
-	}
 	if (mapping_locked)
 		filemap_invalidate_unlock_shared(mapping);
 
 	/*
-	 * Found the page and have a reference on it.
-	 * We must recheck i_size under page lock.
+	 * Found the folio and have a reference on it.
+	 * We must recheck i_size under the folio lock.
 	 */
 	max_idx = DIV_ROUND_UP(i_size_read(inode), PAGE_SIZE);
 	if (unlikely(index >= max_idx)) {
@@ -3685,10 +3612,7 @@ page_not_uptodate:
 	 * because there really aren't any performance issues here
 	 * and we need to check for errors.
 	 */
-	fpin = maybe_unlock_mmap_for_io(vmf, fpin);
 	error = filemap_read_folio(file, mapping->a_ops->read_folio, folio);
-	if (fpin)
-		goto out_retry;
 	folio_put(folio);
 
 	if (!error || error == AOP_TRUNCATED_PAGE)
@@ -3707,8 +3631,6 @@ out_retry:
 		folio_put(folio);
 	if (mapping_locked)
 		filemap_invalidate_unlock_shared(mapping);
-	if (fpin)
-		fput(fpin);
 	return ret | VM_FAULT_RETRY;
 }
 EXPORT_SYMBOL(filemap_fault);

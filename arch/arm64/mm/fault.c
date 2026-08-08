@@ -707,7 +707,7 @@ static int __kprobes do_page_fault(unsigned long far, unsigned long esr,
 	}
 
 	fault = handle_mm_fault(vma, addr, mm_flags | FAULT_FLAG_VMA_LOCK, regs);
-	if (!(fault & (VM_FAULT_RETRY | VM_FAULT_COMPLETED)))
+	if (!(fault & VM_FAULT_RETRY))
 		vma_end_read(vma);
 
 	if (!(fault & VM_FAULT_RETRY)) {
@@ -757,10 +757,6 @@ retry:
 			goto no_context;
 		return 0;
 	}
-
-	/* The fault is fully completed (including releasing mmap lock) */
-	if (fault & VM_FAULT_COMPLETED)
-		return 0;
 
 	if (fault & VM_FAULT_RETRY) {
 		mm_flags |= FAULT_FLAG_TRIED;
