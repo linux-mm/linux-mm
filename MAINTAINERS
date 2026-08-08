@@ -17073,6 +17073,7 @@ F:	include/uapi/linux/mempolicy.h
 F:	include/linux/migrate.h
 F:	include/linux/migrate_mode.h
 F:	mm/mempolicy.c
+F:	mm/mempolicy.h
 F:	mm/migrate.c
 F:	mm/migrate_device.c
 

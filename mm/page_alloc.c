@@ -5489,11 +5489,23 @@ EXPORT_SYMBOL(alloc_pages_node_noprof);
 struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
 		nodemask_t *nodemask)
 {
-	struct page *page = __alloc_pages_noprof(gfp | __GFP_COMP, order,
-					preferred_nid, nodemask, ALLOC_DEFAULT);
+	struct page *page;
+
+	if (preferred_nid == NUMA_NO_NODE)
+		preferred_nid = numa_mem_id();
+
+	warn_if_node_offline(preferred_nid, gfp);
+
+	page = __alloc_pages_noprof(gfp | __GFP_COMP, order,
+				    preferred_nid, nodemask, ALLOC_DEFAULT);
 	return page_rmappable_folio(page);
 }
-EXPORT_SYMBOL(__folio_alloc_noprof);
+
+struct folio *folio_alloc_node_noprof(gfp_t gfp, unsigned int order, int nid)
+{
+	return __folio_alloc_noprof(gfp, order, nid, NULL);
+}
+EXPORT_SYMBOL(folio_alloc_node_noprof);
 
 /*
  * Common helper functions. Never use with __GFP_HIGHMEM because the returned

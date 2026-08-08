@@ -24,6 +24,7 @@
 #include <linux/shmem_fs.h>
 #include <linux/sysctl.h>
 #include "internal.h"
+#include "mempolicy.h"
 #include "swap_table.h"
 #include "swap.h"
 
