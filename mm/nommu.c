@@ -37,6 +37,7 @@
 
 #include <linux/uaccess.h>
 #include <linux/uio.h>
+#include <linux/major.h>
 #include <asm/tlb.h>
 #include <asm/tlbflush.h>
 #include <asm/mmu_context.h>
@@ -559,36 +560,51 @@ static void put_nommu_region(struct vm_region *region)
 	__put_nommu_region(region);
 }
 
+static void add_vma_to_mapping(struct vm_area_struct *vma)
+{
+	struct address_space *mapping;
+
+	if (!vma->vm_file)
+		return;
+
+	mapping = vma->vm_file->f_mapping;
+	i_mmap_lock_write(mapping);
+	flush_dcache_mmap_lock(mapping);
+	vma_interval_tree_insert(vma, &mapping->i_mmap);
+	flush_dcache_mmap_unlock(mapping);
+	i_mmap_unlock_write(mapping);
+}
+
+static void remove_vma_from_mapping(struct vm_area_struct *vma)
+{
+	struct address_space *mapping;
+
+	if (!vma->vm_file)
+		return;
+
+	mapping = vma->vm_file->f_mapping;
+	i_mmap_lock_write(mapping);
+	flush_dcache_mmap_lock(mapping);
+	vma_interval_tree_remove(vma, &mapping->i_mmap);
+	flush_dcache_mmap_unlock(mapping);
+	i_mmap_unlock_write(mapping);
+}
+
 static void setup_vma_to_mm(struct vm_area_struct *vma, struct mm_struct *mm)
 {
 	vma->vm_mm = mm;
 
 	/* add the VMA to the mapping */
-	if (vma->vm_file) {
-		struct address_space *mapping = vma->vm_file->f_mapping;
-
-		i_mmap_lock_write(mapping);
-		flush_dcache_mmap_lock(mapping);
-		vma_interval_tree_insert(vma, &mapping->i_mmap);
-		flush_dcache_mmap_unlock(mapping);
-		i_mmap_unlock_write(mapping);
-	}
+	if (vma->vm_file)
+		add_vma_to_mapping(vma);
 }
 
 static void cleanup_vma_from_mm(struct vm_area_struct *vma)
 {
 	vma->vm_mm->map_count--;
 	/* remove the VMA from the mapping */
-	if (vma->vm_file) {
-		struct address_space *mapping;
-		mapping = vma->vm_file->f_mapping;
-
-		i_mmap_lock_write(mapping);
-		flush_dcache_mmap_lock(mapping);
-		vma_interval_tree_remove(vma, &mapping->i_mmap);
-		flush_dcache_mmap_unlock(mapping);
-		i_mmap_unlock_write(mapping);
-	}
+	if (vma->vm_file)
+		remove_vma_from_mapping(vma);
 }
 
 /*
@@ -841,6 +857,22 @@ static int validate_mmap_request(struct file *file,
 	return 0;
 }
 
+static int is_file_anonymous(struct file *file)
+{
+	if (!file)
+		return 1;
+
+	if (file->f_path.dentry && file->f_path.dentry->d_inode) {
+		struct inode *inode = file->f_path.dentry->d_inode;
+		/* if the device is /dev/zero */
+		if (S_ISCHR(inode->i_mode) &&
+		    imajor(inode) == MEM_MAJOR && iminor(inode) == 5)
+			return 1;
+	}
+
+	return 0;
+}
+
 /*
  * we've determined that we can make the mapping, now translate what we
  * now know into VMA flags
@@ -854,7 +886,11 @@ static vm_flags_t determine_vm_flags(struct file *file,
 
 	vm_flags = calc_vm_prot_bits(prot, 0) | calc_vm_flag_bits(file, flags);
 
-	if (!file) {
+	/* private and file mapping will be marked anonymous later (do_mmap_private()).
+	 * and /dev/zero is marked by them at .mmap_prepare,
+	 * which should be _before_ this point.
+	 */
+	if (is_file_anonymous(file)) {
 		/*
 		 * MAP_ANONYMOUS. MAP_SHARED is mapped to MAP_PRIVATE, because
 		 * there is no fork().
@@ -906,6 +942,29 @@ static int do_mmap_shared_file(struct vm_area_struct *vma)
 	 * opposed to tried but failed) so we can only give a suitable error as
 	 * it's not possible to make a private copy if MAP_SHARED was given */
 	return -ENODEV;
+}
+
+static ssize_t nommu_read_iter(struct file *file, void *buf,
+			       size_t count, loff_t *pos)
+{
+	struct iov_iter iter;
+	ssize_t ret;
+	size_t done = 0;
+
+	while (done < count) {
+		struct kvec iov = {
+			.iov_base = buf + done,
+			.iov_len = min_t(size_t, count - done, MAX_RW_COUNT),
+		};
+
+		iov_iter_kvec(&iter, ITER_DEST, &iov, 1, iov.iov_len);
+		ret = vfs_iter_read(file, &iter, pos, 0);
+		if (ret <= 0)
+			return done ? done : ret;
+		done += ret;
+	}
+
+	return done;
 }
 
 /*
@@ -978,7 +1037,7 @@ static int do_mmap_private(struct vm_area_struct *vma,
 		fpos = vma->vm_pgoff;
 		fpos <<= PAGE_SHIFT;
 
-		ret = kernel_read(vma->vm_file, base, len, &fpos);
+		ret = nommu_read_iter(vma->vm_file, base, len, &fpos);
 		if (ret < 0)
 			goto error_free;
 
@@ -1064,6 +1123,28 @@ unsigned long do_mmap(struct file *file,
 		region->vm_file = get_file(file);
 		vma->vm_file = get_file(file);
 	}
+
+	/* call mmap_prepare function if any */
+	if (!(flags & MAP_SHARED) && !(capabilities & NOMMU_MAP_DIRECT) &&
+	    (vma->vm_file && vma->vm_file->f_op->mmap_prepare)) {
+		struct vm_area_desc desc;
+
+		vma->vm_start = addr;
+		vma->vm_end = addr + len;
+
+		compat_set_desc_from_vma(&desc, vma->vm_file, vma);
+		ret = vma->vm_file->f_op->mmap_prepare(&desc);
+		/* private ramfs/romfs mappings fails with -ENOSYS so,
+		 * fall back to copied mapping.
+		 */
+		if (ret && ret != -ENOSYS)
+			goto error_mmap_prepare;
+
+		ret = __compat_vma_mmap(&desc, vma);
+		if (ret)
+			goto error_mmap_prepare;
+	}
+
 
 	down_write(&nommu_region_sem);
 
@@ -1181,7 +1262,7 @@ unsigned long do_mmap(struct file *file,
 	add_nommu_region(region);
 
 	/* clear anonymous mappings that don't ask for uninitialized data */
-	if (!vma->vm_file &&
+	if (is_file_anonymous(vma->vm_file) &&
 	    (!IS_ENABLED(CONFIG_MMAP_ALLOW_UNINITIALIZED) ||
 	     !(flags & MAP_UNINITIALIZED)))
 		memset((void *)region->vm_start, 0,
@@ -1231,6 +1312,18 @@ sharing_violation:
 	pr_warn("Attempt to share mismatched mappings\n");
 	ret = -EINVAL;
 	goto error;
+
+error_mmap_prepare:
+	if (region->vm_file)
+		fput(region->vm_file);
+	kmem_cache_free(vm_region_jar, region);
+	if (vma->vm_file)
+		fput(vma->vm_file);
+	vm_area_free(vma);
+
+	pr_warn("mmap_prepare failed for %lu byte allocation from process %d\n",
+			len, current->pid);
+	return ret;
 
 error_getting_vma:
 	kmem_cache_free(vm_region_jar, region);
@@ -1313,7 +1406,7 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 
 	/* we're only permitted to split anonymous regions (these should have
 	 * only a single usage on the region) */
-	if (vma->vm_file)
+	if (!vma_is_anonymous(vma))
 		return -ENOMEM;
 
 	mm = vma->vm_mm;
@@ -1351,6 +1444,8 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	if (new->vm_ops && new->vm_ops->open)
 		new->vm_ops->open(new);
 
+	remove_vma_from_mapping(vma);
+
 	down_write(&nommu_region_sem);
 	delete_nommu_region(vma->vm_region);
 	if (new_below) {
@@ -1363,6 +1458,11 @@ static int split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	add_nommu_region(vma->vm_region);
 	add_nommu_region(new->vm_region);
 	up_write(&nommu_region_sem);
+
+	if (new->vm_file) {
+		vma->vm_file = get_file(vma->vm_file);
+		new->vm_file = get_file(new->vm_file);
+	}
 
 	setup_vma_to_mm(vma, mm);
 	setup_vma_to_mm(new, mm);
@@ -1386,16 +1486,20 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
 		      unsigned long from, unsigned long to)
 {
 	struct vm_region *region;
+	bool has_mapping = !!vma->vm_file;
+
+	if (has_mapping)
+		remove_vma_from_mapping(vma);
 
 	/* adjust the VMA's pointers, which may reposition it in the MM's tree
 	 * and list */
 	if (from > vma->vm_start) {
 		if (vma_iter_clear_gfp(vmi, from, vma->vm_end, GFP_KERNEL))
-			return -ENOMEM;
+			goto restore_mapping;
 		vma->vm_end = from;
 	} else {
 		if (vma_iter_clear_gfp(vmi, vma->vm_start, to, GFP_KERNEL))
-			return -ENOMEM;
+			goto restore_mapping;
 		vma->vm_start = to;
 	}
 
@@ -1415,7 +1519,15 @@ static int vmi_shrink_vma(struct vma_iterator *vmi,
 	up_write(&nommu_region_sem);
 
 	free_page_series(from, to);
+	if (has_mapping)
+		add_vma_to_mapping(vma);
+
 	return 0;
+
+restore_mapping:
+	if (has_mapping)
+		add_vma_to_mapping(vma);
+	return -ENOMEM;
 }
 
 /*
@@ -1450,7 +1562,7 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len, struct list
 	}
 
 	/* we're allowed to split an anonymous VMA but not a file-backed one */
-	if (vma->vm_file) {
+	if (!vma_is_anonymous(vma)) {
 		do {
 			if (start > vma->vm_start)
 				return -EINVAL;
@@ -1544,6 +1656,9 @@ static unsigned long do_mremap(unsigned long addr,
 			unsigned long flags, unsigned long new_addr)
 {
 	struct vm_area_struct *vma;
+	int ret;
+
+	VMA_ITERATOR(vmi, current->mm, addr);
 
 	/* insanity checks first */
 	old_len = PAGE_ALIGN(old_len);
@@ -1567,11 +1682,75 @@ static unsigned long do_mremap(unsigned long addr,
 	if (is_nommu_shared_mapping(vma->vm_flags))
 		return (unsigned long) -EPERM;
 
-	if (new_len > vma->vm_region->vm_end - vma->vm_region->vm_start)
+	/* vm_region->vm_top != vm_region->vm_end when sysctl_nr_trim_pages is 0 (default: 1) */
+	if (new_len > vma->vm_region->vm_top - vma->vm_region->vm_start)
 		return (unsigned long) -ENOMEM;
 
 	/* all checks complete - do it */
-	vma->vm_end = vma->vm_start + new_len;
+	if (new_len == old_len)
+		return vma->vm_start;
+
+	/* shrink only happens addr + new_len and old_len are in different pages */
+	if (new_len < old_len) {
+		/* like do_munmap(), we're allowed to shrink an anonymous VMA but not
+		 * a file-backed one
+		 */
+		if (!vma_is_anonymous(vma))
+			return (unsigned long) -EINVAL;
+
+		/* vmi_shrink_vma() needs from/to pointers to be removed,
+		 * (mainly used in munmap) so, specify them.
+		 */
+		ret = vmi_shrink_vma(&vmi, vma, addr + new_len, addr + old_len);
+		if (ret < 0)
+			return (unsigned long) ret;
+	} else {
+		/* growth path: grow up to vm_top should be handled here. */
+		unsigned long old_end = vma->vm_end;
+		unsigned long end = vma->vm_start + new_len;
+		unsigned long grow_len = end - old_end;
+
+		/*
+		 * Initialize the newly exposed portion before making it visible
+		 * through the VMA or i_mmap.
+		 */
+
+		/* read contents of extended map from file, or zero-filled if !vm_file */
+		if (vma->vm_file) {
+			loff_t fpos;
+
+			fpos = (loff_t)vma->vm_pgoff << PAGE_SHIFT;
+			fpos += old_end - vma->vm_start;
+
+			ret = nommu_read_iter(vma->vm_file, (void *)old_end,
+					      grow_len, &fpos);
+			if (ret < 0)
+				return (unsigned long)ret;
+
+			if (ret < grow_len)
+				memset((char *)old_end + ret, 0, grow_len - ret);
+		} else {
+			memset((void *)old_end, 0, grow_len);
+		}
+
+		/* The backing contents are ready. Now update the VMA bookkeeping. */
+		remove_vma_from_mapping(vma);
+
+		vma->vm_end = end;
+		ret = vma_iter_store_gfp(&vmi, vma, GFP_KERNEL);
+		if (ret) {
+			vma->vm_end = old_end;
+			add_vma_to_mapping(vma);
+			return (unsigned long)ret;
+		}
+
+		/* vm_top remains unchanged; only the logical end grows. */
+		down_write(&nommu_region_sem);
+		vma->vm_region->vm_end = end;
+		up_write(&nommu_region_sem);
+
+		add_vma_to_mapping(vma);
+	}
 	return vma->vm_start;
 }
 
