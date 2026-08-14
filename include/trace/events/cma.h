@@ -132,6 +132,69 @@ TRACE_EVENT(cma_alloc_busy_retry,
 		  __entry->align)
 );
 
+TRACE_EVENT(cma_alloc_at_start,
+
+	TP_PROTO(const char *name, unsigned long pfn,
+		 unsigned long request_count, unsigned long available_count,
+		 unsigned long total_count),
+
+	TP_ARGS(name, pfn, request_count, available_count, total_count),
+
+	TP_STRUCT__entry(
+		__string(name, name)
+		__field(unsigned long, pfn)
+		__field(unsigned long, request_count)
+		__field(unsigned long, available_count)
+		__field(unsigned long, total_count)
+	),
+
+	TP_fast_assign(
+		__assign_str(name);
+		__entry->pfn = pfn;
+		__entry->request_count = request_count;
+		__entry->available_count = available_count;
+		__entry->total_count = total_count;
+	),
+
+	TP_printk("name=%s pfn=%lx, request_count=%lu available_count=%lu total_count=%lu",
+		  __get_str(name),
+		  __entry->pfn,
+		  __entry->request_count,
+		  __entry->available_count,
+		  __entry->total_count)
+);
+
+TRACE_EVENT(cma_alloc_at_finish,
+
+	TP_PROTO(const char *name, unsigned long pfn, const struct page *page,
+		 unsigned long count, int errorno),
+
+	TP_ARGS(name, pfn, page, count, errorno),
+
+	TP_STRUCT__entry(
+		__string(name, name)
+		__field(unsigned long, pfn)
+		__field(const struct page *, page)
+		__field(unsigned long, count)
+		__field(int, errorno)
+	),
+
+	TP_fast_assign(
+		__assign_str(name);
+		__entry->pfn = pfn;
+		__entry->page = page;
+		__entry->count = count;
+		__entry->errorno = errorno;
+	),
+
+	TP_printk("name=%s pfn=0x%lx page=%p count=%lu errorno=%d",
+		  __get_str(name),
+		  __entry->pfn,
+		  __entry->page,
+		  __entry->count,
+		  __entry->errorno)
+);
+
 #endif /* _TRACE_CMA_H */
 
 /* This part must be outside protection */

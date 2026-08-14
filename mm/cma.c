@@ -936,6 +936,141 @@ struct page *cma_alloc_frozen_compound(struct cma *cma, unsigned int order)
 	return __cma_alloc_frozen(cma, 1 << order, order, gfp);
 }
 
+static int cma_range_alloc_at(struct cma *cma, struct cma_memrange *cmr,
+			      unsigned long offset, unsigned long count,
+			      struct page **pagep, gfp_t gfp)
+{
+	struct page *page = NULL;
+	unsigned long pfn;
+	int ret = -EBUSY;
+
+	spin_lock_irq(&cma->lock);
+
+	/*
+	 * If the request is larger than the available number of pages, stop
+	 * right away.
+	 */
+	if (count > cma->available_count)
+		goto unlock;
+
+	ret = bitmap_allocate(cmr->bitmap, offset, count);
+	if (ret < 0)
+		goto unlock;
+
+	pfn = cmr->base_pfn + offset;
+	page = pfn_to_page(pfn);
+
+	/*
+	 * Do not hand out page ranges that are not contiguous, so
+	 * callers can just iterate the pages without having to worry
+	 * about these corner cases.
+	 */
+	if (!page_range_contiguous(page, count)) {
+		pr_warn_ratelimited("%s: %s: skipping non-contiguous area [0x%lx-0x%lx]",
+				    __func__, cma->name, pfn, pfn + count - 1);
+		ret = -EBUSY;
+		goto clear;
+	}
+
+	cma->available_count -= count;
+
+	/*
+	 * It's safe to drop the lock here. We've marked this region for
+	 * our exclusive use. If the migration fails we will take the
+	 * lock again and unmark it.
+	 */
+	spin_unlock_irq(&cma->lock);
+
+	mutex_lock(&cma->alloc_mutex);
+	ret = alloc_contig_frozen_range(pfn, pfn + count, ACR_FLAGS_CMA, gfp);
+	mutex_unlock(&cma->alloc_mutex);
+
+	if (ret < 0)
+		goto free;
+
+	*pagep = page;
+
+	return 0;
+
+free:
+	/* we need to reacquire the lock to clean up the internal state */
+	spin_lock_irq(&cma->lock);
+	cma->available_count += count;
+clear:
+	bitmap_clear(cmr->bitmap, offset, count);
+unlock:
+	spin_unlock_irq(&cma->lock);
+	return ret;
+}
+
+static struct page *__cma_alloc_at_frozen(struct cma *cma, unsigned long offset,
+					  unsigned long count, gfp_t gfp)
+{
+	const char *name = cma ? cma->name : NULL;
+	struct page *page = NULL;
+	int ret = -ENOMEM, r;
+	unsigned long i;
+
+	if (!cma || !cma->count)
+		return page;
+
+	pr_debug("%s(cma %p, name: %s, offset %lu, count %lu)\n", __func__,
+		 (void *)cma, cma->name, offset, count);
+
+	if (!count)
+		return page;
+
+	trace_cma_alloc_at_start(name, offset, count, cma->available_count,
+				 cma->count);
+
+	for (r = 0; r < cma->nranges; r++) {
+		page = NULL;
+
+		ret = cma_range_alloc_at(cma, &cma->ranges[r], offset, count,
+					 &page, gfp);
+		if (ret != -EBUSY || page)
+			break;
+	}
+
+	/*
+	 * CMA can allocate multiple page blocks, which results in different
+	 * blocks being marked with different tags. Reset the tags to ignore
+	 * those page blocks.
+	 */
+	if (page) {
+		for (i = 0; i < count; i++)
+			page_kasan_tag_reset(page + i);
+	}
+
+	if (ret && !(gfp & __GFP_NOWARN)) {
+		pr_err_ratelimited("%s: %s: alloc failed, request: %lu, %lu pages, ret: %d\n",
+				   __func__, cma->name, offset, count, ret);
+		cma_debug_show_areas(cma);
+	}
+
+	pr_debug("%s(): returned %p\n", __func__, page);
+	trace_cma_alloc_at_finish(name, page ? page_to_pfn(page) : 0, page,
+				  count, ret);
+
+	if (page) {
+		count_vm_event(CMA_ALLOC_SUCCESS);
+		cma_sysfs_account_success_pages(cma, count);
+	} else {
+		count_vm_event(CMA_ALLOC_FAIL);
+		cma_sysfs_account_fail_pages(cma, count);
+	}
+
+	return page;
+}
+
+struct page *cma_alloc_at_frozen(struct cma *cma, unsigned long offset,
+				 unsigned long count, bool no_warn)
+{
+	gfp_t gfp = GFP_KERNEL | (no_warn ? __GFP_NOWARN : 0);
+
+	return __cma_alloc_at_frozen(cma, offset, count, gfp);
+}
+
 /**
  * cma_alloc() - allocate pages from contiguous area
  * @cma:   Contiguous memory region for which the allocation is performed.
@@ -958,6 +1093,19 @@ struct page *cma_alloc(struct cma *cma, unsigned long count,
 	return page;
 }
 EXPORT_SYMBOL_GPL(cma_alloc);
+
+struct page *cma_alloc_at(struct cma *cma, unsigned long pfn,
+			  unsigned long count, bool no_warn)
+{
+	struct page *page;
+
+	page = cma_alloc_at_frozen(cma, pfn, count, no_warn);
+	if (page)
+		set_pages_refcounted(page, count);
+
+	return page;
+}
+EXPORT_SYMBOL_GPL(cma_alloc_at);
 
 static struct cma_memrange *find_cma_memrange(struct cma *cma,
 		const struct page *pages, unsigned long count)
