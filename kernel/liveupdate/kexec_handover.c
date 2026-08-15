@@ -44,17 +44,21 @@
 
 /*
  * KHO uses page->private, which is an unsigned long, to store page metadata.
- * Use it to store both the magic and the order.
+ * Use it to store the magic, the order, and the type bit.
  */
 union kho_page_info {
 	unsigned long page_private;
 	struct {
-		unsigned int order;
+		unsigned int order : 31;
+		unsigned int type  : 1;
 		unsigned int magic;
 	};
 };
 
 static_assert(sizeof(union kho_page_info) == sizeof(((struct page *)0)->private));
+
+#define KHO_KEY_TYPE_SHIFT 63
+#define KHO_KEY_TYPE_MASK  BIT(KHO_KEY_TYPE_SHIFT)
 
 static bool kho_enable __ro_after_init = IS_ENABLED(CONFIG_KEXEC_HANDOVER_ENABLE_DEFAULT);
 
@@ -86,42 +90,52 @@ static struct kho_out kho_out = {
 };
 
 /**
- * kho_radix_encode_key - Encodes a physical address and order into a radix key.
+ * kho_radix_encode_key - Encodes a physical address, order and type into a radix key.
  * @phys: The physical address of the page.
  * @order: The order of the page.
+ * @type: The page type.
  *
- * This function combines a page's physical address and its order into a
+ * This function combines a page's physical address, its order, and its type into a
  * single unsigned long, which is used as a key for all radix tree
  * operations.
  *
  * Return: The encoded unsigned long radix key.
  */
-static unsigned long kho_radix_encode_key(phys_addr_t phys, unsigned int order)
+static unsigned long kho_radix_encode_key(phys_addr_t phys, unsigned int order,
+					  enum kho_page_type type)
 {
 	/* Order bits part */
 	unsigned long h = 1UL << (KHO_ORDER_0_LOG2 - order);
 	/* Shifted physical address part */
 	unsigned long l = phys >> (PAGE_SHIFT + order);
+	/* Type bit part */
+	unsigned long t = (unsigned long)type << KHO_KEY_TYPE_SHIFT;
 
-	return h | l;
+	return h | l | t;
 }
 
 /**
- * kho_radix_decode_key - Decodes a radix key back into a physical address and order.
+ * kho_radix_decode_key - Decodes a radix key back into physical address, order, and type.
  * @key: The unsigned long key to decode.
  * @order: An output parameter, a pointer to an unsigned int where the decoded
  *         page order will be stored.
+ * @type: An output parameter, a pointer to where the decoded type will be stored.
  *
  * This function reverses the encoding performed by kho_radix_encode_key(),
- * extracting the original physical address and page order from a given key.
+ * extracting the original physical address, page order, and type from a given key.
  *
  * Return: The decoded physical address.
  */
-static phys_addr_t kho_radix_decode_key(unsigned long key, unsigned int *order)
+static phys_addr_t kho_radix_decode_key(unsigned long key, unsigned int *order,
+					enum kho_page_type *type)
 {
-	unsigned int order_bit = fls64(key);
+	unsigned int order_bit;
 	phys_addr_t phys;
 
+	*type = (key & KHO_KEY_TYPE_MASK) >> KHO_KEY_TYPE_SHIFT;
+	key &= ~KHO_KEY_TYPE_MASK;
+
+	order_bit = fls64(key);
 	/* order_bit is numbered starting at 1 from fls64 */
 	*order = KHO_ORDER_0_LOG2 - order_bit + 1;
 	/* The order is discarded by the shift */
@@ -149,6 +163,7 @@ static unsigned long kho_radix_get_table_index(unsigned long key,
  * @tree: The KHO radix tree.
  * @pfn: The page frame number of the page to preserve.
  * @order: The order of the page.
+ * @type: The page type.
  *
  * This function traverses the radix tree based on the key derived from @pfn
  * and @order. It sets the corresponding bit in the leaf bitmap to mark the
@@ -158,11 +173,12 @@ static unsigned long kho_radix_get_table_index(unsigned long key,
  * Return: 0 on success, or a negative error code on failure.
  */
 int kho_radix_add_page(struct kho_radix_tree *tree,
-		       unsigned long pfn, unsigned int order)
+		       unsigned long pfn, unsigned int order,
+		       enum kho_page_type type)
 {
 	/* Newly allocated nodes for error cleanup */
 	struct kho_radix_node *intermediate_nodes[KHO_TREE_MAX_DEPTH] = { 0 };
-	unsigned long key = kho_radix_encode_key(PFN_PHYS(pfn), order);
+	unsigned long key = kho_radix_encode_key(PFN_PHYS(pfn), order, type);
 	struct kho_radix_node *anchor_node = NULL;
 	struct kho_radix_node *node = tree->root;
 	struct kho_radix_node *new_node;
@@ -232,15 +248,16 @@ EXPORT_SYMBOL_GPL(kho_radix_add_page);
  * @tree: The KHO radix tree.
  * @pfn: The page frame number of the page to unpreserve.
  * @order: The order of the page.
+ * @type: The page type.
  *
  * This function traverses the radix tree and clears the bit corresponding to
  * the page, effectively removing its "preserved" status. It does not free
  * the tree's intermediate nodes, even if they become empty.
  */
 void kho_radix_del_page(struct kho_radix_tree *tree, unsigned long pfn,
-			unsigned int order)
+			unsigned int order, enum kho_page_type type)
 {
-	unsigned long key = kho_radix_encode_key(PFN_PHYS(pfn), order);
+	unsigned long key = kho_radix_encode_key(PFN_PHYS(pfn), order, type);
 	struct kho_radix_node *node = tree->root;
 	struct kho_radix_leaf *leaf;
 	unsigned int i, idx;
@@ -278,14 +295,15 @@ static int kho_radix_walk_leaf(struct kho_radix_leaf *leaf,
 			       kho_radix_tree_walk_callback_t cb)
 {
 	unsigned long *bitmap = (unsigned long *)leaf;
+	enum kho_page_type type;
 	unsigned int order;
 	phys_addr_t phys;
 	unsigned int i;
 	int err;
 
 	for_each_set_bit(i, bitmap, PAGE_SIZE * BITS_PER_BYTE) {
-		phys = kho_radix_decode_key(key | i, &order);
-		err = cb(phys, order);
+		phys = kho_radix_decode_key(key | i, &order, &type);
+		err = cb(phys, order, type);
 		if (err)
 			return err;
 	}
@@ -358,11 +376,18 @@ int kho_radix_walk_tree(struct kho_radix_tree *tree,
 }
 EXPORT_SYMBOL_GPL(kho_radix_walk_tree);
 
-/* For physically contiguous 0-order pages. */
-static void kho_init_pages(struct page *page, unsigned long nr_pages)
+/* For physically contiguous pages. */
+static void kho_restore_refcounts(struct page *page, unsigned long nr_pages,
+				  enum kho_page_type type)
 {
-	for (unsigned long i = 0; i < nr_pages; i++) {
-		set_page_count(page + i, 1);
+	/* Head page always gets refcount of 1. */
+	set_page_count(page, 1);
+	clear_page_tag_ref(page);
+
+	for (unsigned long i = 1; i < nr_pages; i++) {
+		unsigned int count = (type == KHO_PAGE_SPLIT) ? 1 : 0;
+
+		set_page_count(page + i, count);
 		/* Clear each page's codetag to avoid accounting mismatch. */
 		clear_page_tag_ref(page + i);
 	}
@@ -370,16 +395,7 @@ static void kho_init_pages(struct page *page, unsigned long nr_pages)
 
 static void kho_init_folio(struct page *page, unsigned int order)
 {
-	unsigned long nr_pages = (1 << order);
-
-	/* Head page gets refcount of 1. */
-	set_page_count(page, 1);
-	/* Clear head page's codetag to avoid accounting mismatch. */
-	clear_page_tag_ref(page);
-
-	/* For higher order folios, tail pages get a page count of zero. */
-	for (unsigned long i = 1; i < nr_pages; i++)
-		set_page_count(page + i, 0);
+	kho_restore_refcounts(page, 1 << order, KHO_PAGE_CONTIG);
 
 	if (order > 0)
 		prep_compound_page(page, order);
@@ -404,13 +420,20 @@ static struct page *kho_restore_page(phys_addr_t phys, bool is_folio)
 		return NULL;
 	nr_pages = (1 << info.order);
 
+	/*
+	 * If we want to restore a folio, but the memory was split in the
+	 * previous kernel, something is wrong.
+	 */
+	if (WARN_ON_ONCE(is_folio && info.type == KHO_PAGE_SPLIT))
+		return NULL;
+
 	/* Clear private to make sure later restores on this page error out. */
 	page->private = 0;
 
 	if (is_folio)
 		kho_init_folio(page, info.order);
 	else
-		kho_init_pages(page, nr_pages);
+		kho_restore_refcounts(page, nr_pages, info.type);
 
 	adjust_managed_page_count(page, nr_pages);
 	return page;
@@ -486,7 +509,8 @@ static struct page *__init kho_get_preserved_page(phys_addr_t phys,
 }
 
 static int __init kho_preserved_memory_reserve(phys_addr_t phys,
-					       unsigned int order)
+					       unsigned int order,
+					       enum kho_page_type type)
 {
 	union kho_page_info info;
 	struct page *page;
@@ -500,6 +524,7 @@ static int __init kho_preserved_memory_reserve(phys_addr_t phys,
 	memblock_reserved_mark_noinit(phys, sz);
 	info.magic = KHO_PAGE_MAGIC;
 	info.order = order;
+	info.type = type;
 	page->private = info.page_private;
 
 	return 0;
@@ -860,7 +885,7 @@ int kho_preserve_folio(struct folio *folio)
 	if (WARN_ON(kho_scratch_overlap(pfn << PAGE_SHIFT, PAGE_SIZE << order)))
 		return -EINVAL;
 
-	return kho_radix_add_page(tree, pfn, order);
+	return kho_radix_add_page(tree, pfn, order, KHO_PAGE_CONTIG);
 }
 EXPORT_SYMBOL_GPL(kho_preserve_folio);
 
@@ -878,7 +903,7 @@ void kho_unpreserve_folio(struct folio *folio)
 	const unsigned long pfn = folio_pfn(folio);
 	const unsigned int order = folio_order(folio);
 
-	kho_radix_del_page(tree, pfn, order);
+	kho_radix_del_page(tree, pfn, order, KHO_PAGE_CONTIG);
 }
 EXPORT_SYMBOL_GPL(kho_unpreserve_folio);
 
@@ -899,15 +924,29 @@ static unsigned int __kho_preserve_pages_order(unsigned long start_pfn,
 	return order;
 }
 
+static bool kho_is_page_split(unsigned long pfn, unsigned int order)
+{
+	/*
+	 * If the refcount of the second page is non-zero, this block
+	 * has been split.
+	 */
+	if (order > 0 && page_ref_count(pfn_to_page(pfn + 1)) != 0)
+		return true;
+
+	return false;
+}
+
 static void __kho_unpreserve(struct kho_radix_tree *tree,
 			     unsigned long pfn, unsigned long end_pfn)
 {
-	unsigned int order;
-
 	while (pfn < end_pfn) {
-		order = __kho_preserve_pages_order(pfn, end_pfn);
+		unsigned int order = __kho_preserve_pages_order(pfn, end_pfn);
+		enum kho_page_type type;
 
-		kho_radix_del_page(tree, pfn, order);
+		type = kho_is_page_split(pfn, order) ? KHO_PAGE_SPLIT :
+						       KHO_PAGE_CONTIG;
+
+		kho_radix_del_page(tree, pfn, order, type);
 
 		pfn += 1 << order;
 	}
@@ -939,8 +978,12 @@ int kho_preserve_pages(struct page *page, unsigned long nr_pages)
 
 	while (pfn < end_pfn) {
 		unsigned int order = __kho_preserve_pages_order(pfn, end_pfn);
+		enum kho_page_type type;
 
-		err = kho_radix_add_page(tree, pfn, order);
+		type = kho_is_page_split(pfn, order) ? KHO_PAGE_SPLIT :
+						       KHO_PAGE_CONTIG;
+
+		err = kho_radix_add_page(tree, pfn, order, type);
 		if (err) {
 			failed_pfn = pfn;
 			break;
@@ -975,6 +1018,29 @@ void kho_unpreserve_pages(struct page *page, unsigned long nr_pages)
 	__kho_unpreserve(tree, start_pfn, end_pfn);
 }
 EXPORT_SYMBOL_GPL(kho_unpreserve_pages);
+
+/**
+ * kho_split_preserved_pages - split contiguous pages that are preserved
+ * @page: first page in the list.
+ * @order: the order of the original allocation.
+ *
+ * This function allows to split a high-order allocation that has been
+ * preserved across kexec. It unpreserves the pages, splits them using
+ * split_page() and then re-preserves them as individual pages.
+ *
+ * This function MUST only be called on pages that are currently preserved.
+ * The @order provided MUST match the order used during the initial
+ * preservation.
+ *
+ * Return: 0 on success, or a negative error code on failure.
+ */
+int kho_split_preserved_pages(struct page *page, unsigned int order)
+{
+	kho_unpreserve_pages(page, 1UL << order);
+	split_page(page, order);
+	return kho_preserve_pages(page, 1UL << order);
+}
+EXPORT_SYMBOL_GPL(kho_split_preserved_pages);
 
 /* vmalloc flags KHO supports */
 #define KHO_VMALLOC_SUPPORTED_FLAGS	(VM_ALLOC | VM_ALLOW_HUGE_VMAP)
