@@ -38,6 +38,21 @@ config BINFMT_ELF_KUNIT_TEST
 	  only needed for debugging. Note that with CONFIG_COMPAT=y, the
 	  compat_binfmt_elf KUnit test is also created.
 
+config BINFMT_ELF_PLUGINS
+	bool "Enable plugin support for ELF interpreter loading"
+	depends on BINFMT_ELF
+	help
+	  This option allows kernel modules to register handlers to dynamically
+	  resolve and override the ELF program interpreter (e.g. supporting relative
+	  interpreter paths with $ORIGIN).
+
+config BINFMT_ELF_NIX
+	tristate "ELF interpreter plugin for NixOS ($ORIGIN support)"
+	depends on BINFMT_ELF_PLUGINS
+	help
+	  This builds the NixOS ELF interpreter plugin. It intercepts PT_INTERP_NIX
+	  headers to resolve relative and $ORIGIN interpreter paths.
+
 config COMPAT_BINFMT_ELF
 	def_bool y
 	depends on COMPAT && BINFMT_ELF
