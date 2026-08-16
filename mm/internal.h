@@ -725,6 +725,7 @@ void calculate_min_free_kbytes(void);
 int __meminit init_per_zone_wmark_min(void);
 
 extern int __isolate_free_page(struct page *page, unsigned int order);
+extern unsigned long release_free_list(struct list_head *freepages);
 extern void __putback_isolated_page(struct page *page, unsigned int order,
 				    int mt);
 
