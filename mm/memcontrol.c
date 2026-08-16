@@ -5147,38 +5147,118 @@ int __mem_cgroup_charge(struct folio *folio, struct mm_struct *mm, gfp_t gfp)
 }
 
 /**
- * mem_cgroup_charge_hugetlb - charge the memcg for a hugetlb folio
- * @folio: folio being charged
+ * mem_cgroup_hugetlb_try_charge - Try to charge the memcg for a hugetlb folio
+ * @nr_pages: number of base pages to charge
  * @gfp: reclaim mode
+ * @memcg_p: Output pointer to the charged mem_cgroup (if successful and enabled)
+ * @objcg_p: Output pointer to the charged obj_cgroup (if successful and enabled)
  *
- * This function is called when allocating a huge page folio, after the page has
- * already been obtained and charged to the appropriate hugetlb cgroup
- * controller (if it is enabled).
+ * Prepares and tries to reserve the memory counter for the folio from the current
+ * task's memcg. If successful, both *memcg_p and *objcg_p are populated and their
+ * references are pinned until a subsequent call to mem_cgroup_hugetlb_commit_charge
+ * or mem_cgroup_hugetlb_cancel_charge.
  *
  * Returns ENOMEM if the memcg is already full.
- * Returns 0 if either the charge was successful, or if we skip the charging.
+ * Returns 0 if either the charge was successful, or if we skip charging.
  */
-int mem_cgroup_charge_hugetlb(struct folio *folio, gfp_t gfp)
+int mem_cgroup_hugetlb_try_charge(unsigned int nr_pages, gfp_t gfp,
+				  struct mem_cgroup **memcg_p,
+				  struct obj_cgroup **objcg_p)
 {
-	struct mem_cgroup *memcg = get_mem_cgroup_from_current();
+	struct mem_cgroup *memcg;
+	struct obj_cgroup *objcg;
 	int ret = 0;
 
-	/*
-	 * Even memcg does not account for hugetlb, we still want to update
-	 * system-level stats via lruvec_stat_mod_folio. Return 0, and skip
-	 * charging the memcg.
-	 */
+	*memcg_p = NULL;
+	*objcg_p = NULL;
+
 	if (mem_cgroup_disabled() || !memcg_accounts_hugetlb() ||
-		!memcg || !cgroup_subsys_on_dfl(memory_cgrp_subsys))
-		goto out;
+	    !cgroup_subsys_on_dfl(memory_cgrp_subsys))
+		return 0;
 
-	if (charge_memcg(folio, memcg, gfp))
-		ret = -ENOMEM;
+	memcg = get_mem_cgroup_from_current();
+	if (!memcg)
+		return 0;
 
-out:
+	objcg = get_obj_cgroup_from_memcg(memcg);
+	if (!objcg)
+		goto put_memcg;
+
+	if (!obj_cgroup_is_root(objcg)) {
+		ret = try_charge_memcg(memcg, gfp, nr_pages);
+		if (ret)
+			goto put_objcg;
+	}
+
+	*memcg_p = memcg;
+	*objcg_p = objcg;
+	return 0;
+
+put_objcg:
+	obj_cgroup_put(objcg);
+put_memcg:
 	mem_cgroup_put(memcg);
 	return ret;
 }
+
+/**
+ * mem_cgroup_hugetlb_commit_charge - Commit the memcg charge for a hugetlb folio
+ * @folio: folio being charged
+ * @memcg: Target mem_cgroup obtained from mem_cgroup_hugetlb_try_charge
+ * @objcg: Target obj_cgroup obtained from mem_cgroup_hugetlb_try_charge
+ *
+ * Finalizes the memory and statistics charging for the folio in the specified memcg.
+ * Transfers the pinned objcg reference to the folio structure (for automatic
+ * uncharging upon freeing via mem_cgroup_uncharge). Releases the try-commit reference
+ * on memcg.
+ */
+void mem_cgroup_hugetlb_commit_charge(struct folio *folio,
+				      struct mem_cgroup *memcg,
+				      struct obj_cgroup *objcg)
+{
+	if (!memcg || !objcg)
+		return;
+
+	commit_charge(folio, objcg);
+	memcg1_commit_charge(folio, memcg);
+
+	/*
+	 * Drop our try-commit-cancel protocol reference on memcg.
+	 * The objcg reference is TRANSFERRED to the folio by commit_charge,
+	 * so it will be put automatically by __mem_cgroup_uncharge() when
+	 * the folio is freed.
+	 */
+	mem_cgroup_put(memcg);
+}
+
+/**
+ * mem_cgroup_hugetlb_cancel_charge - Cancel and undo a hugetlb folio memcg charge
+ * @nr_pages: number of base pages to uncharge
+ * @memcg: Target mem_cgroup obtained from mem_cgroup_hugetlb_try_charge
+ * @objcg: Target obj_cgroup obtained from mem_cgroup_hugetlb_try_charge
+ *
+ * Cancels and safely rolls back the prepared memory charge for the folio in the
+ * specified memcg. Releases the try-commit pinned references on both memcg and objcg.
+ */
+void mem_cgroup_hugetlb_cancel_charge(unsigned int nr_pages,
+				      struct mem_cgroup *memcg,
+				      struct obj_cgroup *objcg)
+{
+	if (!memcg || !objcg)
+		return;
+
+	if (!obj_cgroup_is_root(objcg))
+		refill_stock(memcg, nr_pages);
+
+	/*
+	 * Drop our try-commit-cancel protocol references on both objcg
+	 * and memcg, since this mapping attempt was aborted and the folio
+	 * was never committed.
+	 */
+	obj_cgroup_put(objcg);
+	mem_cgroup_put(memcg);
+}
+
 
 /**
  * mem_cgroup_swapin_charge_folio - Charge a newly allocated folio for swapin.
