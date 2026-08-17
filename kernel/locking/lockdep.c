@@ -229,9 +229,11 @@ static inline int debug_locks_off_graph_unlock(void)
 	return ret;
 }
 
+#define BOOTSTRAP_LOCKDEP_ENTRIES 4096UL
+
 unsigned long nr_list_entries;
-static struct lock_list list_entries[MAX_LOCKDEP_ENTRIES];
-static DECLARE_BITMAP(list_entries_in_use, MAX_LOCKDEP_ENTRIES);
+static struct lock_list list_entries[BOOTSTRAP_LOCKDEP_ENTRIES];
+static DECLARE_BITMAP(list_entries_in_use, BOOTSTRAP_LOCKDEP_ENTRIES);
 
 /*
  * All data structures here are protected by the global debug_lock.
@@ -6315,6 +6317,12 @@ static void remove_class_from_lock_chains(struct pending_free *pf,
 	}
 }
 
+static inline bool is_bootstrap_entry(const struct lock_list *entry)
+{
+	return entry >= list_entries &&
+	       entry < list_entries + ARRAY_SIZE(list_entries);
+}
+
 /*
  * Remove all references to a lock class. The caller must hold the graph lock.
  */
@@ -6331,26 +6339,30 @@ static void zap_class(struct pending_free *pf, struct lock_class *class)
 	list_for_each_entry_safe(entry, tmp, &class->locks_after, entry) {
 		list_for_each_entry_safe(other, other_tmp, &entry->links_to->locks_before, entry) {
 			if (other->links_to == class) {
-				__clear_bit(other - list_entries, list_entries_in_use);
+				if (is_bootstrap_entry(other))
+					__clear_bit(other - list_entries, list_entries_in_use);
 				nr_list_entries--;
 				list_del_rcu(&other->entry);
 				break;
 			}
 		}
-		__clear_bit(entry - list_entries, list_entries_in_use);
+		if (is_bootstrap_entry(entry))
+			__clear_bit(entry - list_entries, list_entries_in_use);
 		nr_list_entries--;
 		list_del_rcu(&entry->entry);
 	}
 	list_for_each_entry_safe(entry, tmp, &class->locks_before, entry) {
 		list_for_each_entry_safe(other, other_tmp, &entry->links_to->locks_after, entry) {
 			if (other->links_to == class) {
-				__clear_bit(other - list_entries, list_entries_in_use);
+				if (is_bootstrap_entry(other))
+					__clear_bit(other - list_entries, list_entries_in_use);
 				nr_list_entries--;
 				list_del_rcu(&other->entry);
 				break;
 			}
 		}
-		__clear_bit(entry - list_entries, list_entries_in_use);
+		if (is_bootstrap_entry(entry))
+			__clear_bit(entry - list_entries, list_entries_in_use);
 		nr_list_entries--;
 		list_del_rcu(&entry->entry);
 	}
@@ -6761,6 +6773,15 @@ void __init lockdep_init(void)
 	pr_info(" per task-struct memory footprint: %zu bytes\n",
 	       sizeof(((struct task_struct *)NULL)->held_locks));
 }
+
+static int __init lockdep_boot_report(void)
+{
+	pr_info("lockdep: %lu/%lu bootstrap entries used before buddy init, folio_pool active\n",
+		min_t(unsigned long, nr_list_entries, ARRAY_SIZE(list_entries)),
+		ARRAY_SIZE(list_entries));
+	return 0;
+}
+core_initcall(lockdep_boot_report);
 
 static void
 print_freed_lock_bug(struct task_struct *curr, const void *mem_from,
