@@ -19,6 +19,7 @@
 #include <linux/fdtable.h>
 #include <linux/file.h>
 #include <linux/fs.h>
+#include <linux/folio_pool.h>
 #include <linux/license.h>
 #include <linux/filter.h>
 #include <linux/kernel.h>
@@ -2059,12 +2060,15 @@ int generic_map_delete_batch(struct bpf_map *map,
 	return err;
 }
 
+DEFINE_STATIC_KEY_TRUE(bpf_batch_scratchpad_key);
+
 int generic_map_update_batch(struct bpf_map *map, struct file *map_file,
 			     const union bpf_attr *attr,
 			     union bpf_attr __user *uattr)
 {
 	void __user *values = u64_to_user_ptr(attr->batch.values);
 	void __user *keys = u64_to_user_ptr(attr->batch.keys);
+	struct folio_scratchpad batch_sp;
 	u32 value_size, cp, max_count;
 	void *key, *value;
 	int err = 0;
@@ -2083,13 +2087,17 @@ int generic_map_update_batch(struct bpf_map *map, struct file *map_file,
 	if (put_user(0, &uattr->batch.count))
 		return -EFAULT;
 
-	key = kvmalloc(map->key_size, GFP_USER | __GFP_NOWARN);
+	folio_scratchpad_init_key(&batch_sp, 0, &bpf_batch_scratchpad_key);
+
+	key = folio_scratchpad_alloc(&batch_sp, map->key_size,
+				     sizeof(void *), GFP_USER | __GFP_NOWARN);
 	if (!key)
 		return -ENOMEM;
 
-	value = kvmalloc(value_size, GFP_USER | __GFP_NOWARN);
+	value = folio_scratchpad_alloc(&batch_sp, value_size,
+				       sizeof(void *), GFP_USER | __GFP_NOWARN);
 	if (!value) {
-		kvfree(key);
+		folio_scratchpad_free(&batch_sp);
 		return -ENOMEM;
 	}
 
@@ -2111,8 +2119,7 @@ int generic_map_update_batch(struct bpf_map *map, struct file *map_file,
 	if (copy_to_user(&uattr->batch.count, &cp, sizeof(cp)))
 		err = -EFAULT;
 
-	kvfree(value);
-	kvfree(key);
+	folio_scratchpad_free(&batch_sp);
 
 	return err;
 }
