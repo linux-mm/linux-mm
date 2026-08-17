@@ -58,11 +58,36 @@
 #include <linux/context_tracking.h>
 #include <linux/console.h>
 #include <linux/kasan.h>
+#include <linux/folio_pool.h>
+
+DEFINE_STATIC_KEY_TRUE(lockdep_pool_key);
+static struct folio_pool lockdep_pool =
+	FOLIO_POOL_INIT_KEY(lockdep_pool, sizeof(struct lock_list),
+			    FOLIO_POOL_64K_ORDER, &lockdep_pool_key);
+
+static int __init setup_lockdep_folio_pool(char *str)
+{
+	bool enable;
+
+	if (!kstrtobool(str, &enable)) {
+		if (enable)
+			static_branch_enable(&lockdep_pool_key);
+		else
+			static_branch_disable(&lockdep_pool_key);
+	}
+	return 1;
+}
+__setup("lockdep.folio_pool=", setup_lockdep_folio_pool);
 
 #include <asm/sections.h>
 
 #include "lockdep_internals.h"
 #include "lock_events.h"
+
+void lockdep_pool_stats(unsigned int *nr_chunks, size_t *chunk_size, size_t *tail_used)
+{
+	folio_pool_stats(&lockdep_pool, nr_chunks, chunk_size, tail_used);
+}
 
 #include <trace/events/lock.h>
 
@@ -1404,11 +1429,19 @@ static struct lock_list *alloc_list_entry(void)
 				      ARRAY_SIZE(list_entries));
 
 	if (idx >= ARRAY_SIZE(list_entries)) {
+		struct lock_list *p;
+
+		p = folio_pool_alloc_type(&lockdep_pool, struct lock_list,
+					  GFP_ATOMIC);
+		if (p) {
+			nr_list_entries++;
+			return p;
+		}
 		if (!debug_locks_off_graph_unlock())
 			return NULL;
 
 		nbcon_cpu_emergency_enter();
-		print_lockdep_off("BUG: MAX_LOCKDEP_ENTRIES too low!");
+		print_lockdep_off("BUG: MAX_LOCKDEP_ENTRIES too low and folio_pool exhausted!");
 		dump_stack();
 		nbcon_cpu_emergency_exit();
 		return NULL;

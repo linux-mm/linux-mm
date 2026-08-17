@@ -159,6 +159,8 @@ extern unsigned long max_lock_class_idx;
 extern struct lock_class lock_classes[MAX_LOCKDEP_KEYS];
 extern unsigned long lock_classes_in_use[];
 
+void lockdep_pool_stats(unsigned int *nr_chunks, size_t *chunk_size, size_t *tail_used);
+
 #ifdef CONFIG_PROVE_LOCKING
 extern unsigned long lockdep_count_forward_deps(struct lock_class *);
 extern unsigned long lockdep_count_backward_deps(struct lock_class *);
