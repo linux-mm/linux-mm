@@ -898,6 +898,8 @@ struct bpf_scc_info {
 
 struct bpf_liveness;
 
+#include <linux/folio_pool.h>
+
 /* single container for all structs
  * one verifier_env per bpf_check() call
  */
@@ -907,6 +909,7 @@ struct bpf_verifier_env {
 	struct bpf_prog *prog;		/* eBPF program being verified */
 	const struct bpf_verifier_ops *ops;
 	struct module *attach_btf_mod;	/* The owner module of prog->aux->attach_btf */
+	struct folio_pool state_pool;	/* pool for transient state nodes */
 	struct bpf_verifier_stack_elem *head; /* stack of verifier states to be processed */
 	int stack_size;			/* number of states to be processed */
 	bool strict_alignment;		/* perform strict pointer alignment checks */
