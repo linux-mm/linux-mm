@@ -28,6 +28,8 @@
 #include <linux/cgroup-defs.h>
 #include <linux/page_counter.h>
 #include <linux/memcontrol.h>
+#include <linux/memory-tiers.h>
+#include <linux/node.h>
 #include <linux/cgroup.h>
 #include <linux/cpuset.h>
 #include <linux/sched/mm.h>
@@ -2316,11 +2318,33 @@ void drain_all_stock(struct mem_cgroup *root_memcg)
 	mutex_unlock(&percpu_charge_mutex);
 }
 
+/*
+ * Per-CPU tier charge/uncharge stock: caches up to NR_TIER_STOCK (memcg,
+ * tier_id) pairs so small charges/uncharges avoid atomics.
+ */
+#define NR_TIER_STOCK 7
+struct tier_stock_pcp {
+	local_lock_t lock;
+	uint8_t nr_pages[NR_TIER_STOCK];
+	struct mem_cgroup *cached[NR_TIER_STOCK];
+	int tier_id[NR_TIER_STOCK];
+	struct work_struct work;
+	unsigned long flags;
+	uint8_t drain_idx;
+};
+static DEFINE_PER_CPU(struct tier_stock_pcp, tier_stock);
+
+static void __drain_tier_stock(struct tier_stock_pcp *stock, int i);
+
 static int memcg_hotplug_cpu_dead(unsigned int cpu)
 {
 	/* no need for the local lock */
+	int i;
+
 	drain_obj_stock(&per_cpu(obj_stock, cpu));
 	drain_stock_fully(&per_cpu(memcg_stock, cpu));
+	for (i = 0; i < NR_TIER_STOCK; i++)
+		__drain_tier_stock(&per_cpu(tier_stock, cpu), i);
 
 	return 0;
 }
@@ -2358,6 +2382,280 @@ static void high_work_func(struct work_struct *work)
 
 	memcg = container_of(work, struct mem_cgroup, high_work);
 	reclaim_high(memcg, MEMCG_CHARGE_BATCH, GFP_KERNEL);
+}
+
+/*
+ * Find a tier counter for a given memcg and tier ID.
+ *
+ * Context: Caller must hold either:
+ * - The RCU read lock, for lockless lookup in the fast (charge) path.
+ * - memcg->tier_lock, for modifications in the slow (creation/free) path.
+ */
+static struct memcg_tier_counter *
+memcg_tier_counter_find(struct mem_cgroup *memcg, int tier_id)
+{
+	struct memcg_tier_counter *tc;
+
+	list_for_each_entry_rcu(tc, &memcg->tier_counters, list,
+				lockdep_is_held(&memcg->tier_lock))
+		if (tc->tier_id == tier_id)
+			return tc;
+	return NULL;
+}
+
+static struct page_counter *
+memcg_tier_parent_link(struct mem_cgroup *parent, int tier_id)
+{
+	struct memcg_tier_counter *ptc;
+	struct page_counter *pc;
+
+	if (!parent || mem_cgroup_is_root(parent))
+		return NULL;
+
+	rcu_read_lock();
+	ptc = memcg_tier_counter_find(parent, tier_id);
+	pc = ptc ? &ptc->counter : NULL;
+	rcu_read_unlock();
+	return pc;
+}
+
+static int memcg_tier_counter_create(struct mem_cgroup *memcg,
+				     struct mem_cgroup *parent, int tier_id)
+{
+	struct page_counter *parent_cnt;
+	struct memcg_tier_counter *new;
+
+	/* Fast path (lockless RCU read): already exists -> nothing to do. */
+	rcu_read_lock();
+	if (memcg_tier_counter_find(memcg, tier_id)) {
+		rcu_read_unlock();
+		return 0;
+	}
+	rcu_read_unlock();
+
+	parent_cnt = memcg_tier_parent_link(parent, tier_id);
+
+	new = kzalloc_obj(*new);
+	if (!new)
+		return -ENOMEM;
+
+	new->tier_id = tier_id;
+	page_counter_init(&new->counter, parent_cnt, false);
+	page_counter_set_high(&new->counter, PAGE_COUNTER_MAX);
+	INIT_LIST_HEAD(&new->list);
+	new->max_derived = true;
+	new->high_derived = true;
+
+	spin_lock(&memcg->tier_lock);
+	if (memcg_tier_counter_find(memcg, tier_id)) {
+		spin_unlock(&memcg->tier_lock);
+		kfree(new);
+		return 0;
+	}
+	list_add_tail_rcu(&new->list, &memcg->tier_counters);
+	spin_unlock(&memcg->tier_lock);
+	return 0;
+}
+
+static void memcg_charge_tier_id(struct mem_cgroup *memcg, int tier_id,
+				 unsigned long nr_pages)
+{
+	struct memcg_tier_counter *tc;
+
+	if (!mem_cgroup_tiered_limits() || tier_id < 0)
+		return;
+	rcu_read_lock();
+	tc = memcg_tier_counter_find(memcg, tier_id);
+	if (tc)
+		page_counter_charge(&tc->counter, nr_pages);
+	rcu_read_unlock();
+}
+
+static void memcg_uncharge_tier_id(struct mem_cgroup *memcg, int tier_id,
+				   unsigned long nr_pages)
+{
+	struct memcg_tier_counter *tc;
+
+	if (!mem_cgroup_tiered_limits() || tier_id < 0)
+		return;
+	rcu_read_lock();
+	tc = memcg_tier_counter_find(memcg, tier_id);
+	if (tc)
+		page_counter_uncharge(&tc->counter, nr_pages);
+	rcu_read_unlock();
+}
+
+static void memcg_charge_tier(struct mem_cgroup *memcg, struct folio *folio,
+			     unsigned long nr_pages)
+{
+	memcg_charge_tier_id(memcg, node_to_tier_id(folio_nid(folio)), nr_pages);
+}
+
+static void memcg_free_tier_counters(struct mem_cgroup *memcg)
+{
+	struct memcg_tier_counter *tc, *tmp;
+
+	spin_lock(&memcg->tier_lock);
+	list_for_each_entry_safe(tc, tmp, &memcg->tier_counters, list) {
+		list_del_rcu(&tc->list);
+		kfree_rcu(tc, rcu);
+	}
+	spin_unlock(&memcg->tier_lock);
+}
+
+static unsigned long
+reclaim_tier(struct mem_cgroup *memcg, unsigned int nr_pages, gfp_t gfp_mask,
+	     nodemask_t *nmp)
+{
+	unsigned long nr_reclaimed, pflags;
+
+	psi_memstall_enter(&pflags);
+	nr_reclaimed = try_to_free_mem_cgroup_pages_nodemask(memcg, nr_pages, gfp_mask,
+							    MEMCG_RECLAIM_MAY_SWAP, NULL, nmp);
+	psi_memstall_leave(&pflags);
+	return nr_reclaimed;
+}
+
+/* Global per-tier capacity cache.
+ * Populated at boot and on node hotplug (walks online nodes only, no memcg touch).
+ * Stores (tier_id, capacity) pairs to support sparse tier IDs (e.g., 4, 22, 52)
+ * without requiring a dense index.
+ */
+#define NR_TIER_CAP_ENTRIES 16
+struct tier_cap_entry {
+	int tier_id;
+	unsigned long capacity;
+};
+static struct tier_cap_entry tier_cap_entries[NR_TIER_CAP_ENTRIES];
+static int nr_tier_entries;
+static unsigned long tier_total_capacity;
+/* Guards the per-tier capacity cache. */
+static DEFINE_SPINLOCK(tier_cap_lock);
+
+static void update_tier_capacity_cache(void)
+{
+	int nid;
+	int i;
+
+	spin_lock(&tier_cap_lock);
+	nr_tier_entries = 0;
+	tier_total_capacity = 0;
+	for (i = 0; i < NR_TIER_CAP_ENTRIES; i++) {
+		tier_cap_entries[i].tier_id = -1;
+		tier_cap_entries[i].capacity = 0;
+	}
+
+	for_each_online_node(nid) {
+		int tid = node_to_tier_id(nid);
+		unsigned long cap;
+
+		if (tid < 0)
+			continue;
+		cap = node_present_pages(nid);
+		for (i = 0; i < nr_tier_entries; i++)
+			if (tier_cap_entries[i].tier_id == tid) {
+				tier_cap_entries[i].capacity += cap;
+				tier_total_capacity += cap;
+				break;
+			}
+		if (i == nr_tier_entries && nr_tier_entries < NR_TIER_CAP_ENTRIES) {
+			tier_cap_entries[nr_tier_entries].tier_id = tid;
+			tier_cap_entries[nr_tier_entries].capacity = cap;
+			nr_tier_entries++;
+			tier_total_capacity += cap;
+		} else if (i == nr_tier_entries) {
+			pr_warn_ratelimited("memcg: tier capacity cache full (>%d tiers), tier %d not tracked\n",
+					    NR_TIER_CAP_ENTRIES, tid);
+		}
+	}
+	spin_unlock(&tier_cap_lock);
+}
+
+/* Push derived high/max limits to tier counters of @memcg.
+ * Invoked on memory.high/max writes and capacity changes (hotplug).
+ */
+static void tier_update_derived_limits(struct mem_cgroup *memcg)
+{
+	struct memcg_tier_counter *tc;
+	struct tier_cap_entry local_entries[NR_TIER_CAP_ENTRIES];
+	unsigned long total;
+	int i, nr_entries;
+
+	if (!mem_cgroup_tiered_limits())
+		return;
+
+	spin_lock(&tier_cap_lock);
+	total = tier_total_capacity;
+	nr_entries = nr_tier_entries;
+	memcpy(local_entries, tier_cap_entries, sizeof(local_entries));
+	spin_unlock(&tier_cap_lock);
+
+	if (total == 0)
+		return;
+
+	/* Serialize flag check + limit store against memory.tier writes. */
+	spin_lock(&memcg->tier_lock);
+	list_for_each_entry_rcu(tc, &memcg->tier_counters, list,
+				lockdep_is_held(&memcg->tier_lock)) {
+		unsigned long cap = 0;
+
+		for (i = 0; i < nr_entries; i++)
+			if (local_entries[i].tier_id == tc->tier_id) {
+				cap = local_entries[i].capacity;
+				break;
+			}
+		if (cap == 0)
+			continue;
+		if (READ_ONCE(tc->max_derived)) {
+			unsigned long mem_max = READ_ONCE(memcg->memory.max);
+
+			if (mem_max == PAGE_COUNTER_MAX)
+				xchg(&tc->counter.max, PAGE_COUNTER_MAX);
+			else
+				xchg(&tc->counter.max,
+				     mul_u64_u64_div_u64(mem_max, cap, total));
+		}
+		if (READ_ONCE(tc->high_derived)) {
+			unsigned long mem_high = READ_ONCE(memcg->memory.high);
+
+			if (mem_high == PAGE_COUNTER_MAX)
+				xchg(&tc->counter.high, PAGE_COUNTER_MAX);
+			else
+				xchg(&tc->counter.high,
+				     mul_u64_u64_div_u64(mem_high, cap, total));
+		}
+	}
+	spin_unlock(&memcg->tier_lock);
+}
+
+static void tier_high_work_func(struct work_struct *work)
+{
+	struct mem_cgroup *memcg;
+	struct memcg_tier_counter *tc;
+	/* Few tiers in practice (2-4); cap is generous. */
+	int over_ids[16];
+	int nr_over = 0;
+	int i;
+
+	memcg = container_of(work, struct mem_cgroup, tier_high_work);
+
+	spin_lock(&memcg->tier_lock);
+	list_for_each_entry(tc, &memcg->tier_counters, list) {
+		if (page_counter_read(&tc->counter) > READ_ONCE(tc->counter.high)) {
+			if (nr_over < ARRAY_SIZE(over_ids))
+				over_ids[nr_over++] = tc->tier_id;
+		}
+	}
+	spin_unlock(&memcg->tier_lock);
+
+	for (i = 0; i < nr_over; i++) {
+		nodemask_t nodes;
+
+		if (tier_id_to_nodemask(over_ids[i], &nodes) ||
+		    nodes_empty(nodes))
+			continue;
+		reclaim_tier(memcg, MEMCG_CHARGE_BATCH, GFP_KERNEL, &nodes);
+	}
 }
 
 /*
@@ -2785,6 +3083,268 @@ done_restock:
 	    !(current->flags & PF_MEMALLOC) &&
 	    gfpflags_allow_blocking(gfp_mask))
 		__mem_cgroup_handle_over_high(gfp_mask);
+	return 0;
+}
+
+/* Drain cached tier charge from a per-CPU stock slot.
+ * The drained count is returned to the tier's page_counter,
+ * and the memcg css reference is put.
+ */
+static void __drain_tier_stock(struct tier_stock_pcp *stock, int i)
+{
+	struct memcg_tier_counter *tc;
+	struct mem_cgroup *old = READ_ONCE(stock->cached[i]);
+	uint8_t stock_pages;
+
+	if (!old)
+		return;
+	stock_pages = READ_ONCE(stock->nr_pages[i]);
+	if (stock_pages) {
+		rcu_read_lock();
+		tc = memcg_tier_counter_find(old, READ_ONCE(stock->tier_id[i]));
+		if (tc)
+			page_counter_uncharge(&tc->counter, stock_pages);
+		rcu_read_unlock();
+		WRITE_ONCE(stock->nr_pages[i], 0);
+	}
+	css_put(&old->css);
+	WRITE_ONCE(stock->cached[i], NULL);
+	WRITE_ONCE(stock->tier_id[i], -1);
+}
+
+static void drain_local_tier_stock(struct work_struct *dummy)
+{
+	struct tier_stock_pcp *stock;
+	int i;
+
+	if (WARN_ON_ONCE(!in_task()))
+		return;
+	local_lock(&tier_stock.lock);
+	stock = this_cpu_ptr(&tier_stock);
+	for (i = 0; i < NR_TIER_STOCK; i++)
+		__drain_tier_stock(stock, i);
+	clear_bit(FLUSHING_CACHED_CHARGE, &stock->flags);
+	local_unlock(&tier_stock.lock);
+}
+
+/* Drain per-CPU tier stock entries matching @memcg on all CPUs. */
+static void drain_all_tier_stock(struct mem_cgroup *memcg)
+{
+	int cpu, curcpu, i;
+
+	if (!mutex_trylock(&percpu_charge_mutex))
+		return;
+	migrate_disable();
+	curcpu = smp_processor_id();
+	for_each_online_cpu(cpu) {
+		struct tier_stock_pcp *stock = &per_cpu(tier_stock, cpu);
+
+		if (test_bit(FLUSHING_CACHED_CHARGE, &stock->flags))
+			continue;
+		for (i = 0; i < NR_TIER_STOCK; i++) {
+			if (READ_ONCE(stock->cached[i]) != memcg)
+				continue;
+			if (!test_and_set_bit(FLUSHING_CACHED_CHARGE,
+				      &stock->flags)) {
+				if (cpu == curcpu)
+					drain_local_tier_stock(&stock->work);
+				else
+					schedule_drain_work(cpu, &stock->work);
+			}
+			break;
+		}
+	}
+	migrate_enable();
+	mutex_unlock(&percpu_charge_mutex);
+}
+
+/* Consume @nr_pages from the per-CPU tier stock if a matching slot has enough surplus */
+static bool consume_tier_stock(struct mem_cgroup *memcg, int tier_id,
+				      unsigned int nr_pages)
+{
+	struct tier_stock_pcp *stock;
+	bool ret = false;
+	int i;
+	uint8_t pages;
+
+	BUILD_BUG_ON(MEMCG_CHARGE_BATCH > S8_MAX);
+
+	if (nr_pages > MEMCG_CHARGE_BATCH)
+		return false;
+
+	local_lock(&tier_stock.lock);
+	stock = this_cpu_ptr(&tier_stock);
+
+	for (i = 0; i < NR_TIER_STOCK; i++) {
+		if (READ_ONCE(stock->cached[i]) == memcg &&
+		    READ_ONCE(stock->tier_id[i]) == tier_id) {
+			pages = READ_ONCE(stock->nr_pages[i]);
+			if (pages >= nr_pages) {
+				WRITE_ONCE(stock->nr_pages[i], pages - nr_pages);
+				ret = true;
+			}
+			break;
+		}
+	}
+
+	local_unlock(&tier_stock.lock);
+	return ret;
+}
+
+/* Refund @nr_pages to the per-CPU tier stock. */
+static void refill_tier_stock(struct mem_cgroup *memcg, int tier_id,
+				      unsigned int nr_pages)
+{
+	struct memcg_tier_counter *tc;
+	struct tier_stock_pcp *stock;
+	int empty_slot = -1;
+	uint8_t pages;
+	int i;
+
+	if (!mem_cgroup_tiered_limits())
+		return;
+
+	/* Too big to cache: direct uncharge, leave the stock untouched. */
+	if (nr_pages > MEMCG_CHARGE_BATCH) {
+		rcu_read_lock();
+		tc = memcg_tier_counter_find(memcg, tier_id);
+		if (tc)
+			page_counter_uncharge(&tc->counter, nr_pages);
+		rcu_read_unlock();
+		return;
+	}
+
+	local_lock(&tier_stock.lock);
+	stock = this_cpu_ptr(&tier_stock);
+
+	for (i = 0; i < NR_TIER_STOCK; i++) {
+		if (!READ_ONCE(stock->cached[i]) && empty_slot == -1)
+			empty_slot = i;
+		if (READ_ONCE(stock->cached[i]) == memcg &&
+		    READ_ONCE(stock->tier_id[i]) == tier_id) {
+			pages = READ_ONCE(stock->nr_pages[i]) + nr_pages;
+			WRITE_ONCE(stock->nr_pages[i], pages);
+			if (pages > MEMCG_CHARGE_BATCH)
+				__drain_tier_stock(stock, i);
+			goto out;
+		}
+	}
+
+	/* Mismatch: pick a slot (empty or evict), drain, cache new. */
+	i = empty_slot;
+	if (i == -1) {
+		i = stock->drain_idx++;
+		if (stock->drain_idx == NR_TIER_STOCK)
+			stock->drain_idx = 0;
+	}
+	__drain_tier_stock(stock, i);
+	css_get(&memcg->css);
+	WRITE_ONCE(stock->cached[i], memcg);
+	WRITE_ONCE(stock->tier_id[i], tier_id);
+	WRITE_ONCE(stock->nr_pages[i], nr_pages);
+out:
+	local_unlock(&tier_stock.lock);
+}
+
+static int try_charge_memcg_tier(struct mem_cgroup *memcg, gfp_t gfp_mask,
+	unsigned int nr_pages, int tier_id)
+{
+	struct memcg_tier_counter *tc;
+	struct page_counter *counter;
+	unsigned int batch = max(MEMCG_CHARGE_BATCH, nr_pages);
+	int nr_retries = MAX_RECLAIM_RETRIES;
+	unsigned long nr_reclaimed = 0;
+	bool passed_oom = false;
+	bool drained = false;
+	nodemask_t nodes, *nmp = NULL;
+
+	if (!mem_cgroup_tiered_limits() || tier_id < 0)
+		return 0;
+
+	rcu_read_lock();
+	tc = memcg_tier_counter_find(memcg, tier_id);
+	rcu_read_unlock();
+	if (!tc)
+		return 0;
+
+retry:
+	if (consume_tier_stock(memcg, tier_id, nr_pages))
+		return 0;
+	if (page_counter_try_charge(&tc->counter, batch, &counter))
+		goto success;
+
+	if (batch > nr_pages) {
+		batch = nr_pages;
+		goto retry;
+	}
+
+	/* Over max -> reclaim. */
+	if (unlikely(current->flags & PF_MEMALLOC))
+		goto force;
+	if (unlikely(task_in_memcg_oom(current)))
+		goto nomem;
+	if (!gfpflags_allow_blocking(gfp_mask))
+		goto nomem;
+
+	if (!tier_id_to_nodemask(tier_id, &nodes) && !nodes_empty(nodes))
+		nmp = &nodes;
+
+	nr_reclaimed = reclaim_tier(memcg, nr_pages, gfp_mask, nmp);
+
+	if (page_counter_read(&tc->counter) + nr_pages <= READ_ONCE(tc->counter.max))
+		goto retry;
+
+	if (!drained) {
+		drain_all_tier_stock(memcg);
+		drained = true;
+		goto retry;
+	}
+
+	if (gfp_mask & __GFP_NORETRY)
+		goto nomem;
+	if (nr_reclaimed && nr_pages <= (1 << PAGE_ALLOC_COSTLY_ORDER))
+		goto retry;
+	if (nr_retries--)
+		goto retry;
+	if (gfp_mask & __GFP_RETRY_MAYFAIL)
+		goto nomem;
+	if (passed_oom && task_is_dying())
+		goto nomem;
+	if (mem_cgroup_oom(memcg, gfp_mask, get_order(nr_pages * PAGE_SIZE))) {
+		passed_oom = true;	/* tier max is a hard limit: OOM, like memory.max */
+		nr_retries = MAX_RECLAIM_RETRIES;
+		goto retry;
+	}
+	goto nomem;
+success:
+	if (batch > nr_pages)
+		refill_tier_stock(memcg, tier_id, batch - nr_pages);
+	do {
+		struct memcg_tier_counter *tc_this;
+
+		rcu_read_lock();
+		tc_this = memcg_tier_counter_find(memcg, tier_id);
+		if (tc_this &&
+		    page_counter_read(&tc_this->counter) > READ_ONCE(tc_this->counter.high) &&
+		    !work_pending(&memcg->tier_high_work)) {
+			schedule_work(&memcg->tier_high_work);
+			rcu_read_unlock();
+			break;
+		}
+		rcu_read_unlock();
+	} while ((memcg = parent_mem_cgroup(memcg)));
+	return 0;
+nomem:
+	if (!(gfp_mask & (__GFP_NOFAIL | __GFP_HIGH)))
+		return -ENOMEM;
+
+force:
+	/*
+	 * Force-charge past the tier max for reclaim/privileged allocations
+	 * (PF_MEMALLOC, or __GFP_NOFAIL/__GFP_HIGH that fell through from
+	 * nomem) -- not skip -- so the page is in tier.current too.
+	 */
+	page_counter_charge(&tc->counter, nr_pages);
 	return 0;
 }
 
@@ -4130,6 +4690,9 @@ static struct mem_cgroup *mem_cgroup_alloc(struct mem_cgroup *parent)
 		goto fail;
 
 	INIT_WORK(&memcg->high_work, high_work_func);
+	spin_lock_init(&memcg->tier_lock);
+	INIT_LIST_HEAD(&memcg->tier_counters);
+	INIT_WORK(&memcg->tier_high_work, tier_high_work_func);
 	vmpressure_init(&memcg->vmpressure);
 	INIT_LIST_HEAD(&memcg->memory_peaks);
 	INIT_LIST_HEAD(&memcg->swap_peaks);
@@ -4179,6 +4742,20 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 
 		page_counter_init(&memcg->memory, &parent->memory, memcg_on_dfl);
 		page_counter_init(&memcg->swap, &parent->swap, false);
+
+		if (mem_cgroup_tiered_limits()) {
+			int nid, tid;
+
+			for_each_online_node(nid) {
+				tid = node_to_tier_id(nid);
+				if (tid != -1 && memcg_tier_counter_create(memcg,
+							mem_cgroup_from_css(parent_css), tid)) {
+					memcg_free_tier_counters(memcg);
+					mem_cgroup_free(memcg);
+					return ERR_PTR(-ENOMEM);
+				}
+			}
+		}
 #ifdef CONFIG_MEMCG_V1
 		memcg->memory.track_failcnt = !memcg_on_dfl;
 		WRITE_ONCE(memcg->oom_kill_disable, READ_ONCE(parent->oom_kill_disable));
@@ -4307,6 +4884,7 @@ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 	lru_gen_offline_memcg(memcg);
 
 	drain_all_stock(memcg);
+	drain_all_tier_stock(memcg);
 
 	mem_cgroup_private_id_put(memcg, 1);
 }
@@ -4339,6 +4917,8 @@ static void mem_cgroup_css_free(struct cgroup_subsys_state *css)
 
 	vmpressure_cleanup(&memcg->vmpressure);
 	cancel_work_sync(&memcg->high_work);
+	cancel_work_sync(&memcg->tier_high_work);
+	memcg_free_tier_counters(memcg);
 	memcg1_remove_from_trees(memcg);
 	free_shrinker_info(memcg);
 	mem_cgroup_free(memcg);
@@ -4360,6 +4940,7 @@ static void mem_cgroup_css_free(struct cgroup_subsys_state *css)
 static void mem_cgroup_css_reset(struct cgroup_subsys_state *css)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+	struct memcg_tier_counter *tc;
 
 	page_counter_set_max(&memcg->memory, PAGE_COUNTER_MAX);
 	page_counter_set_max(&memcg->swap, PAGE_COUNTER_MAX);
@@ -4373,6 +4954,15 @@ static void mem_cgroup_css_reset(struct cgroup_subsys_state *css)
 	memcg1_soft_limit_reset(memcg);
 	page_counter_set_high(&memcg->swap, PAGE_COUNTER_MAX);
 	memcg_wb_domain_size_changed(memcg);
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(tc, &memcg->tier_counters, list) {
+		page_counter_set_max(&tc->counter, PAGE_COUNTER_MAX);
+		page_counter_set_high(&tc->counter, PAGE_COUNTER_MAX);
+		WRITE_ONCE(tc->max_derived, true);
+		WRITE_ONCE(tc->high_derived, true);
+	}
+	rcu_read_unlock();
 }
 
 struct aggregate_control {
@@ -4781,6 +5371,7 @@ static ssize_t memory_high_write(struct kernfs_open_file *of,
 		return err;
 
 	page_counter_set_high(&memcg->memory, high);
+	tier_update_derived_limits(memcg);
 
 	if (of->file->f_flags & O_NONBLOCK)
 		goto out;
@@ -4833,6 +5424,7 @@ static ssize_t memory_max_write(struct kernfs_open_file *of,
 		return err;
 
 	xchg(&memcg->memory.max, max);
+	tier_update_derived_limits(memcg);
 
 	if (of->file->f_flags & O_NONBLOCK)
 		goto out;
@@ -4866,6 +5458,108 @@ static ssize_t memory_max_write(struct kernfs_open_file *of,
 	}
 out:
 	memcg_wb_domain_size_changed(memcg);
+	return nbytes;
+}
+
+static int memory_tier_show(struct seq_file *m, void *v)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_seq(m);
+	struct memcg_tier_counter *tc;
+
+	if (!mem_cgroup_tiered_limits())
+		return 0;
+	rcu_read_lock();
+	list_for_each_entry_rcu(tc, &memcg->tier_counters, list) {
+		seq_printf(m, "tier%d.current=%llu\n", tc->tier_id,
+			(u64)page_counter_read(&tc->counter) * PAGE_SIZE);
+		seq_printf(m, "tier%d.high=", tc->tier_id);
+		seq_puts_memcg_tunable(m, READ_ONCE(tc->counter.high));
+		seq_printf(m, "tier%d.max=", tc->tier_id);
+		seq_puts_memcg_tunable(m, READ_ONCE(tc->counter.max));
+	}
+	rcu_read_unlock();
+	return 0;
+}
+
+static ssize_t memory_tier_write(struct kernfs_open_file *of,
+	char *buf, size_t nbytes, loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	struct memcg_tier_counter *tc;
+	unsigned int nr_retries = MAX_RECLAIM_RETRIES;
+	bool drained = false;
+	nodemask_t nodes, *nmp = NULL;
+	unsigned long val;
+	char knob[8], *p;
+	int tier_id, err;
+
+	if (!mem_cgroup_tiered_limits())
+		return -EOPNOTSUPP;
+
+	buf = strstrip(buf);
+	if (sscanf(buf, "tier%d.%7[^=]", &tier_id, knob) != 2)
+		return -EINVAL;
+	if (strcmp(knob, "high") && strcmp(knob, "max"))
+		return -EINVAL;
+	p = strchr(buf, '=');
+	if (!p)
+		return -EINVAL;
+	err = page_counter_memparse(p + 1, "max", &val);
+	if (err)
+		return err;
+
+	rcu_read_lock();
+	tc = memcg_tier_counter_find(memcg, tier_id);
+	rcu_read_unlock();
+	if (!tc)
+		return -ENOENT;
+
+	if (!tier_id_to_nodemask(tier_id, &nodes) && !nodes_empty(nodes))
+		nmp = &nodes;
+
+	if (!strcmp(knob, "high")) {
+		spin_lock(&memcg->tier_lock);
+		WRITE_ONCE(tc->high_derived, false);
+		page_counter_set_high(&tc->counter, val);
+		spin_unlock(&memcg->tier_lock);
+	} else {
+		spin_lock(&memcg->tier_lock);
+		WRITE_ONCE(tc->max_derived, false);
+		xchg(&tc->counter.max, val);
+		spin_unlock(&memcg->tier_lock);
+	}
+
+	if (of->file->f_flags & O_NONBLOCK)
+		return nbytes;
+
+	for (;;) {
+		unsigned long nr_pages = page_counter_read(&tc->counter);
+
+		if (nr_pages <= val)
+			break;
+		if (signal_pending(current))
+			break;
+		if (!drained) {
+			drain_all_tier_stock(memcg);
+			drained = true;
+			continue;
+		}
+		if (reclaim_tier(memcg, nr_pages - val, GFP_KERNEL, nmp))
+			continue;
+		if (nr_retries) {
+			nr_retries--;
+			continue;
+		}
+		if (!strcmp(knob, "max")) {
+			memcg_memory_event(memcg, MEMCG_OOM);
+			if (!mem_cgroup_out_of_memory(memcg, GFP_KERNEL, 0))
+				break;
+			cond_resched();
+		} else {
+			break;
+		}
+	}
+
 	return nbytes;
 }
 
@@ -5039,6 +5733,12 @@ static struct cftype memory_files[] = {
 		.write = memory_max_write,
 	},
 	{
+		.name = "tier",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.seq_show = memory_tier_show,
+		.write = memory_tier_write,
+	},
+	{
 		.name = "events",
 		.flags = CFTYPE_NOT_ON_ROOT,
 		.file_offset = offsetof(struct mem_cgroup, events_file),
@@ -5123,8 +5823,17 @@ static int charge_memcg(struct folio *folio, struct mem_cgroup *memcg,
 
 	objcg = get_obj_cgroup_from_memcg(memcg);
 	/* Do not account at the root objcg level. */
-	if (!obj_cgroup_is_root(objcg))
+	if (!obj_cgroup_is_root(objcg)) {
 		ret = try_charge_memcg(memcg, gfp, folio_nr_pages(folio));
+		if (!ret) {
+			int tid = node_to_tier_id(folio_nid(folio));
+
+			ret = try_charge_memcg_tier(memcg, gfp, folio_nr_pages(folio), tid);
+			/* tier over max / OOM: undo the memory charge */
+			if (ret)
+				refill_stock(memcg, folio_nr_pages(folio));
+		}
+	}
 	if (ret) {
 		obj_cgroup_put(objcg);
 		return ret;
@@ -5284,8 +5993,12 @@ static void uncharge_folio(struct folio *folio, struct uncharge_gather *ug)
 		ug->nr_kmem += nr_pages;
 	} else {
 		/* LRU pages aren't accounted at the root level */
-		if (!obj_cgroup_is_root(objcg))
+		if (!obj_cgroup_is_root(objcg)) {
 			ug->nr_memory += nr_pages;
+			refill_tier_stock(obj_cgroup_memcg(objcg),
+				node_to_tier_id(folio_nid(folio)),
+				nr_pages);
+		}
 		ug->pgpgout++;
 
 		WARN_ON_ONCE(folio_unqueue_deferred_split(folio));
@@ -5360,6 +6073,7 @@ void mem_cgroup_replace_folio(struct folio *old, struct folio *new)
 		page_counter_charge(&memcg->memory, nr_pages);
 		if (do_memsw_account())
 			page_counter_charge(&memcg->memsw, nr_pages);
+		memcg_charge_tier(memcg, new, nr_pages);
 	}
 
 	obj_cgroup_get(objcg);
@@ -5401,6 +6115,18 @@ void mem_cgroup_migrate(struct folio *old, struct folio *new)
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_hugetlb(old) && !objcg, old);
 	if (!objcg)
 		return;
+
+	/* Re-account the per-tier breakdown if the folio moved across tiers. */
+	if (!obj_cgroup_is_root(objcg)) {
+		struct mem_cgroup *memcg = obj_cgroup_memcg(objcg);
+		int old_tier = node_to_tier_id(folio_nid(old));
+		int new_tier = node_to_tier_id(folio_nid(new));
+
+		if (old_tier != new_tier) {
+			memcg_uncharge_tier_id(memcg, old_tier, folio_nr_pages(old));
+			memcg_charge_tier_id(memcg, new_tier, folio_nr_pages(new));
+		}
+	}
 
 	/* Transfer the charge and the objcg ref */
 	commit_charge(new, objcg);
@@ -5535,6 +6261,54 @@ __setup("cgroup.memory=", cgroup_memory);
  * basically everything that doesn't depend on a specific mem_cgroup structure
  * should be initialized from here.
  */
+#if defined(CONFIG_MEMORY_HOTPLUG) && defined(CONFIG_NUMA)
+/*
+ * Below MEMTIER_HOTPLUG_PRI (100): run after memory-tiers has set or
+ * cleared the node's tier association.
+ */
+#define MEMCG_TIER_NODE_PRI		90
+
+/* Memory hotplug callback: a node came online with a potentially new tier
+ * (e.g. CXL hotplug). Ensure every online memcg has a counter for this tier.
+ * Existing tiers hit in the RCU lookup, so this path does not allocate.
+ */
+static int __meminit memcg_tier_hotplug_cb(struct notifier_block *self,
+					    unsigned long action, void *_arg)
+{
+	struct node_notify *nn = _arg;
+	struct mem_cgroup *memcg;
+	int tid;
+
+	if (!mem_cgroup_tiered_limits())
+		return notifier_from_errno(0);
+
+	switch (action) {
+	case NODE_ADDED_FIRST_MEMORY:
+		tid = node_to_tier_id(nn->nid);
+		if (tid < 0)
+			return notifier_from_errno(0);
+
+		update_tier_capacity_cache();
+		for_each_mem_cgroup(memcg) {
+			if (!mem_cgroup_is_root(memcg) &&
+			    memcg_tier_counter_create(memcg, parent_mem_cgroup(memcg), tid))
+				pr_warn_ratelimited("memcg: tier %d counter alloc failed;"
+						     " tier accounting degraded\n", tid);
+		}
+		for_each_mem_cgroup(memcg)
+			tier_update_derived_limits(memcg);
+		break;
+	case NODE_REMOVED_LAST_MEMORY:
+		/* Node memory removed: refresh capacity and derived limits. */
+		update_tier_capacity_cache();
+		for_each_mem_cgroup(memcg)
+			tier_update_derived_limits(memcg);
+		break;
+	}
+	return notifier_from_errno(0);
+}
+#endif
+
 int __init mem_cgroup_init(void)
 {
 	unsigned int memcg_size;
@@ -5554,11 +6328,19 @@ int __init mem_cgroup_init(void)
 	memcg_wq = alloc_workqueue("memcg", WQ_PERCPU, 0);
 	WARN_ON(!memcg_wq);
 
+	update_tier_capacity_cache();
+
+#if defined(CONFIG_MEMORY_HOTPLUG) && defined(CONFIG_NUMA)
+	hotplug_node_notifier(memcg_tier_hotplug_cb, MEMCG_TIER_NODE_PRI);
+#endif
+
 	for_each_possible_cpu(cpu) {
 		INIT_WORK(&per_cpu_ptr(&memcg_stock, cpu)->work,
 			  drain_local_memcg_stock);
 		INIT_WORK(&per_cpu_ptr(&obj_stock, cpu)->work,
 			  drain_local_obj_stock);
+		INIT_WORK(&per_cpu(tier_stock, cpu).work,
+			  drain_local_tier_stock);
 	}
 
 	memcg_size = struct_size_t(struct mem_cgroup, nodeinfo, nr_node_ids);

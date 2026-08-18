@@ -199,6 +199,16 @@ struct obj_cgroup {
  * statistics based on the statistics developed by Rik Van Riel for clock-pro,
  * to help the administrator determine what knobs to tune.
  */
+
+struct memcg_tier_counter {
+	struct page_counter counter;
+	int tier_id;
+	struct list_head list;
+	struct rcu_head rcu;
+	bool max_derived;	/* true: derive from memory.max by capacity ratio */
+	bool high_derived;	/* true: derive from memory.high by capacity ratio */
+};
+
 struct mem_cgroup {
 	struct cgroup_subsys_state css;
 
@@ -319,6 +329,10 @@ struct mem_cgroup {
 	struct list_head event_list;
 	spinlock_t event_list_lock;
 #endif /* CONFIG_MEMCG_V1 */
+
+	spinlock_t tier_lock;
+	struct list_head tier_counters;
+	struct work_struct tier_high_work;
 
 	struct mem_cgroup_per_node *nodeinfo[];
 };
@@ -529,6 +543,18 @@ static inline bool mem_cgroup_disabled(void)
 {
 	return !cgroup_subsys_enabled(memory_cgrp_subsys);
 }
+
+#ifdef CONFIG_NUMA
+static inline bool mem_cgroup_tiered_limits(void)
+{
+	return cgrp_dfl_root.flags & CGRP_ROOT_MEMORY_TIERED_LIMITS;
+}
+#else
+static inline bool mem_cgroup_tiered_limits(void)
+{
+	return false;
+}
+#endif
 
 static inline void mem_cgroup_protection(struct mem_cgroup *root,
 					 struct mem_cgroup *memcg,
