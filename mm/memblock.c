@@ -2896,6 +2896,7 @@ static int memblock_debug_show(struct seq_file *m, void *private)
 	int i, j, nid;
 	unsigned int count = ARRAY_SIZE(flagname);
 	phys_addr_t end;
+	bool first;
 
 	for (i = 0; i < type->cnt; i++) {
 		reg = &type->regions[i];
@@ -2909,14 +2910,18 @@ static int memblock_debug_show(struct seq_file *m, void *private)
 		else
 			seq_printf(m, "%4c ", 'x');
 		if (reg->flags) {
+			first = true;
 			for (j = 0; j < count; j++) {
-				if (reg->flags & (1U << j)) {
-					seq_printf(m, "%s\n", flagname[j]);
-					break;
-				}
+				if (!(reg->flags & (1U << j)))
+					continue;
+				if (!first)
+					seq_putc(m, '|');
+				seq_puts(m, flagname[j] ?: "UNKNOWN");
+				first = false;
 			}
-			if (j == count)
-				seq_printf(m, "%s\n", "UNKNOWN");
+			if (first)
+				seq_puts(m, "UNKNOWN");
+			seq_putc(m, '\n');
 		} else {
 			seq_printf(m, "%s\n", "NONE");
 		}
