@@ -7441,12 +7441,6 @@ static void wait_subpage_spinlock(struct folio *folio)
 	spin_unlock_irq(&bfs->lock);
 }
 
-static int btrfs_launder_folio(struct folio *folio)
-{
-	return btrfs_qgroup_free_data(folio_to_inode(folio), NULL, folio_pos(folio),
-				      folio_size(folio), NULL);
-}
-
 static bool __btrfs_release_folio(struct folio *folio, gfp_t gfp_flags)
 {
 	if (try_release_extent_mapping(folio, gfp_flags)) {
@@ -9845,9 +9839,8 @@ ssize_t btrfs_do_encoded_write(struct kiocb *iocb, struct iov_iter *from,
 		ret = btrfs_wait_ordered_range(inode, start, num_bytes);
 		if (ret)
 			goto out_cb;
-		ret = invalidate_inode_pages2_range(inode->vfs_inode.i_mapping,
-						    start >> PAGE_SHIFT,
-						    end >> PAGE_SHIFT);
+		ret = filemap_invalidate_pages(inode->vfs_inode.i_mapping,
+				start, end);
 		if (ret)
 			goto out_cb;
 		btrfs_lock_extent(io_tree, start, end, &cached_state);
@@ -10564,7 +10557,6 @@ static const struct address_space_operations btrfs_aops = {
 	.writepages	= btrfs_writepages,
 	.readahead	= btrfs_readahead,
 	.invalidate_folio = btrfs_invalidate_folio,
-	.launder_folio	= btrfs_launder_folio,
 	.release_folio	= btrfs_release_folio,
 	.migrate_folio	= btrfs_migrate_folio,
 	.dirty_folio	= filemap_dirty_folio,

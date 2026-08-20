@@ -3308,7 +3308,8 @@ static void invalidate_and_check_btree_folios(struct btrfs_fs_info *fs_info)
 	struct extent_buffer *eb;
 	int ret;
 
-	ret = invalidate_inode_pages2(fs_info->btree_inode->i_mapping);
+	ret = filemap_invalidate_pages(fs_info->btree_inode->i_mapping, 0,
+			OFFSET_MAX);
 	if (likely(ret == 0))
 		return;
 
@@ -3343,7 +3344,8 @@ static void invalidate_and_check_btree_folios(struct btrfs_fs_info *fs_info)
 		rcu_read_lock();
 	}
 	rcu_read_unlock();
-	invalidate_inode_pages2(fs_info->btree_inode->i_mapping);
+	filemap_invalidate_pages(fs_info->btree_inode->i_mapping, 0,
+			OFFSET_MAX);
 }
 
 static u32 calc_block_max_order(u32 sectorsize_bits)
@@ -4714,7 +4716,8 @@ static void btrfs_destroy_delalloc_inodes(struct btrfs_root *root)
 			unsigned int nofs_flag;
 
 			nofs_flag = memalloc_nofs_save();
-			invalidate_inode_pages2(inode->i_mapping);
+			filemap_invalidate_pages(inode->i_mapping, 0,
+					OFFSET_MAX);
 			memalloc_nofs_restore(nofs_flag);
 			iput(inode);
 		}
@@ -4812,7 +4815,7 @@ static void btrfs_cleanup_bg_io(struct btrfs_block_group *cache)
 		unsigned int nofs_flag;
 
 		nofs_flag = memalloc_nofs_save();
-		invalidate_inode_pages2(inode->i_mapping);
+		filemap_invalidate_pages(inode->i_mapping, 0, OFFSET_MAX);
 		memalloc_nofs_restore(nofs_flag);
 
 		BTRFS_I(inode)->generation = 0;
