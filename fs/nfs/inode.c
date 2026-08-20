@@ -1323,7 +1323,8 @@ void nfs_file_clear_open_context(struct file *filp)
 		 * every page again.
 		 */
 		if (ctx->error < 0)
-			invalidate_inode_pages2(inode->i_mapping);
+			filemap_invalidate_pages(inode->i_mapping, 0,
+					OFFSET_MAX);
 		filp->private_data = NULL;
 		put_nfs_open_context_sync(ctx);
 	}
@@ -1461,7 +1462,7 @@ static int nfs_invalidate_mapping(struct inode *inode, struct address_space *map
 			if (ret < 0)
 				return ret;
 		}
-		ret = invalidate_inode_pages2(mapping);
+		ret = filemap_invalidate_pages(mapping, 0, OFFSET_MAX);
 		if (ret < 0)
 			return ret;
 	}
