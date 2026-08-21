@@ -4,6 +4,7 @@
 
 #include <linux/debugfs.h>
 #include <linux/kobject.h>
+#include <linux/cma.h>
 
 struct cma_kobject {
 	struct kobject kobj;
@@ -78,6 +79,11 @@ static inline unsigned long cma_bitmap_maxno(struct cma *cma,
 		struct cma_memrange *cmr)
 {
 	return cmr->count >> cma->order_per_bit;
+}
+
+static inline int cma_area_index(const struct cma *cma)
+{
+	return cma - cma_areas;
 }
 
 #ifdef CONFIG_CMA_SYSFS

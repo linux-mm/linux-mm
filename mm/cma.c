@@ -25,7 +25,6 @@
 #include <linux/string.h>
 #include <linux/string_choices.h>
 #include <linux/log2.h>
-#include <linux/cma.h>
 #include <linux/highmem.h>
 #include <linux/io.h>
 #include <linux/kmemleak.h>
@@ -905,6 +904,12 @@ static struct page *__cma_alloc_frozen(struct cma *cma,
 		cma_debug_show_areas(cma);
 	}
 
+	if (page && mem_cgroup_charge_cma(page, count, cma)) {
+		free_contig_frozen_range(page_to_pfn(page), count);
+		cma_clear_bitmap(cma, &cma->ranges[r], page_to_pfn(page), count);
+		page = NULL;
+	}
+
 	pr_debug("%s(): returned %p\n", __func__, page);
 	trace_cma_alloc_finish(name, page ? page_to_pfn(page) : 0,
 			       page, count, align, ret);
@@ -992,12 +997,13 @@ static struct cma_memrange *find_cma_memrange(struct cma *cma,
 }
 
 static void __cma_release_frozen(struct cma *cma, struct cma_memrange *cmr,
-		const struct page *pages, unsigned long count)
+		struct page *pages, unsigned long count)
 {
 	unsigned long pfn = page_to_pfn(pages);
 
 	pr_debug("%s(page %p, count %lu)\n", __func__, (void *)pages, count);
 
+	mem_cgroup_uncharge_cma(pages, count, cma);
 	free_contig_frozen_range(pfn, count);
 	cma_clear_bitmap(cma, cmr, pfn, count);
 	cma_sysfs_account_release_pages(cma, count);
@@ -1014,7 +1020,7 @@ static void __cma_release_frozen(struct cma *cma, struct cma_memrange *cmr,
  * It returns false when provided pages do not belong to contiguous area and
  * true otherwise.
  */
-bool cma_release(struct cma *cma, const struct page *pages,
+bool cma_release(struct cma *cma, struct page *pages,
 		 unsigned long count)
 {
 	struct cma_memrange *cmr;
@@ -1037,7 +1043,7 @@ bool cma_release(struct cma *cma, const struct page *pages,
 }
 EXPORT_SYMBOL_GPL(cma_release);
 
-bool cma_release_frozen(struct cma *cma, const struct page *pages,
+bool cma_release_frozen(struct cma *cma, struct page *pages,
 		unsigned long count)
 {
 	struct cma_memrange *cmr;
