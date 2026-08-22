@@ -316,10 +316,10 @@ struct mod_tree_node {
 };
 
 enum mod_mem_type {
-	MOD_TEXT = 0,
-	MOD_DATA,
+	MOD_DATA = 0,
 	MOD_RODATA,
 	MOD_RO_AFTER_INIT,
+	MOD_TEXT,
 	MOD_INIT_TEXT,
 	MOD_INIT_DATA,
 	MOD_INIT_RODATA,
