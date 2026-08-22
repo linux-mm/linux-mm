@@ -178,6 +178,15 @@ void execmem_free(void *ptr);
 
 DEFINE_FREE(execmem, void *, if (_T) execmem_free(_T));
 
+/**
+ * execmem_split - allocate space from an existing execmem cache allocation
+ * @ptr  - the existing execmem cache allocation
+ * @size - the size to carve out from the existing allocation
+ *
+ * Return: the address of the carved out allocation, or %NULL on failure.
+ */
+void *execmem_split(void *ptr, size_t size);
+
 #ifdef CONFIG_MMU
 /**
  * execmem_vmap - create virtual mapping for EXECMEM_MODULE_DATA memory
