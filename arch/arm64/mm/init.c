@@ -540,7 +540,8 @@ struct execmem_info __init *execmem_arch_setup(void)
 			[EXECMEM_DEFAULT] = {
 				.start	= start,
 				.end	= end,
-				.pgprot	= PAGE_KERNEL,
+				.pgprot	= PAGE_KERNEL_ROX,
+				.flags	= EXECMEM_ROX_CACHE,
 				.alignment = 1,
 				.fallback_start	= fallback_start,
 				.fallback_end	= fallback_end,
@@ -557,9 +558,25 @@ struct execmem_info __init *execmem_arch_setup(void)
 				.pgprot	= PAGE_KERNEL,
 				.alignment = 1,
 			},
+			[EXECMEM_MODULE_DATA] = {
+				.start	= start,
+				.end	= end,
+				.pgprot	= PAGE_KERNEL,
+				.alignment = 1,
+				.fallback_start	= fallback_start,
+				.fallback_end	= fallback_end,
+			},
 		},
 	};
 
+	if (!system_supports_bbml2_noabort())
+		execmem_info.ranges[EXECMEM_DEFAULT].flags |= EXECMEM_NO_HUGE_VMAP;
+
 	return &execmem_info;
+}
+
+void execmem_fill_trapping_insns(void *ptr, size_t size)
+{
+	memset32(ptr, AARCH64_BREAK_FAULT, size / sizeof(__le32));
 }
 #endif /* CONFIG_EXECMEM */
