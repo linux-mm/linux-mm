@@ -169,8 +169,6 @@ static int change_memory_common(unsigned long addr, int numpages,
 	 * we are operating on does not result in such splitting.
 	 *
 	 * Let's restrict ourselves to mappings created by vmalloc (or vmap).
-	 * Disallow VM_ALLOW_HUGE_VMAP mappings to guarantee that only page
-	 * mappings are updated and splitting is never needed.
 	 *
 	 * So check whether the [addr, addr + size) interval is entirely
 	 * covered by precisely one VM area that has the VM_ALLOC flag set.
@@ -179,7 +177,16 @@ static int change_memory_common(unsigned long addr, int numpages,
 	if (!area ||
 	    ((unsigned long)kasan_reset_tag((void *)end) >
 	     (unsigned long)kasan_reset_tag(area->addr) + area->size) ||
-	    ((area->flags & (VM_ALLOC | VM_ALLOW_HUGE_VMAP)) != VM_ALLOC))
+	    !(area->flags & VM_ALLOC))
+               return -EINVAL;
+
+	/*
+	 * Disallow VM_ALLOW_HUGE_VMAP mappings unless the region is PMD
+	 * aligned, or splitting live huge mappings is supported.
+	 */
+	if ((area->flags & VM_ALLOW_HUGE_VMAP) &&
+	   ((start % PMD_SIZE) || (size % PMD_SIZE)) &&
+	   WARN_ON_ONCE(!system_supports_bbml2_noabort()))
 		return -EINVAL;
 
 	if (!numpages)
