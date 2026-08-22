@@ -1342,7 +1342,7 @@ static int module_memory_alloc(struct module *mod, enum mod_mem_type type)
 {
 	unsigned int size = PAGE_ALIGN(mod->mem[type].size);
 	enum execmem_type execmem_type;
-	void *ptr;
+	void *ptr = NULL;
 
 	mod->mem[type].size = size;
 
@@ -1351,11 +1351,25 @@ static int module_memory_alloc(struct module *mod, enum mod_mem_type type)
 	else
 		execmem_type = EXECMEM_MODULE_TEXT;
 
-	ptr = execmem_alloc_rw(execmem_type, size);
+	bool is_rox = execmem_is_rox(execmem_type);
+	if (is_rox) {
+		/*
+		 * Special case for MOD_TEXT / MOD_INIT_TEXT: allocate the
+		 * latter by splitting off required space from the former
+		 * so that they are always placed close together.
+		 */
+		if (type == MOD_TEXT)
+			size += PAGE_ALIGN(mod->mem[MOD_INIT_TEXT].size);
+		else if (type == MOD_INIT_TEXT)
+			ptr = execmem_split(mod->mem[MOD_TEXT].base, size);
+	}
+
+	if (!ptr)
+		ptr = execmem_alloc_rw(execmem_type, size);
 	if (!ptr)
 		return -ENOMEM;
 
-	mod->mem[type].is_rox = execmem_is_rox(execmem_type);
+	mod->mem[type].is_rox = is_rox;
 
 	/*
 	 * The pointer to these blocks of memory are stored on the module
@@ -1368,7 +1382,7 @@ static int module_memory_alloc(struct module *mod, enum mod_mem_type type)
 	 * *do* eventually get freed, but let's just keep things simple
 	 * and avoid *any* false positives.
 	 */
-	if (!mod->mem[type].is_rox)
+	if (!is_rox)
 		kmemleak_not_leak(ptr);
 
 	memset(ptr, 0, size);
