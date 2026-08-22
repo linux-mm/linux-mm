@@ -1,6 +1,5 @@
 SECTIONS {
 	.plt 0 : { BYTE(0) }
-	.text.ftrace_trampoline 0 : { BYTE(0) }
 
 #ifdef CONFIG_UNWIND_TABLES
 	/*

@@ -454,14 +454,7 @@ static int module_init_ftrace_plt(const Elf_Ehdr *hdr,
 				  struct module *mod)
 {
 #if defined(CONFIG_DYNAMIC_FTRACE)
-	const Elf_Shdr *s;
-	struct plt_entry *plts;
-
-	s = find_section(hdr, sechdrs, ".text.ftrace_trampoline");
-	if (!s)
-		return -ENOEXEC;
-
-	plts = (void *)s->sh_addr;
+	struct plt_entry *plts = (void *)sechdrs[mod->arch.core.plt_shndx].sh_addr;
 
 	__init_plt(&plts[FTRACE_PLT_IDX], FTRACE_ADDR);
 
