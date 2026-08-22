@@ -252,7 +252,8 @@ static void *__execmem_cache_alloc(struct execmem_range *range, size_t size)
 
 static void *execmem_cache_populate_alloc(struct execmem_range *range, size_t size)
 {
-	unsigned long vm_flags = VM_ALLOW_HUGE_VMAP;
+	unsigned long vm_flags = (range->flags & EXECMEM_NO_HUGE_VMAP)
+						? 0 : VM_ALLOW_HUGE_VMAP;
 	struct mutex *mutex = &execmem_cache.mutex;
 	struct vm_struct *vm;
 	size_t alloc_size;
