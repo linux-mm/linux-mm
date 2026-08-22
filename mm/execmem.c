@@ -414,6 +414,33 @@ static bool execmem_cache_free(void *ptr)
 	return true;
 }
 
+static void *execmem_cache_split(void *ptr, size_t size)
+{
+	struct maple_tree *busy_areas = &execmem_cache.busy_areas;
+	unsigned long addr = (unsigned long)ptr;
+	MA_STATE(mas, busy_areas, addr, addr);
+	void *area;
+	int err;
+
+	guard(mutex)(&execmem_cache.mutex);
+
+	area = mas_walk(&mas);
+	if (!area)
+		return ERR_PTR(-ENOENT);
+
+	if (size >= mas_range_len(&mas))
+		return ERR_PTR(-EINVAL);
+
+	addr += mas_range_len(&mas) - size;
+	mas_set_range(&mas, addr, mas.last);
+
+	err = mas_store_gfp(&mas, (void *)addr, GFP_KERNEL);
+	if (err)
+		return ERR_PTR(err);
+
+	return (void *)addr;
+}
+
 #else /* CONFIG_ARCH_HAS_EXECMEM_ROX */
 /*
  * when ROX cache is not used the permissions defined by architectures for
@@ -433,6 +460,11 @@ static void *execmem_cache_alloc(struct execmem_range *range, size_t size)
 static bool execmem_cache_free(void *ptr)
 {
 	return false;
+}
+
+static void *execmem_cache_split(void *ptr, size_t size)
+{
+	return ERR_PTR(-ENOENT);
 }
 #endif /* CONFIG_ARCH_HAS_EXECMEM_ROX */
 
@@ -484,6 +516,18 @@ void execmem_free(void *ptr)
 bool execmem_is_rox(enum execmem_type type)
 {
 	return !!(execmem_info->ranges[type].flags & EXECMEM_ROX_CACHE);
+}
+
+void *execmem_split(void *ptr, size_t size)
+{
+	if (!ptr || !size)
+		return NULL;
+
+	ptr = execmem_cache_split(ptr, size);
+	if (!IS_ERR(ptr))
+		return ptr;
+	VM_WARN_ON(ptr != ERR_PTR(-ENOMEM));
+	return NULL;
 }
 
 static bool execmem_validate(struct execmem_info *info)
