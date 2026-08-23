@@ -720,13 +720,13 @@ struct vm_region {
 };
 
 #ifdef CONFIG_USERFAULTFD
-#define NULL_VM_UFFD_CTX ((struct vm_userfaultfd_ctx) { NULL, })
-struct vm_userfaultfd_ctx {
+#define NULL_VM_UFFD_STATE ((struct vm_uffd_state) { NULL, })
+struct vm_uffd_state {
 	struct userfaultfd_ctx *ctx;
 };
 #else /* CONFIG_USERFAULTFD */
-#define NULL_VM_UFFD_CTX ((struct vm_userfaultfd_ctx) {})
-struct vm_userfaultfd_ctx {};
+#define NULL_VM_UFFD_STATE ((struct vm_uffd_state) {})
+struct vm_uffd_state {};
 #endif /* CONFIG_USERFAULTFD */
 
 struct anon_vma_name {
@@ -1068,7 +1068,7 @@ struct vm_area_struct {
 	 */
 	struct anon_vma_name *anon_name;
 #endif
-	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+	struct vm_uffd_state vm_uffd_state;
 #ifdef __HAVE_PFNMAP_TRACKING
 	struct pfnmap_track_ctx *pfnmap_track_ctx;
 #endif

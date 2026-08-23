@@ -229,8 +229,8 @@ These are the core fields which describe the MM the VMA belongs to and its attri
                                                            NUMA balancing in relation to this VMA.  lock.
                                                            Updated under mmap read lock by
                                                            :c:func:`!task_numa_work`.
-   :c:member:`!vm_userfaultfd_ctx`   CONFIG_USERFAULTFD    Userfaultfd context wrapper object of    mmap write,
-                                                           type :c:type:`!vm_userfaultfd_ctx`,      VMA write.
+   :c:member:`!vm_uffd_state`        CONFIG_USERFAULTFD    Userfaultfd context wrapper object of    mmap write,
+                                                           type :c:type:`!vm_uffd_state`,           VMA write.
                                                            either of zero size if userfaultfd is
                                                            disabled, or containing a pointer
                                                            to an underlying
