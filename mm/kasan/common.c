@@ -119,7 +119,7 @@ asmlinkage void kasan_unpoison_task_stack_below(const void *watermark)
 	 * because this function is called by early resume code which hasn't
 	 * yet set up the percpu register (%gs).
 	 */
-	void *base = (void *)((unsigned long)watermark & ~(THREAD_SIZE - 1));
+	void *base = (void *)ALIGN_DOWN((unsigned long)watermark, THREAD_SIZE);
 
 	kasan_unpoison(base, watermark - base, false);
 }
@@ -188,7 +188,7 @@ static inline u8 assign_tag(struct kmem_cache *cache,
 					const void *object, bool init)
 {
 	if (IS_ENABLED(CONFIG_KASAN_GENERIC))
-		return 0xff;
+		return KASAN_TAG_KERNEL;
 
 	/*
 	 * If the cache neither has a constructor nor has SLAB_TYPESAFE_BY_RCU
@@ -340,14 +340,19 @@ static inline void unpoison_slab_object(struct kmem_cache *cache, void *object,
 		kasan_save_alloc_info(cache, object, flags);
 }
 
+static inline void kasan_quarantine_reduce_cond(gfp_t flags)
+{
+	if (gfpflags_allow_blocking(flags))
+		kasan_quarantine_reduce();
+}
+
 void * __must_check __kasan_slab_alloc(struct kmem_cache *cache,
 					void *object, gfp_t flags, bool init)
 {
 	u8 tag;
 	void *tagged_object;
 
-	if (gfpflags_allow_blocking(flags))
-		kasan_quarantine_reduce();
+	kasan_quarantine_reduce_cond(flags);
 
 	if (unlikely(object == NULL))
 		return NULL;
@@ -402,8 +407,7 @@ static inline void poison_kmalloc_redzone(struct kmem_cache *cache,
 void * __must_check __kasan_kmalloc(struct kmem_cache *cache, const void *object,
 					size_t size, gfp_t flags)
 {
-	if (gfpflags_allow_blocking(flags))
-		kasan_quarantine_reduce();
+	kasan_quarantine_reduce_cond(flags);
 
 	if (unlikely(object == NULL))
 		return NULL;
@@ -443,8 +447,7 @@ static inline void poison_kmalloc_large_redzone(const void *ptr, size_t size,
 void * __must_check __kasan_kmalloc_large(const void *ptr, size_t size,
 						gfp_t flags)
 {
-	if (gfpflags_allow_blocking(flags))
-		kasan_quarantine_reduce();
+	kasan_quarantine_reduce_cond(flags);
 
 	if (unlikely(ptr == NULL))
 		return NULL;
@@ -460,8 +463,7 @@ void * __must_check __kasan_krealloc(const void *object, size_t size, gfp_t flag
 {
 	struct slab *slab;
 
-	if (gfpflags_allow_blocking(flags))
-		kasan_quarantine_reduce();
+	kasan_quarantine_reduce_cond(flags);
 
 	if (unlikely(object == ZERO_SIZE_PTR))
 		return (void *)object;
