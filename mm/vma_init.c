@@ -62,8 +62,8 @@ static void vm_area_init_from(const struct vm_area_struct *src,
 	 * dup_mmap(), but the clone will reinitialize it.
 	 */
 	data_race(memcpy(&dest->shared, &src->shared, sizeof(dest->shared)));
-	memcpy(&dest->vm_userfaultfd_ctx, &src->vm_userfaultfd_ctx,
-	       sizeof(dest->vm_userfaultfd_ctx));
+	memcpy(&dest->vm_uffd_state, &src->vm_uffd_state,
+	       sizeof(dest->vm_uffd_state));
 #ifdef CONFIG_ANON_VMA_NAME
 	dest->anon_name = src->anon_name;
 #endif
