@@ -29,6 +29,11 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 
+#ifdef CONFIG_BPF_SYSCALL
+#include <linux/bpf.h>
+#include <linux/filter.h>
+#endif
+
 #include "internal.h"
 
 #ifdef DEBUG
@@ -41,11 +46,13 @@ enum {
 	VERBOSE_STATUS = 1 /* make it zero to save 400 bytes kernel memory */
 };
 
-enum {Enabled, Magic};
+enum {Enabled, Magic, Bpf};
 #define MISC_FMT_PRESERVE_ARGV0 (1UL << 31)
 #define MISC_FMT_OPEN_BINARY (1UL << 30)
 #define MISC_FMT_CREDENTIALS (1UL << 29)
 #define MISC_FMT_OPEN_FILE (1UL << 28)
+
+struct bpf_prog;
 
 typedef struct {
 	struct list_head list;
@@ -59,6 +66,9 @@ typedef struct {
 	struct dentry *dentry;
 	struct file *interp_file;
 	refcount_t users;		/* sync removal with load_misc_binary() */
+#ifdef CONFIG_BPF_SYSCALL
+	struct bpf_prog *bpf_prog;
+#endif
 } Node;
 
 static struct file_system_type bm_fs_type;
@@ -78,10 +88,51 @@ static struct file_system_type bm_fs_type;
  */
 #define MAX_REGISTER_LENGTH 1920
 
+#ifdef CONFIG_BPF_SYSCALL
+struct binfmt_bpf_interp {
+	char path[PATH_MAX];
+	int len;	/* < 0 if the current program set no interpreter */
+};
+static DEFINE_PER_CPU(struct binfmt_bpf_interp, binfmt_bpf_interp);
+
+/*
+ * bpf_binprm_set_interp - let a binfmt_misc 'B' program pick the interpreter.
+ * @path: interpreter path, in BPF-accessible memory
+ * @len:  number of bytes in @path
+ *
+ * The program computes the interpreter path however it sees fit (e.g. relative
+ * to the binary). The path is stashed on a per-CPU area that binfmt_misc reads
+ * back immediately after running the program under migrate_disable(), so it
+ * cannot race with another CPU.
+ */
+BPF_CALL_2(bpf_binprm_set_interp, const char *, path, u32, len)
+{
+	struct binfmt_bpf_interp *sc = this_cpu_ptr(&binfmt_bpf_interp);
+
+	if (len == 0 || len >= PATH_MAX)
+		return -EINVAL;
+	/* @path is @len bytes of BPF memory and is not NUL-terminated. */
+	memcpy(sc->path, path, len);
+	sc->path[len] = '\0';
+	sc->len = len;
+	return 0;
+}
+
+const struct bpf_func_proto bpf_binprm_set_interp_proto = {
+	.func		= bpf_binprm_set_interp,
+	.gpl_only	= false,
+	.ret_type	= RET_INTEGER,
+	.arg1_type	= ARG_PTR_TO_MEM | MEM_RDONLY,
+	.arg2_type	= ARG_CONST_SIZE,
+};
+#endif /* CONFIG_BPF_SYSCALL */
+
 /**
  * search_binfmt_handler - search for a binary handler for @bprm
  * @misc: handle to binfmt_misc instance
  * @bprm: binary for which we are looking for a handler
+ * @bpf_interp: receives a kmalloc'd interpreter path if a 'B' program chooses
+ *              one via bpf_binprm_set_interp(); the caller must kfree() it
  *
  * Search for a binary type handler for @bprm in the list of registered binary
  * type handlers.
@@ -89,7 +140,8 @@ static struct file_system_type bm_fs_type;
  * Return: binary type list entry on success, NULL on failure
  */
 static Node *search_binfmt_handler(struct binfmt_misc *misc,
-				   struct linux_binprm *bprm)
+				   struct linux_binprm *bprm,
+				   char **bpf_interp)
 {
 	char *p = strrchr(bprm->interp, '.');
 	Node *e;
@@ -102,6 +154,37 @@ static Node *search_binfmt_handler(struct binfmt_misc *misc,
 		/* Make sure this one is currently enabled. */
 		if (!test_bit(Enabled, &e->flags))
 			continue;
+
+		/* Do matching based on BPF if applicable. */
+		if (test_bit(Bpf, &e->flags)) {
+#ifdef CONFIG_BPF_SYSCALL
+			if (e->bpf_prog) {
+				struct binfmt_bpf_interp *sc;
+				u32 ret;
+
+				migrate_disable();
+				sc = this_cpu_ptr(&binfmt_bpf_interp);
+				sc->len = -1;
+
+				rcu_read_lock();
+				ret = bpf_prog_run(e->bpf_prog, bprm->buf);
+				rcu_read_unlock();
+
+				if (ret == 1 && sc->len > 0)
+					*bpf_interp = kmemdup_nul(sc->path,
+								  sc->len,
+								  GFP_ATOMIC);
+				migrate_enable();
+
+				pr_debug("binfmt_misc: ran BPF program for %s, ret = %u\n",
+					 bprm->filename, ret);
+
+				if (ret == 1)
+					return e;
+			}
+#endif
+			continue;
+		}
 
 		/* Do matching based on extension if applicable. */
 		if (!test_bit(Magic, &e->flags)) {
@@ -139,12 +222,13 @@ static Node *search_binfmt_handler(struct binfmt_misc *misc,
  * Return: binary type list entry on success, NULL on failure
  */
 static Node *get_binfmt_handler(struct binfmt_misc *misc,
-				struct linux_binprm *bprm)
+				struct linux_binprm *bprm,
+				char **bpf_interp)
 {
 	Node *e;
 
 	read_lock(&misc->entries_lock);
-	e = search_binfmt_handler(misc, bprm);
+	e = search_binfmt_handler(misc, bprm, bpf_interp);
 	if (e)
 		refcount_inc(&e->users);
 	read_unlock(&misc->entries_lock);
@@ -164,6 +248,10 @@ static void put_binfmt_handler(Node *e)
 	if (refcount_dec_and_test(&e->users)) {
 		if (e->flags & MISC_FMT_OPEN_FILE)
 			filp_close(e->interp_file, NULL);
+#ifdef CONFIG_BPF_SYSCALL
+		if (test_bit(Bpf, &e->flags) && e->bpf_prog)
+			bpf_prog_put(e->bpf_prog);
+#endif
 		kfree(e);
 	}
 }
@@ -206,14 +294,26 @@ static int load_misc_binary(struct linux_binprm *bprm)
 	struct file *interp_file = NULL;
 	int retval = -ENOEXEC;
 	struct binfmt_misc *misc;
+	char *bpf_interp __free(kfree) = NULL;
+	const char *interpreter;
 
 	misc = load_binfmt_misc();
 	if (!misc->enabled)
 		return retval;
 
-	fmt = get_binfmt_handler(misc, bprm);
+	fmt = get_binfmt_handler(misc, bprm, &bpf_interp);
 	if (!fmt)
 		return retval;
+
+	/*
+	 * A 'B' (BPF) handler carries no interpreter of its own; the program
+	 * chooses it via bpf_binprm_set_interp(). Other handlers use the
+	 * interpreter recorded at registration.
+	 */
+	interpreter = bpf_interp ? bpf_interp : fmt->interpreter;
+	retval = -ENOEXEC;
+	if (!interpreter[0])
+		goto ret;
 
 	/* Need to be able to load the file after exec */
 	retval = -ENOENT;
@@ -235,22 +335,27 @@ static int load_misc_binary(struct linux_binprm *bprm)
 	bprm->argc++;
 
 	/* add the interp as argv[0] */
-	retval = copy_string_kernel(fmt->interpreter, bprm);
+	retval = copy_string_kernel(interpreter, bprm);
 	if (retval < 0)
 		goto ret;
 	bprm->argc++;
 
 	/* Update interp in case binfmt_script needs it. */
-	retval = bprm_change_interp(fmt->interpreter, bprm);
+	retval = bprm_change_interp(interpreter, bprm);
 	if (retval < 0)
 		goto ret;
 
-	if (fmt->flags & MISC_FMT_OPEN_FILE) {
+	/*
+	 * The pre-opened interp_file (MISC_FMT_OPEN_FILE / 'F' flag) only
+	 * applies to the statically registered interpreter; a program-supplied
+	 * path is opened here.
+	 */
+	if ((fmt->flags & MISC_FMT_OPEN_FILE) && !bpf_interp) {
 		interp_file = file_clone_open(fmt->interp_file);
 		if (!IS_ERR(interp_file))
 			deny_write_access(interp_file);
 	} else {
-		interp_file = open_exec(fmt->interpreter);
+		interp_file = open_exec(interpreter);
 	}
 	retval = PTR_ERR(interp_file);
 	if (IS_ERR(interp_file))
@@ -403,6 +508,10 @@ static Node *create_entry(const char __user *buffer, size_t count)
 		pr_debug("register: type: M (magic)\n");
 		e->flags = (1 << Enabled) | (1 << Magic);
 		break;
+	case 'B':
+		pr_debug("register: type: B (bpf)\n");
+		e->flags = (1 << Enabled) | (1 << Bpf);
+		break;
 	default:
 		goto einval;
 	}
@@ -491,6 +600,45 @@ static Node *create_entry(const char __user *buffer, size_t count)
 				}
 			}
 		}
+	} else if (test_bit(Bpf, &e->flags)) {
+		/* Handle the 'B' (BPF) format. */
+		char *s;
+
+		/* The offset field actually holds the pinned BPF program path */
+		s = strchr(p, del);
+		if (!s)
+			goto einval;
+		*s++ = '\0';
+		e->magic = p; /* Keep path in e->magic */
+		pr_debug("register: bpf program path: %s\n", e->magic);
+
+#ifdef CONFIG_BPF_SYSCALL
+		e->bpf_prog = bpf_prog_get_type_path(e->magic, BPF_PROG_TYPE_SOCKET_FILTER);
+		if (IS_ERR(e->bpf_prog)) {
+			err = PTR_ERR(e->bpf_prog);
+			e->bpf_prog = NULL;
+			kfree(e);
+			return ERR_PTR(err);
+		}
+#else
+		goto einval;
+#endif
+
+		p = s;
+
+		/* The magic field is unused, must be empty */
+		s = strchr(p, del);
+		if (!s || p != s)
+			goto einval;
+		*s++ = '\0';
+		p = s;
+
+		/* The mask field is unused, must be empty */
+		s = strchr(p, del);
+		if (!s || p != s)
+			goto einval;
+		*s++ = '\0';
+		p = s;
 	} else {
 		/* Handle the 'E' (extension) format. */
 
@@ -523,8 +671,17 @@ static Node *create_entry(const char __user *buffer, size_t count)
 	if (!p)
 		goto einval;
 	*p++ = '\0';
-	if (!e->interpreter[0])
+	if (test_bit(Bpf, &e->flags)) {
+		/*
+		 * A 'B' (BPF) handler carries no interpreter of its own; the
+		 * program picks it via bpf_binprm_set_interp(). Reject a
+		 * statically registered one.
+		 */
+		if (e->interpreter[0])
+			goto einval;
+	} else if (!e->interpreter[0]) {
 		goto einval;
+	}
 	pr_debug("register: interpreter: {%s}\n", e->interpreter);
 
 	/* Parse the 'flags' field. */
@@ -601,7 +758,9 @@ static void entry_status(Node *e, char *page)
 		*dp++ = 'F';
 	*dp++ = '\n';
 
-	if (!test_bit(Magic, &e->flags)) {
+	if (test_bit(Bpf, &e->flags)) {
+		sprintf(dp, "bpf %s\n", e->magic);
+	} else if (!test_bit(Magic, &e->flags)) {
 		sprintf(dp, "extension .%s\n", e->magic);
 	} else {
 		dp += sprintf(dp, "offset %i\nmagic ", e->offset);
