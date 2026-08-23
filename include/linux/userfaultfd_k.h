@@ -204,22 +204,22 @@ static inline bool uffd_disable_fault_around(struct vm_area_struct *vma)
 					VMA_UFFD_MINOR));
 }
 
-static inline bool userfaultfd_missing(struct vm_area_struct *vma)
+static inline bool userfaultfd_missing(const struct vm_area_struct *vma)
 {
 	return vma_test_any_mask(vma, VMA_UFFD_MISSING);
 }
 
-static inline bool userfaultfd_wp(struct vm_area_struct *vma)
+static inline bool userfaultfd_wp(const struct vm_area_struct *vma)
 {
 	return vma_test_any_mask(vma, VMA_UFFD_WP);
 }
 
-static inline bool userfaultfd_minor(struct vm_area_struct *vma)
+static inline bool userfaultfd_minor(const struct vm_area_struct *vma)
 {
 	return vma_test_any_mask(vma, VMA_UFFD_MINOR);
 }
 
-static inline bool userfaultfd_rwp(struct vm_area_struct *vma)
+static inline bool userfaultfd_rwp(const struct vm_area_struct *vma)
 {
 	/*
 	 * Callers gate PAGE_NONE usage on this; PAGE_NONE is a BUILD_BUG()
@@ -230,7 +230,7 @@ static inline bool userfaultfd_rwp(struct vm_area_struct *vma)
 	return vma_test_single_mask(vma, VMA_UFFD_RWP);
 }
 
-static inline bool userfaultfd_protected(struct vm_area_struct *vma)
+static inline bool userfaultfd_protected(const struct vm_area_struct *vma)
 {
 	return userfaultfd_wp(vma) || userfaultfd_rwp(vma);
 }
@@ -353,27 +353,27 @@ static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
 	return true;
 }
 
-static inline bool userfaultfd_missing(struct vm_area_struct *vma)
+static inline bool userfaultfd_missing(const struct vm_area_struct *vma)
 {
 	return false;
 }
 
-static inline bool userfaultfd_wp(struct vm_area_struct *vma)
+static inline bool userfaultfd_wp(const struct vm_area_struct *vma)
 {
 	return false;
 }
 
-static inline bool userfaultfd_minor(struct vm_area_struct *vma)
+static inline bool userfaultfd_minor(const struct vm_area_struct *vma)
 {
 	return false;
 }
 
-static inline bool userfaultfd_rwp(struct vm_area_struct *vma)
+static inline bool userfaultfd_rwp(const struct vm_area_struct *vma)
 {
 	return false;
 }
 
-static inline bool userfaultfd_protected(struct vm_area_struct *vma)
+static inline bool userfaultfd_protected(const struct vm_area_struct *vma)
 {
 	return false;
 }
