@@ -33,7 +33,7 @@ struct unmap_desc;
 
 #define ASSERT_EXCLUSIVE_WRITER(x)
 
-struct vm_userfaultfd_ctx {};
+struct vm_uffd_state {};
 struct mempolicy {};
 struct mmu_gather {};
 struct mutex {};
@@ -350,8 +350,8 @@ static inline struct anon_vma_name *anon_vma_name(struct vm_area_struct *vma)
 	return NULL;
 }
 
-static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
-					struct vm_userfaultfd_ctx vm_ctx)
+static inline bool is_mergeable_vm_uffd_state(struct vm_area_struct *vma,
+					struct vm_uffd_state vm_ctx)
 {
 	return true;
 }
