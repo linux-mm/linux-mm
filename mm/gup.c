@@ -12,6 +12,7 @@
 #include <linux/swap.h>
 #include <linux/swapops.h>
 #include <linux/secretmem.h>
+#include <linux/userfaultfd_k.h>
 
 #include <linux/sched/signal.h>
 #include <linux/rwsem.h>
@@ -641,7 +642,7 @@ static inline bool gup_can_follow_protnone(const struct vm_area_struct *vma,
 					   unsigned int flags)
 {
 	/*
-	 * VM_UFFD_RWP uses protnone as an access-tracking marker, not for
+	 * uffd-RWP uses protnone as an access-tracking marker, not for
 	 * NUMA hinting. GUP must always take a fault so the access is
 	 * delivered to userfaultfd, regardless of FOLL_HONOR_NUMA_FAULT.
 	 *
@@ -651,7 +652,7 @@ static inline bool gup_can_follow_protnone(const struct vm_area_struct *vma,
 	 * no progress on protnone in an inaccessible VMA, and the access is
 	 * denied regardless of RWP anyway.
 	 */
-	if (vma_test_single_mask(vma, VMA_UFFD_RWP) && vma_is_accessible(vma))
+	if (userfaultfd_rwp(vma) && vma_is_accessible(vma))
 		return false;
 
 	/*

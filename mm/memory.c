@@ -1528,9 +1528,11 @@ vma_needs_copy(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 {
 	/*
 	 * We check against dst_vma as while sane VMA flags will have been
-	 * copied, VM_UFFD_WP may be set only on dst_vma.
+	 * copied, userfaultfd WP/RWP mode may be set only on dst_vma.
 	 */
 	if (dst_vma->vm_flags & VM_COPY_ON_FORK)
+		return true;
+	if (userfaultfd_protected(dst_vma))
 		return true;
 	/*
 	 * The presence of an anon_vma indicates an anonymous VMA has page
@@ -6532,7 +6534,7 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 	if (pte_protnone(vmf->orig_pte) && vma_is_accessible(vmf->vma)) {
 		/*
 		 * RWP-protected PTEs are protnone plus the uffd bit. On a
-		 * VM_UFFD_RWP VMA, a protnone PTE without the uffd bit is
+		 * uffd-RWP VMA, a protnone PTE without the uffd bit is
 		 * NUMA hinting and must still fall through to do_numa_page().
 		 */
 		if (userfaultfd_pte_rwp(vmf->vma, vmf->orig_pte))
