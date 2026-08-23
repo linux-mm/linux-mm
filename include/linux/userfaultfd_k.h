@@ -32,12 +32,13 @@ enum uf_reason {
 #include <asm-generic/pgtable_uffd.h>
 #include <linux/hugetlb_inline.h>
 
-/* The set of all possible UFFD-related VM flags. */
-#define __VM_UFFD_FLAGS (VM_UFFD_MISSING | VM_UFFD_MINOR | \
-			 VM_UFFD_WP | VM_UFFD_RWP)
-
-#define __VMA_UFFD_FLAGS mk_vma_flags_from_masks(VMA_UFFD_MISSING, VMA_UFFD_WP, \
-						 VMA_UFFD_MINOR, VMA_UFFD_RWP)
+/* Per-VMA uffd modes */
+#define UFFD_MODE_MISSING	BIT(0)
+#define UFFD_MODE_MINOR		BIT(1)
+#define UFFD_MODE_RWP		BIT(2)
+#define UFFD_MODE_WP		BIT(3)
+#define UFFD_MODE_ALL		(UFFD_MODE_MISSING | UFFD_MODE_MINOR | \
+				 UFFD_MODE_RWP | UFFD_MODE_WP)
 
 /*
  * CAREFUL: Check include/uapi/asm-generic/fcntl.h when defining
@@ -99,7 +100,7 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, enum uf_reason reason);
 /* VMA userfaultfd operations */
 struct vm_uffd_ops {
 	/* Checks if a VMA can support userfaultfd */
-	bool (*can_userfault)(struct vm_area_struct *vma, vm_flags_t vm_flags);
+	bool (*can_userfault)(struct vm_area_struct *vma, unsigned int mode);
 	/*
 	 * Called to resolve UFFDIO_CONTINUE request.
 	 * Should return the folio found at pgoff in the VMA's pagecache if it
@@ -174,25 +175,34 @@ int move_pages_huge_pmd(struct mm_struct *mm, pmd_t *dst_pmd, pmd_t *src_pmd, pm
 			unsigned long dst_addr, unsigned long src_addr);
 
 /* mm helpers */
+static inline unsigned int uffd_mode(const struct vm_area_struct *vma)
+{
+	return vma->vm_uffd_state.mode;
+}
+
 static inline bool is_mergeable_vm_uffd_state(struct vm_area_struct *vma,
 					struct vm_uffd_state vm_ctx)
 {
-	return vma->vm_uffd_state.ctx == vm_ctx.ctx;
+	return vma->vm_uffd_state.ctx == vm_ctx.ctx &&
+	       uffd_mode(vma) == vm_ctx.mode;
 }
 
 static inline bool userfaultfd_missing(const struct vm_area_struct *vma)
 {
-	return vma_test_any_mask(vma, VMA_UFFD_MISSING);
+	return vma_test(vma, VMA_UFFD_BIT) &&
+	       (uffd_mode(vma) & UFFD_MODE_MISSING);
 }
 
 static inline bool userfaultfd_wp(const struct vm_area_struct *vma)
 {
-	return vma_test_any_mask(vma, VMA_UFFD_WP);
+	return vma_test(vma, VMA_UFFD_BIT) &&
+	       (uffd_mode(vma) & UFFD_MODE_WP);
 }
 
 static inline bool userfaultfd_minor(const struct vm_area_struct *vma)
 {
-	return vma_test_any_mask(vma, VMA_UFFD_MINOR);
+	return vma_test(vma, VMA_UFFD_BIT) &&
+	       (uffd_mode(vma) & UFFD_MODE_MINOR);
 }
 
 static inline bool userfaultfd_rwp(const struct vm_area_struct *vma)
@@ -203,7 +213,8 @@ static inline bool userfaultfd_rwp(const struct vm_area_struct *vma)
 	 */
 	if (!IS_ENABLED(CONFIG_ARCH_HAS_PTE_PROTNONE))
 		return false;
-	return vma_test_single_mask(vma, VMA_UFFD_RWP);
+	return vma_test(vma, VMA_UFFD_BIT) &&
+	       (uffd_mode(vma) & UFFD_MODE_RWP);
 }
 
 static inline bool userfaultfd_protected(const struct vm_area_struct *vma)
@@ -271,7 +282,7 @@ static inline bool userfaultfd_huge_pmd_rwp(struct vm_area_struct *vma,
 
 static inline bool userfaultfd_armed(struct vm_area_struct *vma)
 {
-	return vma_test_any_mask(vma, __VMA_UFFD_FLAGS);
+	return vma_test(vma, VMA_UFFD_BIT);
 }
 
 static inline bool vma_has_uffd_without_event_remap(struct vm_area_struct *vma)

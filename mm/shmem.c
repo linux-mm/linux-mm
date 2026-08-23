@@ -3419,7 +3419,7 @@ static struct folio *shmem_get_folio_noalloc(struct inode *inode, pgoff_t pgoff)
 	return folio;
 }
 
-static bool shmem_can_userfault(struct vm_area_struct *vma, vm_flags_t vm_flags)
+static bool shmem_can_userfault(struct vm_area_struct *vma, unsigned int mode)
 {
 	return true;
 }

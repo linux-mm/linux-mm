@@ -723,6 +723,7 @@ struct vm_region {
 #define NULL_VM_UFFD_STATE ((struct vm_uffd_state) { NULL, })
 struct vm_uffd_state {
 	struct userfaultfd_ctx *ctx;
+	unsigned int mode;
 };
 #else /* CONFIG_USERFAULTFD */
 #define NULL_VM_UFFD_STATE ((struct vm_uffd_state) {})

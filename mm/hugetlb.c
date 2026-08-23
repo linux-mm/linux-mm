@@ -4856,7 +4856,7 @@ static vm_fault_t hugetlb_vm_op_fault(struct vm_fault *vmf)
 
 #ifdef CONFIG_USERFAULTFD
 static bool hugetlb_can_userfault(struct vm_area_struct *vma,
-				  vm_flags_t vm_flags)
+				  unsigned int mode)
 {
 	return true;
 }
