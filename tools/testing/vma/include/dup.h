@@ -631,7 +631,7 @@ struct vm_area_struct {
 	 */
 	struct anon_vma_name *anon_name;
 #endif
-	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+	struct vm_uffd_state vm_uffd_state;
 } __randomize_layout;
 
 struct vm_operations_struct {
