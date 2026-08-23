@@ -109,7 +109,7 @@ enum {
 	DECLARE_VMA_BIT(MAYSHARE, 7),
 	DECLARE_VMA_BIT(GROWSDOWN, 8),	/* general info on the segment */
 #ifdef CONFIG_MMU
-	DECLARE_VMA_BIT(UFFD_MISSING, 9),/* missing pages tracking */
+	DECLARE_VMA_BIT(UFFD, 9),	/* userfaultfd registered */
 #else
 	/* nommu: R/O MAP_PRIVATE mapping that might overlay a file mapping */
 	DECLARE_VMA_BIT(MAYOVERLAY, 9),
@@ -117,7 +117,7 @@ enum {
 	/* Page-ranges managed without "struct page", just pure PFN */
 	DECLARE_VMA_BIT(PFNMAP, 10),
 	DECLARE_VMA_BIT(MAYBE_GUARD, 11),
-	DECLARE_VMA_BIT(UFFD_WP, 12),	/* wrprotect pages tracking */
+	/* Bit 12 is free */
 	DECLARE_VMA_BIT(LOCKED, 13),
 	DECLARE_VMA_BIT(IO, 14),	/* Memory mapped I/O or similar */
 	DECLARE_VMA_BIT(SEQ_READ, 15),	/* App will access data sequentially */
@@ -158,7 +158,7 @@ enum {
 #else
 	DECLARE_VMA_BIT(DROPPABLE, 40),
 #endif
-	DECLARE_VMA_BIT(UFFD_MINOR, 41),
+	/* Bit 41 is free */
 	DECLARE_VMA_BIT(SEALED, 42),
 	/* Flags that reuse flags above. */
 	DECLARE_VMA_BIT_ALIAS(PKEY_BIT0, HIGH_ARCH_0),
@@ -211,14 +211,13 @@ enum {
 #define VM_MAYSHARE	INIT_VM_FLAG(MAYSHARE)
 #define VM_GROWSDOWN	INIT_VM_FLAG(GROWSDOWN)
 #ifdef CONFIG_MMU
-#define VM_UFFD_MISSING	INIT_VM_FLAG(UFFD_MISSING)
+#define VM_UFFD		INIT_VM_FLAG(UFFD)
 #else
-#define VM_UFFD_MISSING	VM_NONE
+#define VM_UFFD		VM_NONE
 #define VM_MAYOVERLAY	INIT_VM_FLAG(MAYOVERLAY)
 #endif
 #define VM_PFNMAP	INIT_VM_FLAG(PFNMAP)
 #define VM_MAYBE_GUARD	INIT_VM_FLAG(MAYBE_GUARD)
-#define VM_UFFD_WP	INIT_VM_FLAG(UFFD_WP)
 #define VM_LOCKED	INIT_VM_FLAG(LOCKED)
 #define VM_IO		INIT_VM_FLAG(IO)
 #define VM_SEQ_READ	INIT_VM_FLAG(SEQ_READ)
@@ -296,11 +295,6 @@ enum {
 #else
 #define VM_MTE		VM_NONE
 #define VM_MTE_ALLOWED	VM_NONE
-#endif
-#ifdef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
-#define VM_UFFD_MINOR	INIT_VM_FLAG(UFFD_MINOR)
-#else
-#define VM_UFFD_MINOR	VM_NONE
 #endif
 #ifdef CONFIG_64BIT
 #define VM_ALLOW_ANY_UNCACHED	INIT_VM_FLAG(ALLOW_ANY_UNCACHED)
@@ -387,7 +381,7 @@ enum {
 
 #define VMA_IGNORE_MERGE_FLAGS VMA_STICKY_FLAGS
 
-#define VM_COPY_ON_FORK (VM_PFNMAP | VM_MIXEDMAP | VM_UFFD_WP | VM_MAYBE_GUARD)
+#define VM_COPY_ON_FORK (VM_PFNMAP | VM_MIXEDMAP | VM_MAYBE_GUARD)
 
 #define pgprot_val(x)		((x).pgprot)
 #define __pgprot(x)		((pgprot_t) { (x) } )
