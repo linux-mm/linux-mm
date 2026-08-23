@@ -2119,8 +2119,8 @@ static inline int pud_trans_unstable(pud_t *pud)
  * In an accessible VMA, pte_protnone() reliably indicates a present
  * PROT_NONE page protection. Today the kernel uses such PTEs for two
  * purposes: NUMA hinting faults, and userfaultfd RWP tracking on
- * VM_UFFD_RWP VMAs. The two are distinguished by the uffd PTE bit and
- * the VMA flag; see include/linux/userfaultfd_k.h.
+ * uffd-RWP VMAs. The two are distinguished by the uffd PTE bit and
+ * the VMA uffd state; see include/linux/userfaultfd_k.h.
  *
  * So, to reliably identify PROT_NONE PTEs that require kernel handling,
  * looking at the VMA accessibility (and the uffd bit on RWP VMAs) is
