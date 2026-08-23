@@ -5774,7 +5774,7 @@ int hugetlb_add_to_page_cache(struct folio *folio, struct address_space *mapping
 
 static inline vm_fault_t hugetlb_handle_userfault(struct vm_fault *vmf,
 						  struct address_space *mapping,
-						  unsigned long reason)
+						  enum uf_reason reason)
 {
 	u32 hash;
 
@@ -5867,7 +5867,7 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 			}
 
 			return hugetlb_handle_userfault(vmf, mapping,
-							VM_UFFD_MISSING);
+							USERFAULT_MISSING);
 		}
 
 		if (!(vma->vm_flags & VM_MAYSHARE)) {
@@ -5943,7 +5943,7 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 				goto out;
 			}
 			return hugetlb_handle_userfault(vmf, mapping,
-							VM_UFFD_MINOR);
+							USERFAULT_MINOR);
 		}
 	}
 
@@ -6166,7 +6166,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 
 		/* Sync: drop hugetlb locks before blocking in handle_userfault() */
 		if (!userfaultfd_rwp_async(vma))
-			return hugetlb_handle_userfault(&vmf, mapping, VM_UFFD_RWP);
+			return hugetlb_handle_userfault(&vmf, mapping, USERFAULT_RWP);
 
 		ptl = huge_pte_lock(h, mm, vmf.pte);
 		pte = huge_ptep_get(mm, vmf.address, vmf.pte);
@@ -6223,7 +6223,7 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 			spin_unlock(vmf.ptl);
 			hugetlb_vma_unlock_read(vma);
 			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
-			return handle_userfault(&vmf, VM_UFFD_WP);
+			return handle_userfault(&vmf, USERFAULT_WP);
 		}
 
 		vmf.orig_pte = huge_pte_clear_uffd(vmf.orig_pte);
