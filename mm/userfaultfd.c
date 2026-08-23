@@ -2554,7 +2554,7 @@ static inline void msg_init(struct uffd_msg *msg)
 static inline struct uffd_msg userfault_msg(unsigned long address,
 					    unsigned long real_address,
 					    unsigned int flags,
-					    unsigned long reason,
+					    enum uf_reason reason,
 					    unsigned int features)
 {
 	struct uffd_msg msg;
@@ -2576,11 +2576,11 @@ static inline struct uffd_msg userfault_msg(unsigned long address,
 	 */
 	if (flags & FAULT_FLAG_WRITE)
 		msg.arg.pagefault.flags |= UFFD_PAGEFAULT_FLAG_WRITE;
-	if (reason & VM_UFFD_WP)
+	if (reason & USERFAULT_WP)
 		msg.arg.pagefault.flags |= UFFD_PAGEFAULT_FLAG_WP;
-	if (reason & VM_UFFD_RWP)
+	if (reason & USERFAULT_RWP)
 		msg.arg.pagefault.flags |= UFFD_PAGEFAULT_FLAG_RWP;
-	if (reason & VM_UFFD_MINOR)
+	if (reason & USERFAULT_MINOR)
 		msg.arg.pagefault.flags |= UFFD_PAGEFAULT_FLAG_MINOR;
 	if (features & UFFD_FEATURE_THREAD_ID)
 		msg.arg.pagefault.feat.ptid = task_pid_vnr(current);
@@ -2594,7 +2594,7 @@ static inline struct uffd_msg userfault_msg(unsigned long address,
  */
 static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 					      struct vm_fault *vmf,
-					      unsigned long reason)
+					      enum uf_reason reason)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	pte_t *ptep, pte;
@@ -2631,13 +2631,13 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 	 * If VMA has UFFD WP faults enabled and WP fault, wait for userspace to
 	 * resolve the fault.
 	 */
-	if (!huge_pte_write(pte) && (reason & VM_UFFD_WP))
+	if (!huge_pte_write(pte) && (reason & USERFAULT_WP))
 		return true;
 	/*
 	 * PTE is still RW-protected (protnone with uffd bit), wait for
 	 * resolution. Plain PROT_NONE without the marker is not an RWP fault.
 	 */
-	if (pte_protnone(pte) && huge_pte_uffd(pte) && (reason & VM_UFFD_RWP))
+	if (pte_protnone(pte) && huge_pte_uffd(pte) && (reason & USERFAULT_RWP))
 		return true;
 
 	return false;
@@ -2645,7 +2645,7 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 #else
 static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 					      struct vm_fault *vmf,
-					      unsigned long reason)
+					      enum uf_reason reason)
 {
 	/* Should never get here. */
 	VM_WARN_ON_ONCE(1);
@@ -2662,7 +2662,7 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
  */
 static inline bool userfaultfd_must_wait(struct userfaultfd_ctx *ctx,
 					 struct vm_fault *vmf,
-					 unsigned long reason)
+					 enum uf_reason reason)
 {
 	struct mm_struct *mm = ctx->mm;
 	unsigned long address = vmf->address;
@@ -2700,10 +2700,10 @@ again:
 		return false;
 
 	if (pmd_trans_huge(_pmd)) {
-		if (!pmd_write(_pmd) && (reason & VM_UFFD_WP))
+		if (!pmd_write(_pmd) && (reason & USERFAULT_WP))
 			return true;
 		if (pmd_protnone(_pmd) && pmd_uffd(_pmd) &&
-		    (reason & VM_UFFD_RWP))
+		    (reason & USERFAULT_RWP))
 			return true;
 		return false;
 	}
@@ -2740,14 +2740,14 @@ again:
 	 * If VMA has UFFD WP faults enabled and WP fault, wait for userspace to
 	 * resolve the fault.
 	 */
-	if (!pte_write(ptent) && (reason & VM_UFFD_WP))
+	if (!pte_write(ptent) && (reason & USERFAULT_WP))
 		goto out;
 	/*
 	 * PTE is still RW-protected (protnone with uffd bit), wait for
 	 * userspace to resolve. Plain PROT_NONE without the marker is not
 	 * an RWP fault.
 	 */
-	if (pte_protnone(ptent) && pte_uffd(ptent) && (reason & VM_UFFD_RWP))
+	if (pte_protnone(ptent) && pte_uffd(ptent) && (reason & USERFAULT_RWP))
 		goto out;
 
 	ret = false;
@@ -2782,7 +2782,7 @@ static inline unsigned int userfaultfd_get_blocking_state(unsigned int flags)
  * fatal_signal_pending()s, and the mmap_lock must be released before
  * returning it.
  */
-vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
+vm_fault_t handle_userfault(struct vm_fault *vmf, enum uf_reason reason)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct mm_struct *mm = vma->vm_mm;
@@ -2808,7 +2808,7 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	VM_WARN_ON_ONCE(ctx->mm != mm);
 
 	/* Any unrecognized flag is a bug. */
-	VM_WARN_ON_ONCE(reason & ~__VM_UFFD_FLAGS);
+	VM_WARN_ON_ONCE(reason & ~USERFAULT_ANY);
 	/* 0 or > 1 flags set is a bug; we expect exactly 1. */
 	VM_WARN_ON_ONCE(!reason || (reason & (reason - 1)));
 
