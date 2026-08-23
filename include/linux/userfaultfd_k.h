@@ -168,42 +168,6 @@ static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
 	return vma->vm_userfaultfd_ctx.ctx == vm_ctx.ctx;
 }
 
-/*
- * Never enable huge pmd sharing on some uffd registered vmas:
- *
- * - VM_UFFD_WP and VM_UFFD_RWP VMAs, because the write protect / access
- *   tracking information is per pgtable entry.
- *
- * - VM_UFFD_MINOR VMAs, because otherwise we would never get minor faults for
- *   VMAs which share huge pmds. (If you have two mappings to the same
- *   underlying pages, and fault in the non-UFFD-registered one with a write,
- *   with huge pmd sharing this would *also* setup the second UFFD-registered
- *   mapping, and we'd not get minor faults.)
- */
-static inline bool uffd_disable_huge_pmd_share(struct vm_area_struct *vma)
-{
-	return vma_test_any_mask(vma,
-		mk_vma_flags_from_masks(VMA_UFFD_WP, VMA_UFFD_RWP,
-					VMA_UFFD_MINOR));
-}
-
-/*
- * Don't do fault around for WP, RWP or MINOR registered uffd range.  For
- * MINOR registered range, fault around will be a total disaster and ptes can
- * be installed without notifications; for WP it should mostly be fine as long
- * as the fault around checks for pte_none() before the installation, however
- * to be super safe we just forbid it; for RWP, pre-faulted neighbours would
- * be indistinguishable from accessed pages in PAGEMAP_SCAN (PAGE_IS_ACCESSED)
- * and pollute the tracked working set, so each page must be populated by its
- * own fault.
- */
-static inline bool uffd_disable_fault_around(struct vm_area_struct *vma)
-{
-	return vma_test_any_mask(vma,
-		mk_vma_flags_from_masks(VMA_UFFD_WP, VMA_UFFD_RWP,
-					VMA_UFFD_MINOR));
-}
-
 static inline bool userfaultfd_missing(const struct vm_area_struct *vma)
 {
 	return vma_test_any_mask(vma, VMA_UFFD_MISSING);
@@ -233,6 +197,40 @@ static inline bool userfaultfd_rwp(const struct vm_area_struct *vma)
 static inline bool userfaultfd_protected(const struct vm_area_struct *vma)
 {
 	return userfaultfd_wp(vma) || userfaultfd_rwp(vma);
+}
+
+/*
+ * Never enable huge pmd sharing on some uffd registered vmas:
+ *
+ * - uffd-WP and uffd-RWP VMAs, because the write protect / access tracking
+ *   information is per pgtable entry.
+ *
+ * - uffd-MINOR VMAs, because otherwise we would never get minor faults for
+ *   VMAs which share huge pmds. (If you have two mappings to the same
+ *   underlying pages, and fault in the non-UFFD-registered one with a write,
+ *   with huge pmd sharing this would *also* setup the second UFFD-registered
+ *   mapping, and we'd not get minor faults.)
+ */
+static inline bool uffd_disable_huge_pmd_share(struct vm_area_struct *vma)
+{
+	return userfaultfd_minor(vma) || userfaultfd_wp(vma) ||
+	       userfaultfd_rwp(vma);
+}
+
+/*
+ * Don't do fault around for WP, RWP or MINOR registered uffd range.  For
+ * MINOR registered range, fault around will be a total disaster and ptes can
+ * be installed without notifications; for WP it should mostly be fine as long
+ * as the fault around checks for pte_none() before the installation, however
+ * to be super safe we just forbid it; for RWP, pre-faulted neighbours would
+ * be indistinguishable from accessed pages in PAGEMAP_SCAN (PAGE_IS_ACCESSED)
+ * and pollute the tracked working set, so each page must be populated by its
+ * own fault.
+ */
+static inline bool uffd_disable_fault_around(struct vm_area_struct *vma)
+{
+	return userfaultfd_minor(vma) || userfaultfd_wp(vma) ||
+	       userfaultfd_rwp(vma);
 }
 
 static inline bool userfaultfd_pte_wp(struct vm_area_struct *vma,

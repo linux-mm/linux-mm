@@ -234,7 +234,7 @@ static int mfill_get_vma(struct mfill_state *state)
 	 * validate 'mode' now that we know the dst_vma: don't allow
 	 * a wrprotect copy if the userfaultfd didn't register as WP.
 	 */
-	if ((flags & MFILL_ATOMIC_WP) && !(dst_vma->vm_flags & VM_UFFD_WP))
+	if ((flags & MFILL_ATOMIC_WP) && !userfaultfd_wp(dst_vma))
 		goto out_unlock;
 
 	if (is_vm_hugetlb_page(dst_vma))
