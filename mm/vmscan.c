@@ -2842,6 +2842,8 @@ static bool __maybe_unused seq_is_valid(struct lruvec *lruvec)
  * walk_pmd_range(); the eviction also report them when walking the rmap
  * in lru_gen_look_around().
  *
+ * A second, coarser pair of filters (pud_filters) sits one level up.
+ *
  * For future optimizations:
  * 1. It's not necessary to keep both filters all the time. The spare one can be
  *    freed after the RCU grace period and reallocated if needed again.
@@ -2931,6 +2933,23 @@ static void update_pmd_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned 
 static void reset_pmd_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq)
 {
 	__reset_bloom_filter(mm_state->pmd_filters, seq);
+}
+
+static bool test_pud_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq,
+				  void *item)
+{
+	return __test_bloom_filter(mm_state->pud_filters, seq, item);
+}
+
+static void update_pud_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq,
+				    void *item)
+{
+	__update_bloom_filter(mm_state->pud_filters, seq, item);
+}
+
+static void reset_pud_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq)
+{
+	__reset_bloom_filter(mm_state->pud_filters, seq);
 }
 
 /******************************************************************************
@@ -3183,8 +3202,10 @@ done:
 
 	spin_unlock(&mm_list->lock);
 
-	if (mm && first)
+	if (mm && first) {
 		reset_pmd_bloom_filter(mm_state, walk->seq + 1);
+		reset_pud_bloom_filter(mm_state, walk->seq + 1);
+	}
 
 	if (*iter)
 		mmdrop(*iter);
@@ -3783,10 +3804,11 @@ done:
 	*first = -1;
 }
 
-static void walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
+static bool walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
 			   struct mm_walk *args)
 {
 	int i;
+	bool young = false;
 	pmd_t *pmd;
 	unsigned long next;
 	unsigned long addr;
@@ -3823,8 +3845,10 @@ restart:
 
 			walk->mm_stats[MM_LEAF_TOTAL]++;
 
-			if (pfn != -1)
+			if (pfn != -1) {
 				walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first);
+				young = true;
+			}
 			continue;
 		}
 
@@ -3834,6 +3858,7 @@ restart:
 				continue;
 
 			walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first);
+			young = true;
 		}
 
 		if (!walk->force_scan && !test_pmd_bloom_filter(mm_state, walk->seq, pmd + i))
@@ -3845,6 +3870,7 @@ restart:
 			continue;
 
 		walk->mm_stats[MM_NONLEAF_ADDED]++;
+		young = true;
 
 		/* carry over to the next generation */
 		update_pmd_bloom_filter(mm_state, walk->seq + 1, pmd + i);
@@ -3854,6 +3880,8 @@ restart:
 
 	if (i < PTRS_PER_PMD && get_next_vma(PUD_MASK, PMD_SIZE, args, &start, &end))
 		goto restart;
+
+	return young;
 }
 
 static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
@@ -3864,6 +3892,7 @@ static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
 	unsigned long addr;
 	unsigned long next;
 	struct lru_gen_mm_walk *walk = args->private;
+	struct lru_gen_mm_state *mm_state = get_mm_state(walk->lruvec);
 
 	VM_WARN_ON_ONCE(p4d_leaf(*p4d));
 
@@ -3877,7 +3906,12 @@ restart:
 		if (!pud_present(val) || WARN_ON_ONCE(pud_leaf(val)))
 			continue;
 
-		walk_pmd_range(&val, addr, next, args);
+		/* Skip a subtree whose 512 PMDs all failed the PMD-level filter last gen */
+		if (!walk->force_scan && !test_pud_bloom_filter(mm_state, walk->seq, pud + i))
+			continue;
+
+		if (walk_pmd_range(&val, addr, next, args))
+			update_pud_bloom_filter(mm_state, walk->seq + 1, pud + i);
 
 		if (need_resched() || walk->batched >= MAX_LRU_BATCH) {
 			end = (addr | ~PUD_MASK) + 1;
@@ -6131,6 +6165,8 @@ void lru_gen_exit_memcg(struct mem_cgroup *memcg)
 		for (i = 0; i < NR_BLOOM_FILTERS; i++) {
 			bitmap_free(mm_state->pmd_filters[i]);
 			mm_state->pmd_filters[i] = NULL;
+			bitmap_free(mm_state->pud_filters[i]);
+			mm_state->pud_filters[i] = NULL;
 		}
 	}
 }
