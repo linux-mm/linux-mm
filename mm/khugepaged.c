@@ -1612,6 +1612,7 @@ static enum scan_result collapse_scan_pmd(struct mm_struct *mm,
 	enum scan_result result = SCAN_FAIL;
 	struct page *page = NULL;
 	struct folio *folio = NULL;
+	unsigned long pfn = -1;
 	unsigned long addr;
 	unsigned long enabled_orders;
 	spinlock_t *ptl;
@@ -1774,6 +1775,8 @@ static enum scan_result collapse_scan_pmd(struct mm_struct *mm,
 		result = SCAN_SUCCEED;
 	}
 out_unmap:
+	if (folio)
+		pfn = folio_pfn(folio);
 	pte_unmap_unlock(pte, ptl);
 	if (result == SCAN_SUCCEED) {
 		/* collapse_huge_page() expects the lock to be dropped before calling */
@@ -1784,7 +1787,7 @@ out_unmap:
 		*lock_dropped = true;
 	}
 out:
-	trace_mm_khugepaged_scan_pmd(mm, folio, referenced,
+	trace_mm_khugepaged_scan_pmd(mm, pfn, referenced,
 				     none_or_zero, result, unmapped);
 	return result;
 }
