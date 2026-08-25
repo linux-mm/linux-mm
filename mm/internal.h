@@ -1638,4 +1638,7 @@ static inline bool can_spin_trylock(void)
 	return true;
 }
 
+unsigned long zone_effective_free_pages(struct zone *zone,
+					unsigned int order,
+					bool use_blocks);
 #endif	/* __MM_INTERNAL_H */
