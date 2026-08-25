@@ -262,8 +262,12 @@ static void ext4_add_complete_io(ext4_io_end_t *io_end)
 
 	spin_lock_irqsave(&ei->i_completed_io_lock, flags);
 	wq = sbi->rsv_conversion_wq;
-	if (list_empty(&ei->i_rsv_conversion_list))
-		queue_work(wq, &ei->i_rsv_conversion_work);
+	if (list_empty(&ei->i_rsv_conversion_list)) {
+		if (igrab(io_end->inode)) {
+			ei->i_rsv_need_iput = 1;
+			queue_work(wq, &ei->i_rsv_conversion_work);
+		}
+	}
 	list_add_tail(&io_end->list, &ei->i_rsv_conversion_list);
 	spin_unlock_irqrestore(&ei->i_completed_io_lock, flags);
 }
@@ -291,6 +295,13 @@ static int ext4_do_flush_completed_IO(struct inode *inode,
 		if (unlikely(!ret && err))
 			ret = err;
 	}
+
+	/* Release inode reference from ext4_add_complete_io. */
+	if (ei->i_rsv_need_iput) {
+		ei->i_rsv_need_iput = 0;
+		iput(&ei->vfs_inode);
+	}
+
 	return ret;
 }
 

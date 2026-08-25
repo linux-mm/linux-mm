@@ -1201,6 +1201,8 @@ struct ext4_inode_info {
 
 	/* Lock protecting lists below */
 	spinlock_t i_completed_io_lock;
+	/* Track if ext4_add_complete_io() took an extra inode reference. */
+	unsigned short i_rsv_need_iput:1;
 	/*
 	 * Completed IOs that need unwritten extents handling and have
 	 * transaction reserved
