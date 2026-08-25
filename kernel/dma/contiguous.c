@@ -37,6 +37,8 @@
 
 #define pr_fmt(fmt) "cma: " fmt
 
+#include <kunit/visibility.h>
+
 #include <asm/page.h>
 
 #include <linux/memblock.h>
@@ -129,6 +131,31 @@ struct cma *dev_get_cma_area(struct device *dev)
 	return dma_contiguous_default_area;
 }
 EXPORT_SYMBOL_GPL(dev_get_cma_area);
+
+struct dma_cma_check_data {
+	phys_addr_t start;
+	phys_addr_t end;
+};
+
+static int dma_cma_check_area(struct cma *cma, void *data)
+{
+	struct dma_cma_check_data *chk = data;
+
+	if (cma_intersects(cma, chk->start, chk->end))
+		return 1;
+	return 0;
+}
+
+bool dma_is_from_cma(phys_addr_t phys, size_t size)
+{
+	struct dma_cma_check_data chk = {
+		.start = phys,
+		.end = phys + size - 1,
+	};
+
+	return cma_for_each_area(dma_cma_check_area, &chk) != 0;
+}
+EXPORT_SYMBOL_IF_KUNIT(dma_is_from_cma);
 
 #ifdef CONFIG_DMA_NUMA_CMA
 
