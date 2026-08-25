@@ -4246,6 +4246,11 @@ fail:
 
 	remap_page(folio, 1 << old_order, ttu_flags);
 
+	if (mapping) {
+		i_mmap_unlock_read(mapping);
+		mapping = NULL;
+	}
+
 	/*
 	 * Drop the mapping while the inode is still pinned. @folio stays
 	 * locked and present in the page cache until the loop below, so
