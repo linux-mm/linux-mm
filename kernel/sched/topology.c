@@ -685,9 +685,22 @@ DEFINE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
 DEFINE_STATIC_KEY_FALSE(sched_asym_cpucapacity);
 DEFINE_STATIC_KEY_FALSE(sched_cluster_active);
 
+#ifdef CONFIG_NUMA
+/*
+ * The de-duplicated NUMA distance tiers. Defined here, rather than next to
+ * the rest of the NUMA topology state further down, because the cache aware
+ * code below has to reach them as well.
+ */
+static int			sched_numa_node_levels;
+static int			*sched_numa_node_distance;
+#endif
+
 #ifdef CONFIG_SCHED_CACHE
 static int __rcu *llc_to_node_map;
 static void rebuild_llc_node_map(int size);
+static int __rcu *sched_cache_node_dist_matrix;
+static int sched_cache_node_dist_size;
+static void rebuild_node_distance_matrix(int size);
 #endif
 
 static void update_top_cache_domain(int cpu)
@@ -875,6 +888,38 @@ int llc_to_node(int llc)
 	return node;
 }
 
+/*
+ * De-duplicated NUMA-node distance, looked up from
+ * sched_cache_node_dist_matrix[]. Unlike node_distance(), no two nodes
+ * seen from the same node compare equal, while every relative ordering
+ * of the original node_distance() values (e.g. node_distance(a,b) >
+ * node_distance(a,c)) is preserved. Falls back to the raw
+ * node_distance() if the matrix has not been built yet (e.g. very
+ * early boot, before the first rebuild_node_distance_matrix() call).
+ */
+int sched_cache_node_distance(int node0, int node1)
+{
+	int *matrix;
+	int size;
+	int dist = -1;
+
+	if (node0 == node1)
+		return 0;
+
+	rcu_read_lock();
+	matrix = rcu_dereference(sched_cache_node_dist_matrix);
+	size = READ_ONCE(sched_cache_node_dist_size);
+	if (matrix && node0 >= 0 && node0 < size
+		   && node1 >= 0 && node1 < size)
+		dist = matrix[node0 * size + node1];
+	rcu_read_unlock();
+
+	if (dist >= 0)
+		return dist;
+
+	return node_distance(node0, node1);
+}
+
 static void rebuild_llc_node_map(int size)
 {
 	int *new_map, *old_map;
@@ -909,6 +954,197 @@ static void rebuild_llc_node_map(int size)
 	rcu_assign_pointer(llc_to_node_map, new_map);
 	synchronize_rcu();
 	kfree(old_map);
+}
+
+/*
+ * Build a de-duplicated NUMA-node distance matrix using a tiering +
+ * greedy edge-coloring technique, applied directly to node pairs.
+ * Reuses the already sorted, de-duplicated distance tier list
+ * (sched_numa_node_distance[]/sched_numa_node_levels).
+ *
+ * Guarantees, compared to the raw node_distance() table:
+ *   - still symmetric;
+ *   - every relative ordering between two node_distance() values is
+ *     preserved (if node_distance(a,b) > node_distance(a,c) then
+ *     sched_cache_node_distance(a,b) > sched_cache_node_distance(a,c),
+ *     and likewise for equal/less-than);
+ *   - looked at from any single node, the distances to every other
+ *     node are pairwise distinct (this is the property the raw table
+ *     can violate, e.g. two nodes genuinely equidistant from a third).
+ */
+static void rebuild_node_distance_matrix(int size)
+{
+	int *matrix = NULL, *old_matrix;
+	int *tier_dist = NULL;
+	int *tier_ncolors = NULL;
+	int nr_tiers = 0;
+	unsigned long **used_colors = NULL;
+	int i, j, t;
+	int scale;
+
+	if (size <= 0)
+		return;
+
+#ifdef CONFIG_NUMA
+	nr_tiers = READ_ONCE(sched_numa_node_levels);
+	if (nr_tiers > 0) {
+		tier_dist = kmalloc_array(nr_tiers, sizeof(int), GFP_KERNEL);
+		if (tier_dist) {
+			int *d;
+
+			rcu_read_lock();
+			d = rcu_dereference(sched_numa_node_distance);
+			if (d)
+				memcpy(tier_dist, d, nr_tiers * sizeof(int));
+			else
+				nr_tiers = 0;
+			rcu_read_unlock();
+		} else {
+			nr_tiers = 0;
+		}
+
+		if (!nr_tiers) {
+			kfree(tier_dist);
+			tier_dist = NULL;
+		}
+	}
+#endif
+
+	matrix = kcalloc(size * size, sizeof(int), GFP_KERNEL);
+	if (!matrix)
+		goto out;
+
+	if (!tier_dist) {
+		/*
+		 * NUMA distance tiers not available yet (e.g. very early
+		 * boot or a non-NUMA build): fall back to the raw
+		 * node_distance() table, same as sched_cache_node_distance()
+		 * would have returned anyway.
+		 */
+		for (i = 0; i < size; i++) {
+			for (j = 0; j < size; j++) {
+				if (i == j)
+					continue;
+				matrix[i * size + j] = node_distance(i, j);
+			}
+		}
+		goto commit;
+	}
+
+	tier_ncolors = kcalloc(nr_tiers, sizeof(*tier_ncolors), GFP_KERNEL);
+	if (!tier_ncolors)
+		goto out;
+
+	used_colors = kcalloc(size, sizeof(*used_colors), GFP_KERNEL);
+	if (!used_colors)
+		goto out;
+	for (i = 0; i < size; i++) {
+		used_colors[i] = bitmap_zalloc(size, GFP_KERNEL);
+		if (!used_colors[i])
+			goto out;
+	}
+
+	/* Greedy edge-color each tier; pack (tier, color) into matrix[]. */
+	for (t = 0; t < nr_tiers; t++) {
+		int dist = tier_dist[t];
+		int tier_max_color = 0;
+
+		for (i = 0; i < size; i++)
+			bitmap_zero(used_colors[i], size);
+
+		for (i = 0; i < size; i++) {
+			for (j = i + 1; j < size; j++) {
+				int color;
+
+				if (node_distance(i, j) != dist)
+					continue;
+
+				/* smallest color free at both endpoints */
+				color = 0;
+				for (;;) {
+					color = find_next_zero_bit(used_colors[i], size, color);
+					if (WARN_ONCE(color >= size,
+						      "sched_cache: no free color left in NUMA tier (node=%d)",
+						      i)) {
+						color = size - 1;
+						break;
+					}
+					if (!test_bit(color, used_colors[j]))
+						break;
+					color++;
+				}
+
+				set_bit(color, used_colors[i]);
+				set_bit(color, used_colors[j]);
+				if (color + 1 > tier_max_color)
+					tier_max_color = color + 1;
+
+				matrix[i * size + j] = t * (size + 1) + color;
+				matrix[j * size + i] = matrix[i * size + j];
+			}
+		}
+		tier_ncolors[t] = tier_max_color;
+	}
+
+	/*
+	 * Pick the smallest integer scale such that every tier's
+	 * span of increments (0..tier_ncolors[t]-1) still fits strictly
+	 * inside the gap to the next distinct tier once scaled.
+	 */
+	scale = 1;
+	for (;;) {
+		bool need_more = false;
+
+		for (t = 0; t < nr_tiers - 1; t++) {
+			int gap;
+
+			if (tier_ncolors[t] <= 1)
+				continue;
+			gap = tier_dist[t + 1] - tier_dist[t];
+			if (tier_ncolors[t] - 1 >= gap * scale) {
+				need_more = true;
+				break;
+			}
+		}
+		if (!need_more)
+			break;
+		if (++scale > 1000) {
+			scale = 1000;
+			break;
+		}
+	}
+
+	/* Unpack (tier, color) into the final, close-to-original value. */
+	for (i = 0; i < size; i++) {
+		for (j = 0; j < size; j++) {
+			int packed, t2, color;
+
+			if (i == j)
+				continue;
+
+			packed = matrix[i * size + j];
+			t2 = packed / (size + 1);
+			color = packed % (size + 1);
+			matrix[i * size + j] = tier_dist[t2] * scale + color;
+		}
+	}
+
+commit:
+	old_matrix = rcu_dereference_protected(sched_cache_node_dist_matrix, true);
+	sched_cache_node_dist_size = size;
+	rcu_assign_pointer(sched_cache_node_dist_matrix, matrix);
+	synchronize_rcu();
+	kfree(old_matrix);
+	matrix = NULL;
+out:
+	if (used_colors) {
+		for (i = 0; i < size; i++)
+			bitmap_free(used_colors[i]);
+		kfree(used_colors);
+	}
+	kfree(tier_ncolors);
+	kfree(tier_dist);
+	kfree(matrix);
 }
 
 /*
@@ -981,6 +1217,7 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 	}
 
 	rebuild_llc_node_map(max_lid + 1);
+	rebuild_node_distance_matrix(nr_node_ids);
 	return true;
 err:
 	for_each_cpu(i, cpu_map) {
@@ -1949,15 +2186,13 @@ enum numa_topology_type sched_numa_topology_type;
 
 /*
  * sched_domains_numa_distance is derived from sched_numa_node_distance
- * and provides a simplified view of NUMA distances used specifically
- * for building NUMA scheduling domains.
+ * (defined near the top of this file) and provides a simplified view of
+ * NUMA distances used specifically for building NUMA scheduling domains.
  */
 static int			sched_domains_numa_levels;
-static int			sched_numa_node_levels;
 
 int				sched_max_numa_distance;
 static int			*sched_domains_numa_distance;
-static int			*sched_numa_node_distance;
 static struct cpumask		***sched_domains_numa_masks;
 #endif /* CONFIG_NUMA */
 
