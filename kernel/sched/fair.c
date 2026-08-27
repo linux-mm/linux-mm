@@ -10737,6 +10737,191 @@ static enum llc_mig can_migrate_llc(int src_cpu, int dst_cpu,
 }
 
 /*
+ * Like get_llc_stats but for sched domain that above LLC level.
+ * Based on get_llc_stats, we can accumulate utilization and cap for
+ * sched domain in the granularity of LLC.
+ */
+static bool get_span_stats(const struct cpumask *span, unsigned long *util_out,
+					unsigned long *cap_out)
+{
+	cpumask_var_t mask;
+	int cpu;
+	unsigned long util_tmp, cap_tmp, util = 0, cap = 0;
+	struct sched_domain *sd_tmp;
+
+	if (!span || !util_out || !cap_out)
+		return false;
+
+	if (!alloc_cpumask_var(&mask, GFP_ATOMIC))
+		return false;
+
+	cpumask_copy(mask, span);
+	for_each_cpu(cpu, mask) {
+		if (!get_llc_stats(cpu, &util_tmp, &cap_tmp)) {
+			free_cpumask_var(mask);
+			return false;
+		}
+
+		sd_tmp = rcu_dereference(per_cpu(sd_llc, cpu));
+		cpumask_andnot(mask, mask, sched_domain_span(sd_tmp));
+		util += util_tmp;
+		cap += cap_tmp;
+	}
+
+	*util_out = util;
+	*cap_out = cap;
+
+	free_cpumask_var(mask);
+	return true;
+}
+
+/*
+ * Decide if migration should happen on a specific node.
+ * The node here is an LLC or a NUMA.
+ */
+static enum llc_mig __maybe_unused can_migrate_node(int src_cpu, int dst_cpu,
+			struct task_struct *p, bool to_pref)
+{
+	const struct cpumask *span;
+	struct mm_struct *mm;
+	unsigned long dst_util, dst_cap, tsk_util = 0;
+	unsigned long src_util = 0, src_cap = 0;
+	unsigned long acc_util = 0, acc_cap = 0;
+	int node, target_cpu = src_cpu;
+	int get_src = 0;
+
+	if (!get_llc_stats(dst_cpu, &dst_util, &dst_cap))
+		return mig_unrestricted;
+
+	if (!get_llc_stats(src_cpu, &src_util, &src_cap))
+		src_cap = 0;
+
+	if (p) {
+		mm = p->mm;
+		if (mm) {
+			if (mm->sc_stat.cpu >= 0)
+				target_cpu = mm->sc_stat.cpu;
+		}
+		tsk_util = task_util(p);
+	}
+
+	dst_util = dst_util + tsk_util;
+
+	if (to_pref) {
+		unsigned long dst_pre = dst_util - tsk_util;
+
+		if (fits_llc_capacity(dst_util, dst_cap))
+			return mig_llc;
+
+		/*
+		 * The destination is over the margin. That is a reason to
+		 * refuse a task while the margin can still be met, but not
+		 * while every LLC of the node is over it: no placement
+		 * satisfies the margin then, and refusing every migration
+		 * leaves the imbalance in place.
+		 *
+		 * Let the task through when the move still lowers the peak,
+		 * that is when the source is noticeably heavier than the
+		 * destination and carries at least two more tasks worth of
+		 * utilization. The second condition keeps the destination
+		 * from becoming the heavier side, which would bounce the
+		 * task straight back.
+		 */
+		if (src_cap && util_greater(src_util, dst_pre) &&
+		    src_util >= dst_pre + 2 * tsk_util)
+			return mig_llc;
+
+		return mig_forbid;
+	}
+
+	for_each_sched_node(target_cpu, node) {
+		unsigned long u = 0, c = 0, nu, nc;
+
+		/*
+		 * The walk starts at the anchor, so the nodes it crosses before
+		 * reaching the source say nothing about this migration: the task
+		 * does not live there and is not going there. Judging them only
+		 * lets an unrelated node with room refuse the move. Start at the
+		 * node the task actually sits on.
+		 */
+		if (!get_src) {
+			if (!cpumask_test_cpu(src_cpu, cpumask_of_node(node)))
+				continue;
+			else
+				get_src = 1;
+		}
+
+		if (cpumask_test_cpu(dst_cpu, cpumask_of_node(node))) {
+			nu = 0;
+			nc = 0;
+			for_each_llc_node_span(node, span) {
+				get_span_stats(span, &u, &c);
+				nu += u;
+				nc += c;
+				if (cpumask_test_cpu(dst_cpu, span)) {
+					if (fits_llc_capacity(u + tsk_util, c))
+						return mig_llc;
+
+					/*
+					 * The destination is over the margin,
+					 * but so may be the source. Refusing
+					 * then leaves the peak where it is:
+					 * a LLC at seven tasks stays at seven
+					 * while a neighbour in the same node
+					 * sits at four, because taking one
+					 * more would put that neighbour over
+					 * the margin as well.
+					 *
+					 * Let the task through when the move
+					 * still lowers the peak, guarded the
+					 * same way as the aggregation path:
+					 * the source must be noticeably
+					 * heavier and carry at least two more
+					 * tasks worth of utilization, so the
+					 * destination cannot end up the
+					 * heavier side and bounce it back.
+					 */
+					if (src_cap &&
+					    util_greater(src_util, u + tsk_util) &&
+					    src_util >= u + 2 * tsk_util)
+						return mig_llc;
+
+					return mig_forbid;
+				/*
+				 * A nearer LLC only justifies vetoing this
+				 * migration if the task would actually fit
+				 * there, so account for its utilization the
+				 * same way the destination branch above does.
+				 * Without it a LLC already holding one task
+				 * per core still reads as having room and
+				 * vetoes every migration towards a farther,
+				 * genuinely idle LLC.
+				 */
+				} else if (fits_llc_capacity(acc_util + nu + tsk_util,
+						acc_cap + nc)
+						&& fits_llc_capacity(u + tsk_util, c)
+						&& !util_greater(u, dst_pre))
+					return mig_forbid;
+			}
+		}
+
+		/* Don't migrate if this is a good place to live. */
+		for_each_llc_node_span(node, span) {
+			get_span_stats(span, &u, &c);
+			if (cpumask_test_cpu(src_cpu, span)) {
+				if (fits_llc_capacity(u, c))
+					return mig_forbid;
+			} else {
+				if (fits_llc_capacity(u + tsk_util, c))
+					return mig_forbid;
+			}
+		}
+	}
+
+	return mig_unrestricted;
+}
+
+/*
  * Check if task p can migrate from source LLC to
  * destination LLC in terms of cache aware load balance.
  */
