@@ -180,6 +180,7 @@ static inline int cpu_to_mem(int cpu)
 #ifdef CONFIG_SCHED_CACHE
 int llc_to_node(int llc);
 int sched_cache_node_distance(int node0, int node1);
+int llc_intra_node_distance(int llc1, int llc2, int node);
 #endif
 
 #if defined(topology_die_id) && defined(topology_die_cpumask)

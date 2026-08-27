@@ -702,6 +702,21 @@ static int __rcu *sched_cache_node_dist_matrix;
 static int sched_cache_node_dist_size;
 static void rebuild_node_distance_matrix(int size);
 static void rebuild_node_order(int size);
+
+/*
+ * Per-LLC rank within its own node (0-based) plus each node's LLC
+ * count, used by llc_intra_node_distance() to derive a same-node LLC
+ * distance.
+ */
+struct llc_local_rank_topology {
+	int nr_llc;
+	int nr_node;
+	int *rank;		/* [nr_llc]: LLC's 0-based rank within its node */
+	int *node_count;	/* [nr_node]: number of LLCs in the node */
+};
+
+static struct llc_local_rank_topology __rcu *llc_local_rank_topo;
+static void rebuild_llc_local_rank(int size);
 #endif
 
 static void update_top_cache_domain(int cpu)
@@ -919,6 +934,39 @@ int sched_cache_node_distance(int node0, int node1)
 		return dist;
 
 	return node_distance(node0, node1);
+}
+
+/*
+ * LLC distance restricted to same-node pairs, derived from each LLC's
+ * rank within its node (llc_local_rank_topo)
+ * dist = (rank1 + rank2) % k + 1, where k is the LLC count of
+ * the shared node. Except that @llc1 equals @llc2, the distance is 0.
+ * This formuler ensure that there is no identical distance between a
+ * certain llc with any of its sibling llcs in the same node.
+ *
+ * NOTE: It's the caller's responsibility to check if llc1 and llc2 are
+ * in the same node.
+ */
+int llc_intra_node_distance(int llc1, int llc2, int node)
+{
+	struct llc_local_rank_topology *topo;
+	int rank1, rank2, k;
+
+	if (llc1 == llc2)
+		return 0;
+
+	rcu_read_lock();
+	topo = rcu_dereference(llc_local_rank_topo);
+	if (!topo || llc1 >= topo->nr_llc || llc2 >= topo->nr_llc || node < 0) {
+		rcu_read_unlock();
+		return -1;
+	}
+	rank1 = topo->rank[llc1];
+	rank2 = topo->rank[llc2];
+	k = topo->node_count[node];
+	rcu_read_unlock();
+
+	return (rank1 + rank2) % k + 1;
 }
 
 static void rebuild_llc_node_map(int size)
@@ -1263,6 +1311,56 @@ int sched_node_order_at(int cpu, int idx)
 	return topo->order[root * topo->nr_node + idx];
 }
 
+static void free_llc_local_rank_topology(struct llc_local_rank_topology *topo)
+{
+	if (!topo)
+		return;
+
+	kfree(topo->rank);
+	kfree(topo->node_count);
+	kfree(topo);
+}
+
+/*
+ * Compute each LLC's rank within its own node (ascending llc id) and
+ * each node's LLC count, consumed by llc_intra_node_distance() to
+ * derive a same-node LLC distance on the fly.
+ */
+static void rebuild_llc_local_rank(int size)
+{
+	struct llc_local_rank_topology *topo, *old;
+	int llc, node;
+
+	if (size <= 0)
+		return;
+
+	topo = kzalloc_obj(*topo);
+	if (!topo)
+		return;
+
+	topo->nr_llc = size;
+	topo->nr_node = nr_node_ids;
+	topo->rank = kcalloc(size, sizeof(int), GFP_KERNEL);
+	topo->node_count = kcalloc(nr_node_ids, sizeof(int), GFP_KERNEL);
+	if (!topo->rank || !topo->node_count) {
+		free_llc_local_rank_topology(topo);
+		return;
+	}
+
+	for (llc = 0; llc < size; llc++) {
+		node = llc_to_node(llc);
+		if (node < 0 || node >= nr_node_ids)
+			continue;
+		topo->rank[llc] = topo->node_count[node]++;
+	}
+
+	old = rcu_dereference_protected(llc_local_rank_topo,
+					 lockdep_is_held(&sched_domains_mutex));
+	rcu_assign_pointer(llc_local_rank_topo, topo);
+	synchronize_rcu();
+	free_llc_local_rank_topology(old);
+}
+
 /*
  * Get the effective LLC size in bytes that @cpu's bottom sched_domain
  * can use. A CPU within a cpuset partition can only use a proportion
@@ -1335,6 +1433,7 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 	rebuild_llc_node_map(max_lid + 1);
 	rebuild_node_distance_matrix(nr_node_ids);
 	rebuild_node_order(nr_node_ids);
+	rebuild_llc_local_rank(max_lid + 1);
 	return true;
 err:
 	for_each_cpu(i, cpu_map) {
