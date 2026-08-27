@@ -701,6 +701,7 @@ static void rebuild_llc_node_map(int size);
 static int __rcu *sched_cache_node_dist_matrix;
 static int sched_cache_node_dist_size;
 static void rebuild_node_distance_matrix(int size);
+static void rebuild_node_order(int size);
 #endif
 
 static void update_top_cache_domain(int cpu)
@@ -1147,6 +1148,121 @@ out:
 	kfree(matrix);
 }
 
+struct sched_node_order_topology {
+	int nr_node;
+	int *order;
+};
+
+static struct sched_node_order_topology __rcu *sched_node_order_topo;
+
+static void free_node_order_topology(struct sched_node_order_topology *topo)
+{
+	if (!topo)
+		return;
+	kfree(topo->order);
+	kfree(topo);
+}
+
+/*
+ * Generic {distance, id} sort key: candidates are ranked by @dist, with
+ * @id as a deterministic tie-break when two candidates land on the same
+ * @dist.
+ */
+struct dist_key {
+	int dist;
+	int id;
+};
+
+static int dist_key_cmp(const void *a, const void *b)
+{
+	const struct dist_key *ka = a, *kb = b;
+
+	if (ka->dist != kb->dist)
+		return ka->dist - kb->dist;
+	return ka->id - kb->id;
+}
+
+static void rebuild_node_order(int size)
+{
+	struct sched_node_order_topology *topo, *old;
+	struct dist_key *cand;
+	int root, i, k;
+
+	if (size <= 0)
+		return;
+
+	topo = kzalloc_obj(*topo);
+	if (!topo)
+		return;
+
+	topo->nr_node = size;
+	topo->order = kmalloc_array((size_t)size * size, sizeof(int), GFP_KERNEL);
+	cand = kmalloc_array(size, sizeof(*cand), GFP_KERNEL);
+	if (!topo->order || !cand) {
+		kfree(cand);
+		free_node_order_topology(topo);
+		return;
+	}
+
+	for (root = 0; root < size; root++) {
+		for (i = 0; i < size; i++) {
+			cand[i].id = i;
+			cand[i].dist = sched_cache_node_distance(root, i);
+		}
+
+		/* sched_cache_node_distance() guarantees no ties within a row. */
+		sort(cand, size, sizeof(*cand), dist_key_cmp, NULL);
+
+		for (k = 0; k < size; k++)
+			topo->order[root * size + k] = cand[k].id;
+	}
+	kfree(cand);
+
+	old = rcu_dereference_protected(sched_node_order_topo,
+					lockdep_is_held(&sched_domains_mutex));
+	rcu_assign_pointer(sched_node_order_topo, topo);
+	synchronize_rcu();
+	free_node_order_topology(old);
+}
+
+/*
+ * Return the total number of steps in @cpu's for_each_sched_node() walk,
+ * i.e. the number of nodes in the system. 1 if the topology cache isn't
+ * populated yet (e.g. very early boot).
+ */
+int sched_node_order_count(int cpu)
+{
+	struct sched_node_order_topology *topo = rcu_dereference_all(sched_node_order_topo);
+	int root = cpu_to_node(cpu);
+
+	if (root < 0)
+		return 0;
+	if (!topo || root >= topo->nr_node)
+		return 1;
+
+	return topo->nr_node;
+}
+
+/*
+ * Return the node id at position @idx (0-indexed, 0 == @cpu's own node)
+ * in @cpu's node's ascending sched_cache_node_distance() order. -1 if
+ * @idx is out of range, which ends the for_each_sched_node() walk.
+ */
+int sched_node_order_at(int cpu, int idx)
+{
+	struct sched_node_order_topology *topo = rcu_dereference_all(sched_node_order_topo);
+	int root = cpu_to_node(cpu);
+
+	if (root < 0)
+		return -1;
+	if (!topo || root >= topo->nr_node)
+		return idx == 0 ? root : -1;
+	if (idx < 0 || idx >= topo->nr_node)
+		return -1;
+
+	return topo->order[root * topo->nr_node + idx];
+}
+
 /*
  * Get the effective LLC size in bytes that @cpu's bottom sched_domain
  * can use. A CPU within a cpuset partition can only use a proportion
@@ -1218,6 +1334,7 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 
 	rebuild_llc_node_map(max_lid + 1);
 	rebuild_node_distance_matrix(nr_node_ids);
+	rebuild_node_order(nr_node_ids);
 	return true;
 err:
 	for_each_cpu(i, cpu_map) {
