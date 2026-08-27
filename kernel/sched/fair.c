@@ -12046,6 +12046,7 @@ sched_reduced_capacity(struct rq *rq, struct sched_domain *sd)
 }
 
 #ifdef CONFIG_SCHED_CACHE
+extern int max_lid;
 /*
  * Record the statistics for this scheduler group for later
  * use. These values guide load balancing on aggregating tasks
@@ -12123,6 +12124,174 @@ static bool update_llc_busiest(struct lb_env *env,
 	 * There are more tasks that want to run on dst_cpu's LLC.
 	 */
 	return sgs->nr_pref_dst_llc > busiest->nr_pref_dst_llc;
+}
+
+/*
+ * Get all LLCs that are closer to the destination LLC than to the
+ * source LLC inside a NUMA.
+ */
+static int get_affi_llcs(struct sched_domain *sd, int src_llc, int dst_llc,
+			 int *affi_llcs, int *affi)
+{
+	int j = 0, src_dist, dst_dist, cur_node;
+
+	if (src_llc == dst_llc || sd->flags & (SD_NUMA | SD_SHARE_LLC))
+		return 0;
+
+	cur_node = llc_to_node(src_llc);
+	if (cur_node != llc_to_node(dst_llc))
+		return 0;
+
+	for (int i = 0; i <= max_lid; i++) {
+		if (cur_node == llc_to_node(i)) {
+			src_dist = llc_intra_node_distance(src_llc, i, cur_node);
+			dst_dist = llc_intra_node_distance(dst_llc, i, cur_node);
+			if (src_dist < 0 || dst_dist < 0)
+				continue;
+			if (src_dist > dst_dist) {
+				affi[j] = clamp(src_dist - dst_dist, 1, 1024);
+				affi_llcs[j++] = i;
+			}
+		} else {
+			/*
+			 * Assume the distance between LLCm on nodeA and LLCn on nodeB follows:
+			 * llc_dist(LLCm, LLCn) = node_dist(nodeA, nodeB) + m + n,
+			 * where m and n represent the intra-node index of LLCm and LLCn
+			 * within their respective nodes. Under this definition, we derive:
+			 * llc_dist(src_llc, i) - llc_dist(dst_llc, i) = src_llc - dst_llc
+			 */
+			if (src_llc > dst_llc) {
+				affi[j] = clamp(src_llc - dst_llc, 1, 1024);
+				affi_llcs[j++] = i;
+			}
+		}
+	}
+
+	return j;
+}
+
+static int get_affi_numas(int src_node, int dst_node, int *affi_nodes, int *affi)
+{
+	int j = 0, src_dist, dst_dist, node;
+
+	for_each_node(node) {
+		src_dist = sched_cache_node_distance(src_node, node);
+		dst_dist = sched_cache_node_distance(dst_node, node);
+		if (src_dist < 0 || dst_dist < 0)
+			continue;
+
+		if (src_dist > dst_dist) {
+			affi[j] = clamp(src_dist - dst_dist, 4, 1024);
+			affi_nodes[j++] = node;
+		}
+	}
+
+	return j;
+}
+
+static int calc_affinity_numa_score(struct sched_domain *sd, int src_cpu, int dst_cpu,
+			int *affi_node, int *affi, int *last_node, int *num)
+{
+	int src_node, dst_node, score = 0;
+
+	src_node = cpu_to_node(src_cpu);
+	dst_node = cpu_to_node(dst_cpu);
+	if (src_node != *last_node) {
+		*last_node = src_node;
+		memset(affi_node, 0, (max_lid + 1) * sizeof(int));
+		memset(affi, 0, (max_lid + 1) * sizeof(int));
+		*num = get_affi_numas(src_node, dst_node, affi_node, affi);
+	}
+
+	for (int i = 0; i < *num; i++) {
+		if ((unsigned int)affi_node[i] < nr_node_ids)
+			score += sd->numa_counts[affi_node[i]] * affi[i];
+	}
+
+	return score;
+}
+
+static int calc_affinity_llc_score(struct sched_domain *sd_cur, struct sched_domain *sd,
+			int src_cpu, int dst_cpu, int *affi_llc,
+			int *affi, int *last_llc, int *num)
+{
+	int src_llc, dst_llc, score = 0;
+
+	src_llc = llc_id(src_cpu);
+	dst_llc = llc_id(dst_cpu);
+
+	if (src_llc != *last_llc) {
+		*last_llc = src_llc;
+		memset(affi_llc, 0, (max_lid + 1) * sizeof(int));
+		memset(affi, 0, (max_lid + 1) * sizeof(int));
+		*num = get_affi_llcs(sd_cur, src_llc, dst_llc, affi_llc, affi);
+	}
+
+	for (int i = 0; i < *num; i++) {
+		if ((unsigned int)affi_llc[i] < sd->llc_max)
+			score += sd->llc_counts[affi_llc[i]] * affi[i];
+	}
+
+	return score;
+}
+
+/*
+ * Scratch arrays used while scoring rqs during load balancing. They live on
+ * the bottom sched_domain of the CPU running the balance, so they share the
+ * sched_domain lifetime and need neither a separate allocation nor any RCU
+ * handling of their own. Load balancing runs with preemption disabled, so
+ * this_rq() stays stable for a whole pass, and two CPUs balancing at the same
+ * time each get their own arrays.
+ */
+static void lb_affi_scratch(int **ids, int **weights)
+{
+	struct sched_domain *sd = rcu_dereference(this_rq()->sd);
+
+	*ids = sd ? sd->affi_ids : NULL;
+	*weights = sd ? sd->affi_weights : NULL;
+}
+
+/*
+ * To locate a source sched group/rq during load balancing, we require
+ * a metric to evaluate the migration benefit of each rq. For cache-aware
+ * scheduling, the primary optimization target is affinity improvement.
+ *
+ * This implementation quantifies affinity gains for candidate rqs by
+ * computing an affinity score for each rq.
+ *
+ * The score is calculated given source LLC/node and destination LLC/node,
+ * under two distinct scenarios: NUMA-domain load balance and NODE-domain
+ * load balance. For NUMA-level balancing, affinity gain is accounted at
+ * NUMA granularity; for node-level balancing, evaluation proceeds at LLC
+ * granularity.
+ *
+ * Taking NUMA-level balancing as an example, the score is computed as:
+ * Di = node_distance(src_node, NUMAi) - node_distance(dst_node, NUMAi)   (1)
+ * Wi = Rt_i * Di                                                       (2)
+ * p  = sum_i Wi                                                        (3)
+ *
+ * Where:
+ * i        Index of a remote NUMA node
+ * Di       Affinity gain, derived from the difference between node
+ *          distance from source to NUMAi and distance from destination
+ *          to NUMAi
+ * Rt_i     Count of tasks on this rq whose preferred NUMA is NUMAi,
+ *          retrieved via rq->sd->node_count
+ */
+static int cal_affinity_score(struct sched_domain *sd, struct rq *rq, int src_cpu, int dst_cpu,
+			int *affi_nodes, int *affi, int *last_node, int *num)
+{
+	struct sched_domain *sd_tmp = rcu_dereference(rq->sd);
+
+	if (!affi_nodes || !affi || !last_node || !num || !sd || !sd_tmp)
+		return 0;
+
+	if (sd->flags & SD_NUMA)
+		return calc_affinity_numa_score(sd_tmp, src_cpu, dst_cpu, affi_nodes,
+						affi, last_node, num);
+
+	return calc_affinity_llc_score(sd, sd_tmp, src_cpu, dst_cpu, affi_nodes,
+				       affi, last_node, num);
 }
 #else
 static inline void record_sg_llc_stats(struct lb_env *env, struct sg_lb_stats *sgs,
