@@ -644,6 +644,8 @@ static void destroy_sched_domain(struct sched_domain *sd)
 	/* only the bottom sd has llc_counts/numa_counts array */
 	kfree(sd->llc_counts);
 	kfree(sd->numa_counts);
+	kfree(sd->affi_ids);
+	kfree(sd->affi_weights);
 #endif
 	kfree(sd);
 }
@@ -855,11 +857,15 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 			sd->llc_max = tmp->llc_max;
 			sd->llc_bytes = tmp->llc_bytes;
 			sd->numa_counts = tmp->numa_counts;
+			sd->affi_ids = tmp->affi_ids;
+			sd->affi_weights = tmp->affi_weights;
 			/* make sure destroy_sched_domain() does not free it */
 			tmp->llc_counts = NULL;
 			tmp->llc_max = 0;
 			tmp->llc_bytes = 0;
 			tmp->numa_counts = NULL;
+			tmp->affi_ids = NULL;
+			tmp->affi_weights = NULL;
 #endif
 			/*
 			 * sched groups hold the flags of the child sched
@@ -1438,6 +1444,7 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 {
 	struct sched_domain *sd, *top_llc, *parent;
 	unsigned int *p_llc, *p_node;
+	int *p_ids, *p_w;
 	int i;
 
 	for_each_cpu(i, cpu_map) {
@@ -1451,8 +1458,22 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 		p_node = kcalloc_node(nr_node_ids, sizeof(unsigned int),
 				 GFP_KERNEL, cpu_to_node(i));
 
-		if (!p_llc || !p_node)
+		/* Scratch for the affinity score, see cal_affinity_score(). */
+		p_ids = kcalloc_node(max_lid + 1, sizeof(int),
+				 GFP_KERNEL, cpu_to_node(i));
+		p_w = kcalloc_node(max_lid + 1, sizeof(int),
+				 GFP_KERNEL, cpu_to_node(i));
+
+		if (!p_llc || !p_node || !p_ids || !p_w) {
+			kfree(p_llc);
+			kfree(p_node);
+			kfree(p_ids);
+			kfree(p_w);
 			goto err;
+		}
+
+		sd->affi_ids = p_ids;
+		sd->affi_weights = p_w;
 
 		top_llc = sd;
 		/*
@@ -1498,10 +1519,15 @@ err:
 		sd = *per_cpu_ptr(d->sd, i);
 		if (sd) {
 			kfree(sd->llc_counts);
+			kfree(sd->numa_counts);
+			kfree(sd->affi_ids);
+			kfree(sd->affi_weights);
 			sd->llc_counts = NULL;
 			sd->llc_max = 0;
 			sd->llc_bytes = 0;
 			sd->numa_counts = NULL;
+			sd->affi_ids = NULL;
+			sd->affi_weights = NULL;
 		}
 	}
 
