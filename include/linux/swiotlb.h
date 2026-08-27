@@ -169,6 +169,23 @@ static inline struct io_tlb_pool *swiotlb_find_pool(struct device *dev,
 	return NULL;
 }
 
+bool swiotlb_pool_is_nocopy(struct io_tlb_pool *pool, phys_addr_t paddr);
+
+static inline bool swiotlb_addr_in_default_pool(struct device *dev,
+						phys_addr_t paddr)
+{
+	struct io_tlb_mem *mem = dev->dma_io_tlb_mem;
+
+	return mem && paddr >= mem->defpool.start && paddr < mem->defpool.end;
+}
+
+static inline bool swiotlb_is_nocopy_addr(struct device *dev, phys_addr_t paddr)
+{
+	if (!swiotlb_addr_in_default_pool(dev, paddr))
+		return false;
+	return swiotlb_pool_is_nocopy(&dev->dma_io_tlb_mem->defpool, paddr);
+}
+
 static inline bool is_swiotlb_force_bounce(struct device *dev)
 {
 	struct io_tlb_mem *mem = dev->dma_io_tlb_mem;
@@ -178,6 +195,49 @@ static inline bool is_swiotlb_force_bounce(struct device *dev)
 
 void swiotlb_init(bool addressing_limited, unsigned int flags);
 void __init swiotlb_exit(void);
+struct page *swiotlb_alloc_pages(struct device *dev, unsigned int order, gfp_t gfp,
+				 unsigned int percent);
+bool swiotlb_free_pages(struct page *page, unsigned int order);
+void swiotlb_nocopy_inc_ref(struct io_tlb_pool *pool, phys_addr_t phys);
+void swiotlb_nocopy_dec_ref(struct io_tlb_pool *pool, phys_addr_t phys);
+void swiotlb_prep_compound_page(struct page *page, unsigned int order);
+void swiotlb_destroy_compound_page(struct page *page, unsigned int order);
+void swiotlb_safe_put_device(struct device *dev);
+
+extern unsigned int nocopy_tx_percent;
+extern unsigned int nocopy_rx_percent;
+
+/* Track epoch (number of delete operations) for leaf device info. */
+extern atomic_t global_device_epoch;
+
+static inline u32 swiotlb_dev_epoch(void)
+{
+	return atomic_read(&global_device_epoch);
+}
+
+static inline void swiotlb_change_epoch(void)
+{
+	atomic_inc(&global_device_epoch);
+}
+
+#if defined(CONFIG_NET) && !defined(CONFIG_PREEMPT_RT)
+/*
+ * Track the socket for the currently transmitted packet, so the dma mapping
+ * function can record there the leaf device if it needs bounce buffers.
+ */
+struct sock;
+DECLARE_PER_CPU(struct sock *, current_tx_socket);
+void sk_record_bounce_device(struct sock *sk, struct device *dev);
+static inline void dma_learn_bounce_device(struct device *dev)
+{
+	struct sock *sk = this_cpu_read(current_tx_socket);
+
+	if (sk)
+		sk_record_bounce_device(sk, dev);
+}
+#else
+static inline void dma_learn_bounce_device(struct device *dev) {}
+#endif
 void swiotlb_dev_init(struct device *dev);
 size_t swiotlb_max_mapping_size(struct device *dev);
 bool is_swiotlb_allocated(void);
@@ -233,6 +293,9 @@ static inline phys_addr_t default_swiotlb_base(void)
 static inline phys_addr_t default_swiotlb_limit(void)
 {
 	return 0;
+}
+static inline void swiotlb_safe_put_device(struct device *dev)
+{
 }
 #endif /* CONFIG_SWIOTLB */
 

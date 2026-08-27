@@ -33,6 +33,7 @@
 #include <linux/kmsan-checks.h>
 #include <linux/iommu-helper.h>
 #include <linux/init.h>
+#include <linux/log2.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/pfn.h>
@@ -62,24 +63,76 @@
  */
 #define IO_TLB_MIN_SLABS ((1<<20) >> IO_TLB_SHIFT)
 
+/* enable nocopy tx swiotlb and set the percentage of buffers allowed for it. */
+unsigned int nocopy_tx_percent;
+module_param(nocopy_tx_percent, uint, 0644);
+MODULE_PARM_DESC(nocopy_tx_percent, "percentage of swiotlb buffer allowed for nocopy tx");
+
 /**
  * struct io_tlb_slot - IO TLB slot descriptor
  * @orig_addr:	The original address corresponding to a mapped entry.
+ * @nocopy_refcnt:	Lockless atomic refcount for Nocopy buffers.
  * @alloc_size:	Size of the allocated buffer.
  * @list:	The free list describing the number of free entries available
  *		from each index.
  * @pad_slots:	Number of preceding padding slots. Valid only in the first
  *		allocated non-padding slot.
+ * @flags:	Slot attributes (e.g. SWIOTLB_SLOT_NOCOPY for Nocopy buffers).
+ *
+ * The slot descriptor has states identified by @list and @flags (SWIOTLB_SLOT_NOCOPY):
+ *
+ * 1. FREE (list > 0):
+ *    Linear sweep free slot.
+ *
+ * 2. USED (list == 0, SWIOTLB_SLOT_NOCOPY flag is NOT set in @flags):
+ *    Allocated SWIOTLB bounce buffer.
+ *    Fields used: @list, @pad_slots, @orig_addr, @alloc_size.
+ *
+ * 3. USED_NOCOPY (list == 0, SWIOTLB_SLOT_NOCOPY flag is set in @flags):
+ *    Allocated Nocopy SWIOTLB buffer.
+ *    Fields used: @list, @nocopy_refcnt, @alloc_size.
  */
+#define SWIOTLB_SLOT_NOCOPY	BIT(0)
+
+/*
+ * SWIOTLB nocopy allocations (swiotlb_alloc_pages()) do not have an original
+ * physical address to bounce, but need to pass a caller-specified pool usage
+ * limit (percentage) down to the area search logic.
+ *
+ * To avoid adding a parameter to swiotlb_find_slots(), swiotlb_search_area(),
+ * and swiotlb_search_pool_area(), the desired percentage (0..90) is encoded
+ * into the orig_addr parameter in the reserved high address range starting at
+ * INVALID_PHYS_ADDR (~0ULL).
+ *
+ * - NOCOPY_PCT_TO_ADDR(pct): Encodes a percentage into an orig_addr.
+ * - IS_SWIOTLB_NOCOPY(addr): Identifies a nocopy allocation request and
+ *   restricts slot search to the static default pool.
+ * - NOCOPY_ADDR_TO_PCT(addr): Extracts the percentage to cap max_usable
+ *   slots in swiotlb_search_pool_area().
+ */
+#define NOCOPY_PCT_MAX	(90u)
+#define NOCOPY_PCT_TO_ADDR(pct)		(INVALID_PHYS_ADDR - min(pct, NOCOPY_PCT_MAX))
+#define IS_SWIOTLB_NOCOPY(addr)		((addr) >= INVALID_PHYS_ADDR - NOCOPY_PCT_MAX)
+#define NOCOPY_ADDR_TO_PCT(addr)	((unsigned int)(INVALID_PHYS_ADDR - (addr)))
+
 struct io_tlb_slot {
-	phys_addr_t orig_addr;
+	union {
+		phys_addr_t orig_addr;
+		atomic_t nocopy_refcnt;
+	};
 	size_t alloc_size;
 	unsigned short list;
 	unsigned short pad_slots;
+	unsigned int flags;
 };
 
 static bool swiotlb_force_bounce;
 static bool swiotlb_force_disable;
+
+/* enable nocopy rx swiotlb and set the percentage of buffers allowed for it. */
+unsigned int nocopy_rx_percent;
+module_param(nocopy_rx_percent, uint, 0644);
+MODULE_PARM_DESC(nocopy_rx_percent, "percentage of swiotlb buffer allowed for nocopy rx");
 
 #ifdef CONFIG_SWIOTLB_DYNAMIC
 
@@ -176,7 +229,7 @@ static void swiotlb_adjust_nareas(unsigned int nareas)
 static unsigned int limit_nareas(unsigned int nareas, unsigned long nslots)
 {
 	if (nslots < nareas * IO_TLB_SEGSIZE)
-		return nslots / IO_TLB_SEGSIZE;
+		return rounddown_pow_of_two(nslots / IO_TLB_SEGSIZE);
 	return nareas;
 }
 
@@ -269,7 +322,16 @@ static void swiotlb_init_io_tlb_pool(struct io_tlb_pool *mem, phys_addr_t start,
 		unsigned long nslabs, bool late_alloc, unsigned int nareas)
 {
 	void *vaddr = phys_to_virt(start);
-	unsigned long bytes = nslabs << IO_TLB_SHIFT, i;
+	unsigned long bytes, i;
+
+	/*
+	 * If we have multiple areas, ensure each area's size is a multiple of
+	 * IO_TLB_SEGSIZE slots by aligning the total pool size down.
+	 */
+	if (nareas > 1)
+		nslabs = ALIGN_DOWN(nslabs, nareas * IO_TLB_SEGSIZE);
+
+	bytes = nslabs << IO_TLB_SHIFT;
 
 	mem->nslabs = nslabs;
 	mem->start = start;
@@ -290,6 +352,7 @@ static void swiotlb_init_io_tlb_pool(struct io_tlb_pool *mem, phys_addr_t start,
 		mem->slots[i].orig_addr = INVALID_PHYS_ADDR;
 		mem->slots[i].alloc_size = 0;
 		mem->slots[i].pad_slots = 0;
+		mem->slots[i].flags = 0;
 	}
 
 	memset(vaddr, 0, bytes);
@@ -859,12 +922,17 @@ static void swiotlb_bounce(struct device *dev, phys_addr_t tlb_addr, size_t size
 			   enum dma_data_direction dir, struct io_tlb_pool *mem)
 {
 	int index = (tlb_addr - mem->start) >> IO_TLB_SHIFT;
-	phys_addr_t orig_addr = mem->slots[index].orig_addr;
 	size_t alloc_size = mem->slots[index].alloc_size;
-	unsigned long pfn = PFN_DOWN(orig_addr);
 	unsigned char *vaddr = mem->vaddr + tlb_addr - mem->start;
+	phys_addr_t orig_addr;
+	unsigned long pfn;
 	int tlb_offset;
 
+	/* Nocopy swiotlb buffers do not need bouncing. */
+	if (mem->slots[index].flags & SWIOTLB_SLOT_NOCOPY)
+		return;
+
+	orig_addr = mem->slots[index].orig_addr;
 	if (orig_addr == INVALID_PHYS_ADDR)
 		return;
 
@@ -894,6 +962,7 @@ static void swiotlb_bounce(struct device *dev, phys_addr_t tlb_addr, size_t size
 		size = alloc_size;
 	}
 
+	pfn = PFN_DOWN(orig_addr);
 	if (PageHighMem(pfn_to_page(pfn))) {
 		unsigned int offset = orig_addr & ~PAGE_MASK;
 		struct page *page;
@@ -1042,7 +1111,8 @@ static int swiotlb_search_pool_area(struct device *dev, struct io_tlb_pool *pool
 	unsigned long max_slots = get_max_slots(boundary_mask);
 	unsigned int iotlb_align_mask = dma_get_min_align_mask(dev);
 	unsigned int nslots = nr_slots(alloc_size), stride;
-	unsigned int offset = swiotlb_align_offset(dev, 0, orig_addr);
+	unsigned long max_usable = pool->area_nslabs;
+	unsigned int offset;
 	unsigned int index, slots_checked, count = 0, i;
 	unsigned long flags;
 	unsigned int slot_base;
@@ -1050,6 +1120,13 @@ static int swiotlb_search_pool_area(struct device *dev, struct io_tlb_pool *pool
 
 	BUG_ON(!nslots);
 	BUG_ON(area_index >= pool->nareas);
+
+	if (IS_SWIOTLB_NOCOPY(orig_addr)) {
+		max_usable = (pool->area_nslabs * NOCOPY_ADDR_TO_PCT(orig_addr)) / 100;
+		orig_addr = 0;
+	}
+
+	offset = swiotlb_align_offset(dev, 0, orig_addr);
 
 	/*
 	 * Historically, swiotlb allocations >= PAGE_SIZE were guaranteed to be
@@ -1077,7 +1154,7 @@ static int swiotlb_search_pool_area(struct device *dev, struct io_tlb_pool *pool
 	stride = get_max_slots(max(alloc_align_mask, iotlb_align_mask));
 
 	spin_lock_irqsave(&area->lock, flags);
-	if (unlikely(nslots > pool->area_nslabs - area->used))
+	if (unlikely(area->used + nslots > max_usable))
 		goto not_found;
 
 	slot_base = area_index * pool->area_nslabs;
@@ -1154,6 +1231,9 @@ found:
  * Search one memory area in all pools for a sequence of slots that match the
  * allocation constraints.
  *
+ * If IS_SWIOTLB_NOCOPY(orig_addr) is true, the search is restricted to only the
+ * default pool, which is what swiotlb_alloc_pages() is allowed to use.
+ *
  * Return: Index of the first allocated slot, or -1 on error.
  */
 static int swiotlb_search_area(struct device *dev, int start_cpu,
@@ -1167,6 +1247,9 @@ static int swiotlb_search_area(struct device *dev, int start_cpu,
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(pool, &mem->pools, node) {
+		/* Only search the default pool (first in mem->pools) for nocopy allocations. */
+		if (IS_SWIOTLB_NOCOPY(orig_addr) && pool != &mem->defpool)
+			break;
 		if (cpu_offset >= pool->nareas)
 			continue;
 		area_index = (start_cpu + cpu_offset) & (pool->nareas - 1);
@@ -1218,6 +1301,13 @@ static int swiotlb_find_slots(struct device *dev, phys_addr_t orig_addr,
 		if (index >= 0)
 			goto found;
 	}
+
+	/*
+	 * Passing a nocopy orig_addr restricts the search to only the
+	 * default pool, so do not attempt dynamic pool expansion.
+	 */
+	if (IS_SWIOTLB_NOCOPY(orig_addr))
+		return -1;
 
 	if (!mem->can_grow)
 		return -1;
@@ -1458,11 +1548,16 @@ phys_addr_t swiotlb_tbl_map_single(struct device *dev, phys_addr_t orig_addr,
 	return tlb_addr;
 }
 
+/*
+ * called with dev == NULL from swiotlb_dealloc_pages(), in this case force offset
+ * and align_mask to 0, pad_slots is also 0, and assume the pages come from the
+ * default system pool.
+ */
 static void swiotlb_release_slots(struct device *dev, phys_addr_t tlb_addr,
 				  struct io_tlb_pool *mem)
 {
 	unsigned long flags;
-	unsigned int offset = swiotlb_align_offset(dev, 0, tlb_addr);
+	unsigned int offset = dev ? swiotlb_align_offset(dev, 0, tlb_addr) : 0;
 	int index, nslots, aindex;
 	struct io_tlb_area *area;
 	int count, i;
@@ -1496,6 +1591,7 @@ static void swiotlb_release_slots(struct device *dev, phys_addr_t tlb_addr,
 		mem->slots[i].orig_addr = INVALID_PHYS_ADDR;
 		mem->slots[i].alloc_size = 0;
 		mem->slots[i].pad_slots = 0;
+		mem->slots[i].flags = 0;
 	}
 
 	/*
@@ -1509,7 +1605,7 @@ static void swiotlb_release_slots(struct device *dev, phys_addr_t tlb_addr,
 	area->used -= nslots;
 	spin_unlock_irqrestore(&area->lock, flags);
 
-	dec_used(dev->dma_io_tlb_mem, nslots);
+	dec_used(dev ? dev->dma_io_tlb_mem : &io_tlb_default_mem, nslots);
 }
 
 #ifdef CONFIG_SWIOTLB_DYNAMIC
@@ -1554,6 +1650,13 @@ void __swiotlb_tbl_unmap_single(struct device *dev, phys_addr_t tlb_addr,
 		size_t mapping_size, enum dma_data_direction dir,
 		unsigned long attrs, struct io_tlb_pool *pool)
 {
+	int index = (tlb_addr - pool->start) >> IO_TLB_SHIFT;
+
+	if (pool->slots[index].flags & SWIOTLB_SLOT_NOCOPY) {
+		swiotlb_nocopy_dec_ref(pool, tlb_addr);
+		return;
+	}
+
 	/*
 	 * First, sync the memory before unmapping the entry
 	 */
@@ -1596,6 +1699,8 @@ dma_addr_t swiotlb_map(struct device *dev, phys_addr_t paddr, size_t size,
 {
 	phys_addr_t swiotlb_addr;
 	dma_addr_t dma_addr;
+
+	dma_learn_bounce_device(dev);
 
 	trace_swiotlb_bounced(dev, phys_to_dma(dev, paddr), size);
 
@@ -1813,7 +1918,10 @@ static int rmem_swiotlb_device_init(struct reserved_mem *rmem,
 				    struct device *dev)
 {
 	struct io_tlb_mem *mem = rmem->priv;
-	unsigned long nslabs = rmem->size >> IO_TLB_SHIFT;
+	unsigned long nslabs = round_down(rmem->size >> IO_TLB_SHIFT, IO_TLB_SEGSIZE);
+
+	if (!nslabs)
+		return -EINVAL;
 
 	/* Set Per-device io tlb area to one */
 	unsigned int nareas = 1;
@@ -1899,3 +2007,171 @@ static const struct reserved_mem_ops rmem_swiotlb_ops = {
 
 RESERVEDMEM_OF_DECLARE(dma, "restricted-dma-pool", &rmem_swiotlb_ops);
 #endif /* CONFIG_DMA_RESTRICTED_POOL */
+
+static inline int swiotlb_nocopy_head_index(struct io_tlb_pool *pool, phys_addr_t phys)
+{
+	return (page_to_phys(compound_head(phys_to_page(phys))) - pool->start) >> IO_TLB_SHIFT;
+}
+
+/**
+ * swiotlb_dealloc_pages() - Actually release Nocopy slots and page metadata
+ * @pool:	SWIOTLB pool containing the buffer.
+ * @parent:	Slot index of the buffer head.
+ */
+static void swiotlb_dealloc_pages(struct io_tlb_pool *pool, unsigned int parent)
+{
+	unsigned int order = get_order(pool->slots[parent].alloc_size);
+	phys_addr_t paddr = pool->start + (parent << IO_TLB_SHIFT);
+	struct page *head = phys_to_page(paddr);
+
+	swiotlb_destroy_compound_page(head, order);
+	swiotlb_release_slots(NULL, paddr, pool);
+}
+
+struct page *swiotlb_alloc_pages(struct device *dev, unsigned int order,
+				 gfp_t gfp, unsigned int percent)
+{
+	struct io_tlb_pool *pool;
+	struct page *page;
+	int index, nslots, i;
+
+	if (WARN_ON_ONCE(!dev || !dev->dma_io_tlb_mem))
+		return NULL;
+
+	if (dev->dma_io_tlb_mem != &io_tlb_default_mem)
+		return NULL;
+
+	index = swiotlb_find_slots(dev, NOCOPY_PCT_TO_ADDR(percent),
+				   PAGE_SIZE << order, (PAGE_SIZE << order) - 1,
+				   &pool);
+	if (index < 0)
+		return NULL;
+
+	nslots = (PAGE_SIZE << order) >> IO_TLB_SHIFT;
+	page = phys_to_page(pool->start + (index << IO_TLB_SHIFT));
+	swiotlb_prep_compound_page(page, order);
+	for (i = 0; i < nslots; i++)
+		pool->slots[index + i].flags |= SWIOTLB_SLOT_NOCOPY;
+	atomic_set(&pool->slots[index].nocopy_refcnt, 1);
+	return page;
+}
+EXPORT_SYMBOL(swiotlb_alloc_pages);
+
+bool swiotlb_free_pages(struct page *page, unsigned int order)
+{
+	struct io_tlb_mem *mem = &io_tlb_default_mem;
+	struct io_tlb_pool *pool = &mem->defpool;
+	struct page *head = compound_head(page);
+	unsigned int parent;
+	phys_addr_t paddr;
+
+	paddr = page_to_phys(head);
+	if (paddr < pool->start || paddr >= pool->end)
+		return false;
+
+	parent = swiotlb_nocopy_head_index(pool, paddr);
+	if (!(pool->slots[parent].flags & SWIOTLB_SLOT_NOCOPY))
+		return false;
+
+	if (atomic_dec_and_test(&pool->slots[parent].nocopy_refcnt))
+		swiotlb_dealloc_pages(pool, parent);
+
+	return true;
+}
+EXPORT_SYMBOL(swiotlb_free_pages);
+
+void swiotlb_nocopy_inc_ref(struct io_tlb_pool *pool, phys_addr_t phys)
+{
+	int head_idx = swiotlb_nocopy_head_index(pool, phys);
+
+	atomic_inc(&pool->slots[head_idx].nocopy_refcnt);
+}
+EXPORT_SYMBOL(swiotlb_nocopy_inc_ref);
+
+void swiotlb_nocopy_dec_ref(struct io_tlb_pool *pool, phys_addr_t phys)
+{
+	int head_idx = swiotlb_nocopy_head_index(pool, phys);
+
+	if (atomic_dec_and_test(&pool->slots[head_idx].nocopy_refcnt))
+		swiotlb_dealloc_pages(pool, head_idx);
+}
+EXPORT_SYMBOL(swiotlb_nocopy_dec_ref);
+
+bool swiotlb_pool_is_nocopy(struct io_tlb_pool *pool, phys_addr_t paddr)
+{
+	int index = (paddr - pool->start) >> IO_TLB_SHIFT;
+
+	return pool->slots[index].flags & SWIOTLB_SLOT_NOCOPY;
+}
+EXPORT_SYMBOL_GPL(swiotlb_pool_is_nocopy);
+
+/*
+ * Dropping the reference to sk_swiotlb.dev must be done in two steps:
+ *
+ * 1. Readers inspect the pointer inside RCU critical sections without
+ *    acquiring a reference. Use call_rcu() to wait for an RCU grace period
+ *    to elapse so lockless in-flight readers finish accessing the device.
+ *
+ * 2. The RCU callback executes in atomic softirq context, but put_device()
+ *    can block when releasing a device. Use schedule_work() to transition
+ *    to sleepable process context where calling put_device() is safe.
+ */
+struct swiotlb_deferred_put {
+	struct rcu_head rcu;
+	struct work_struct work;
+	struct device *dev;
+};
+
+static void swiotlb_deferred_put_work(struct work_struct *work)
+{
+	struct swiotlb_deferred_put *dp = container_of(work, struct swiotlb_deferred_put, work);
+
+	/* Stage 2: Safely call put_device (can sleep) in process context */
+	put_device(dp->dev);
+	kfree(dp);
+}
+
+static void swiotlb_deferred_put_rcu(struct rcu_head *rcu)
+{
+	struct swiotlb_deferred_put *dp = container_of(rcu, struct swiotlb_deferred_put, rcu);
+
+	/* RCU grace period has passed. Queue the work to do the actual put */
+	schedule_work(&dp->work);
+}
+
+/**
+ * swiotlb_safe_put_device() - Safely release device reference from atomic/interrupt context
+ * @dev: The device structure to release.
+ *
+ * Enqueues a deferred put_device() call on a workqueue using GFP_ATOMIC.
+ * If memory allocation fails, the reference is leaked to avoid an immediate crash.
+ */
+void swiotlb_safe_put_device(struct device *dev)
+{
+	struct swiotlb_deferred_put *dp;
+
+	if (!dev)
+		return;
+
+	/* Lockless fast-path: if we are not the last reference, decrement is safe */
+	if (refcount_dec_not_one(&dev->kobj.kref.refcount))
+		return;
+
+	/*
+	 * On the last reference we must defer the final put_device() to task
+	 * context because it will trigger device_release() which can sleep.
+	 */
+	dp = kmalloc_obj(*dp, GFP_ATOMIC);
+	if (dp) {
+		INIT_WORK(&dp->work, swiotlb_deferred_put_work);
+		dp->dev = dev;
+		/* Stage 1: Wait for RCU readers to finish */
+		call_rcu(&dp->rcu, swiotlb_deferred_put_rcu);
+	} else {
+		pr_warn_ratelimited("swiotlb: failed to allocate deferred put, leaking device ref\n");
+	}
+}
+EXPORT_SYMBOL_GPL(swiotlb_safe_put_device);
+
+atomic_t global_device_epoch = ATOMIC_INIT(1);
+EXPORT_SYMBOL(global_device_epoch);
