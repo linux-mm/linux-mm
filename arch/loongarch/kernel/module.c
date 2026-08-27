@@ -484,6 +484,7 @@ int apply_relocate_add(Elf_Shdr *sechdrs, const char *strtab,
 	Elf_Addr v;
 	Elf_Sym *sym;
 	Elf_Rela *rel = (void *) sechdrs[relsec].sh_addr;
+	Elf_Shdr *dst_sec = sechdrs + sechdrs[relsec].sh_info;
 
 	pr_debug("%s: Applying relocate section %u to %u\n", __func__, relsec,
 	       sechdrs[relsec].sh_info);
@@ -521,6 +522,10 @@ int apply_relocate_add(Elf_Shdr *sechdrs, const char *strtab,
 		       (unsigned long)sym->st_value, (unsigned long)rel[i].r_addend, (unsigned long)location);
 
 		v = sym->st_value + rel[i].r_addend;
+
+		/* Skip address pairing for non-exec sections */
+		if (!(dst_sec->sh_flags & SHF_EXECINSTR))
+			goto apply_normal;
 
 		if (type == R_LARCH_PCADD_LO12 || type == R_LARCH_GOT_PCADD_LO12) {
 			bool found = false;
@@ -562,6 +567,7 @@ int apply_relocate_add(Elf_Shdr *sechdrs, const char *strtab,
 			idx = j; /* Record the previous j-loop end index */
 		}
 
+apply_normal:
 		switch (type) {
 		case R_LARCH_B26:
 			err = apply_r_larch_b26(mod, sechdrs, location,
