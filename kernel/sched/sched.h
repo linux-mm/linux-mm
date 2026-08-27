@@ -4147,6 +4147,22 @@ static inline bool sched_cache_enabled(void)
 
 extern void sched_cache_active_set(void);
 
+extern int sched_node_order_count(int cpu);
+extern int sched_node_order_at(int cpu, int idx);
+
+/*
+ * Walk every NUMA node in the system starting from @cpu's own node,
+ * nearest-first by the de-duplicated sched_cache_node_distance()
+ * matrix (topology.c), until every node has been yielded. @node
+ * receives the node id at each step (index 0 is always @cpu's own
+ * node).
+ */
+#define for_each_sched_node(cpu, node)					\
+	for (int __sn_idx = 0, __sn_nr = sched_node_order_count((cpu)); \
+	     __sn_idx < __sn_nr &&					\
+	     ((node) = sched_node_order_at((cpu), __sn_idx)) >= 0;	\
+	     __sn_idx++)
+
 #endif
 
 void sched_domains_free_llc_id(int cpu);
