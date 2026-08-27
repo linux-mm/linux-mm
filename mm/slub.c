@@ -46,6 +46,7 @@
 #include <linux/prandom.h>
 #include <kunit/test.h>
 #include <kunit/test-bug.h>
+#include <kunit/visibility.h>
 #include <linux/sort.h>
 #include <linux/irq_work.h>
 #include <linux/kprobes.h>
@@ -330,7 +331,13 @@ struct track {
 	unsigned long when;	/* When did the operation occur */
 };
 
-enum track_item { TRACK_ALLOC, TRACK_FREE };
+enum track_item {
+	TRACK_ALLOC,
+	TRACK_FREE,
+	TRACK_PREV_ALLOC,
+	TRACK_PREV_FREE,
+	TRACK_NR,
+};
 
 #ifdef SLAB_SUPPORTS_SYSFS
 static int sysfs_slab_add(struct kmem_cache *);
@@ -754,7 +761,7 @@ static inline void set_orig_size(struct kmem_cache *s,
 		return;
 
 	p += get_info_end(s);
-	p += sizeof(struct track) * 2;
+	p += sizeof(struct track) * TRACK_NR;
 
 	*(unsigned long *)p = orig_size;
 }
@@ -770,7 +777,7 @@ static inline unsigned long get_orig_size(struct kmem_cache *s, void *object)
 		return s->object_size;
 
 	p += get_info_end(s);
-	p += sizeof(struct track) * 2;
+	p += sizeof(struct track) * TRACK_NR;
 
 	return *(unsigned long *)p;
 }
@@ -888,7 +895,7 @@ static unsigned int obj_exts_offset_in_object(struct kmem_cache *s)
 	unsigned int offset = get_info_end(s);
 
 	if (kmem_cache_debug_flags(s, SLAB_STORE_USER))
-		offset += sizeof(struct track) * 2;
+		offset += sizeof(struct track) * TRACK_NR;
 
 	if (slub_debug_orig_size(s))
 		offset += sizeof(unsigned long);
@@ -1075,12 +1082,23 @@ static void set_track_update(struct kmem_cache *s, void *object,
 	p->when = jiffies;
 }
 
-static __always_inline void set_track(struct kmem_cache *s, void *object,
-				      enum track_item alloc, unsigned long addr, gfp_t gfp_flags)
+static __always_inline void set_alloc_track(struct kmem_cache *s, void *object,
+					    unsigned long addr, gfp_t gfp_flags)
 {
 	depot_stack_handle_t handle = set_track_prepare(gfp_flags);
+	struct track *alloc = get_track(s, object, TRACK_ALLOC);
+	struct track *free = get_track(s, object, TRACK_FREE);
+	struct track *prev_alloc;
+	struct track *prev_free;
 
-	set_track_update(s, object, alloc, addr, handle);
+	if (alloc->addr && free->addr) {
+		prev_alloc = get_track(s, object, TRACK_PREV_ALLOC);
+		prev_free = get_track(s, object, TRACK_PREV_FREE);
+		*prev_alloc = *alloc;
+		*prev_free = *free;
+	}
+
+	set_track_update(s, object, TRACK_ALLOC, addr, handle);
 }
 
 static void init_tracking(struct kmem_cache *s, void *object)
@@ -1091,7 +1109,7 @@ static void init_tracking(struct kmem_cache *s, void *object)
 		return;
 
 	p = get_track(s, object, TRACK_ALLOC);
-	memset(p, 0, 2*sizeof(struct track));
+	memset(p, 0, sizeof(struct track) * TRACK_NR);
 }
 
 static void print_track(const char *s, struct track *t, unsigned long pr_time)
@@ -1114,13 +1132,32 @@ static void print_track(const char *s, struct track *t, unsigned long pr_time)
 
 void print_tracking(struct kmem_cache *s, void *object)
 {
+	struct track *prev_alloc;
 	unsigned long pr_time = jiffies;
+
 	if (!(s->flags & SLAB_STORE_USER))
 		return;
 
 	print_track("Allocated", get_track(s, object, TRACK_ALLOC), pr_time);
 	print_track("Freed", get_track(s, object, TRACK_FREE), pr_time);
+
+	prev_alloc = get_track(s, object, TRACK_PREV_ALLOC);
+	if (!prev_alloc->addr)
+		return;
+
+	pr_err("Previous object lifetime:\n");
+	print_track("Allocated", prev_alloc, pr_time);
+	print_track("Freed", get_track(s, object, TRACK_PREV_FREE), pr_time);
 }
+
+#if IS_ENABLED(CONFIG_SLUB_KUNIT_TEST)
+bool slab_test_has_previous_lifetime(struct kmem_cache *s, void *object)
+{
+	return get_track(s, object, TRACK_PREV_ALLOC)->addr &&
+	       get_track(s, object, TRACK_PREV_FREE)->addr;
+}
+EXPORT_SYMBOL_IF_KUNIT(slab_test_has_previous_lifetime);
+#endif
 
 static void print_slab_info(const struct slab *slab)
 {
@@ -1200,7 +1237,7 @@ static void print_trailer(struct kmem_cache *s, struct slab *slab, u8 *p)
 	off = get_info_end(s);
 
 	if (s->flags & SLAB_STORE_USER)
-		off += 2 * sizeof(struct track);
+		off += sizeof(struct track) * TRACK_NR;
 
 	if (slub_debug_orig_size(s))
 		off += sizeof(unsigned long);
@@ -1367,8 +1404,8 @@ skip_bug_print:
  *
  * [Metadata starts at object + s->inuse]
  *   - A. freelist pointer (if freeptr_outside_object)
- *   - B. alloc tracking (SLAB_STORE_USER)
- *   - C. free tracking (SLAB_STORE_USER)
+ *   - B. current alloc/free tracking (SLAB_STORE_USER)
+ *   - C. previous alloc/free tracking (SLAB_STORE_USER)
  *   - D. original request size (SLAB_KMALLOC && SLAB_STORE_USER)
  *   - E. KASAN metadata (if enabled)
  *
@@ -1404,7 +1441,7 @@ static int check_pad_bytes(struct kmem_cache *s, struct slab *slab, u8 *p)
 
 	if (s->flags & SLAB_STORE_USER) {
 		/* We also have user information there */
-		off += 2 * sizeof(struct track);
+		off += sizeof(struct track) * TRACK_NR;
 
 		if (s->flags & SLAB_KMALLOC)
 			off += sizeof(unsigned long);
@@ -2025,8 +2062,8 @@ static inline void slab_pad_check(struct kmem_cache *s, struct slab *slab) {}
 static inline int check_object(struct kmem_cache *s, struct slab *slab,
 			void *object, u8 val) { return 1; }
 static inline depot_stack_handle_t set_track_prepare(gfp_t gfp_flags) { return 0; }
-static inline void set_track(struct kmem_cache *s, void *object,
-			     enum track_item alloc, unsigned long addr, gfp_t gfp_flags) {}
+static inline void set_alloc_track(struct kmem_cache *s, void *object,
+				   unsigned long addr, gfp_t gfp_flags) {}
 static inline void add_full(struct kmem_cache *s, struct kmem_cache_node *n,
 					struct slab *slab) {}
 static inline void remove_full(struct kmem_cache *s, struct kmem_cache_node *n,
@@ -4495,7 +4532,7 @@ new_objects:
 
 success:
 	if (kmem_cache_debug_flags(s, SLAB_STORE_USER))
-		set_track(s, object, TRACK_ALLOC, ac->caller_addr, gfpflags);
+		set_alloc_track(s, object, ac->caller_addr, gfpflags);
 
 	return object;
 }
@@ -7890,7 +7927,7 @@ static int calculate_sizes(struct kmem_cache_args *args, struct kmem_cache *s)
 		 * Need to store information about allocs and frees after
 		 * the object.
 		 */
-		size += 2 * sizeof(struct track);
+		size += sizeof(struct track) * TRACK_NR;
 
 		/* Save the original kmalloc request size */
 		if (flags & SLAB_KMALLOC)
