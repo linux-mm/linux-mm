@@ -1826,12 +1826,13 @@ static inline void update_avg_scale(u64 *avg, u64 sample)
 
 static void task_cache_work(struct callback_head *work)
 {
-	int cpu, m_a_cpu = -1, nr_running = 0, curr_cpu;
 	unsigned long next_scan, now = jiffies;
 	struct task_struct *p = current, *cur;
-	unsigned long curr_m_a_occ = 0;
 	struct mm_struct *mm = p->mm;
-	unsigned long m_a_occ = 0;
+	unsigned long m_a_n_occ = 0, curr_m_a_n_occ = 0, curr_m_a_occ = 0;
+	unsigned long pref_llc_occ = 0;
+	int cpu, m_a_n_cpu = -1, nr_running = 0, curr_cpu;
+	int pref_cpu, pref_llc_cpu = -1, new_cpu = -1;
 	cpumask_var_t cpus;
 
 	WARN_ON_ONCE(work != &p->cache_work);
@@ -1863,6 +1864,13 @@ static void task_cache_work(struct callback_head *work)
 	if (!zalloc_cpumask_var(&cpus, GFP_KERNEL))
 		return;
 
+	/*
+	 * Sample the current preference once, up front. Re-reading it during
+	 * the scan would let a choice made while walking one node feed into
+	 * the comparison made for the next one.
+	 */
+	pref_cpu = READ_ONCE(mm->sc_stat.cpu);
+
 	scoped_guard (cpus_read_lock) {
 		guard(rcu)();
 
@@ -1870,68 +1878,93 @@ static void task_cache_work(struct callback_head *work)
 
 		for_each_cpu(cpu, cpus) {
 			/* XXX sched_cluster_active */
-			struct sched_domain *sd = rcu_dereference_all(per_cpu(sd_llc, cpu));
-			unsigned long occ, m_occ = 0, a_occ = 0;
-			int m_cpu = -1, i;
+			struct sched_domain *nsd = per_cpu(sd_node, cpu);
+			unsigned long occ, m_occ, a_occ, a_n_occ = 0;
+			unsigned long m_llc_occ = 0;
+			int m_llc_cpu = -1, m_cpu, i, k;
 
-			if (!sd)
+			if (!nsd)
 				continue;
 
-			for_each_cpu(i, sched_domain_span(sd)) {
-				occ = fraction_mm_sched(cpu_rq(i),
+			for_each_cpu_and(k, sched_domain_span(nsd), cpus) {
+				a_occ = m_occ = 0;
+				m_cpu = -1;
+				/* XXX sched_cluster_active */
+				struct sched_domain *sd =
+					rcu_dereference_all(per_cpu(sd_llc, k));
+
+				if (!sd)
+					continue;
+
+				for_each_cpu(i, sched_domain_span(sd)) {
+					occ = fraction_mm_sched(cpu_rq(i),
 							per_cpu_ptr(mm->sc_stat.pcpu_sched, i));
-				a_occ += occ;
-				if (occ > m_occ) {
-					m_occ = occ;
-					m_cpu = i;
+					a_occ += occ;
+					if (occ > m_occ) {
+						m_occ = occ;
+						m_cpu = i;
+					}
+
+					cur = rcu_dereference_all(cpu_rq(i)->curr);
+					if (cur && !(cur->flags & (PF_EXITING | PF_KTHREAD)) &&
+					    cur->mm == mm)
+						nr_running++;
 				}
 
-				cur = rcu_dereference_all(cpu_rq(i)->curr);
-				if (cur && !(cur->flags & (PF_EXITING | PF_KTHREAD)) &&
-				    cur->mm == mm)
-					nr_running++;
+				cpumask_andnot(cpus, cpus, sched_domain_span(sd));
+				if (a_occ > m_llc_occ) {
+					m_llc_occ = a_occ;
+					m_llc_cpu = m_cpu;
+				}
+				if (pref_cpu >= 0 && llc_id(pref_cpu) == llc_id(k))
+					curr_m_a_occ = a_occ;
+				/* record for numa node */
+				a_n_occ += a_occ;
 			}
 
 			/*
-			 * Compare the accumulated occupancy of each LLC. The
-			 * reason for using accumulated occupancy rather than average
-			 * per CPU occupancy is that it works better in asymmetric LLC
-			 * scenarios.
-			 * For example, if there are 2 threads in a 4CPU LLC and 3
-			 * threads in an 8CPU LLC, it might be better to choose the one
-			 * with 3 threads. However, this would not be the case if the
-			 * occupancy is divided by the number of CPUs in an LLC (i.e.,
-			 * if average per CPU occupancy is used).
-			 * Besides, NUMA balancing fault statistics behave similarly:
-			 * the total number of faults per node is compared rather than
-			 * the average number of faults per CPU. This strategy is also
-			 * followed here.
+			 * Remember the busiest LLC of the node the preference
+			 * currently points at, so that the LLC level decision can
+			 * be taken once, after the whole scan.
 			 */
-			if (a_occ > m_a_occ) {
-				m_a_occ = a_occ;
-				m_a_cpu = m_cpu;
+			if (pref_cpu >= 0 && m_llc_cpu >= 0 &&
+			    cpu_to_node(pref_cpu) == cpu_to_node(m_llc_cpu)) {
+				pref_llc_occ = m_llc_occ;
+				pref_llc_cpu = m_llc_cpu;
 			}
 
-			if (llc_id(cpu) == llc_id(READ_ONCE(mm->sc_stat.cpu)))
-				curr_m_a_occ = a_occ;
+			if (a_n_occ > m_a_n_occ) {
+				m_a_n_occ = a_n_occ;
+				m_a_n_cpu = m_llc_cpu;
+			}
 
-			cpumask_andnot(cpus, cpus, sched_domain_span(sd));
+			if (pref_cpu >= 0 &&
+			    cpu_to_node(cpu) == cpu_to_node(pref_cpu))
+				curr_m_a_n_occ = a_n_occ;
 		}
 	}
 
-	if (m_a_occ > (2 * curr_m_a_occ)) {
-		/*
-		 * Avoid switching sc_stat.cpu too fast.
-		 * The reason to choose 2X is because:
-		 * 1. It is better to keep the preferred LLC stable,
-		 *    rather than changing it frequently and cause migrations
-		 * 2. 2X means the new preferred LLC has at least 1 more
-		 *    busy CPU than the old one(200% vs 100%, eg)
-		 * 3. 2X is chosen based on test results, as it delivers
-		 *    the optimal performance gain so far.
-		 */
-		WRITE_ONCE(mm->sc_stat.cpu, m_a_cpu);
-	}
+	/*
+	 * Avoid switching sc_stat.cpu too fast. The reason to choose 2X is
+	 * because:
+	 * 1. It is better to keep the preferred LLC stable, rather than
+	 *    changing it frequently and cause migrations
+	 * 2. 2X means the new preferred LLC has at least 1 more busy CPU than
+	 *    the old one(200% vs 100%, eg)
+	 * 3. 2X is chosen based on test results, as it delivers the optimal
+	 *    performance gain so far.
+	 *
+	 * Moving to another node takes precedence over moving inside the
+	 * current one, as it did when the two updates were applied in that
+	 * order.
+	 */
+	if (m_a_n_occ > 2 * curr_m_a_n_occ)
+		new_cpu = m_a_n_cpu;
+	else if (pref_llc_cpu >= 0 && pref_llc_occ > 2 * curr_m_a_occ)
+		new_cpu = pref_llc_cpu;
+
+	if (new_cpu >= 0)
+		WRITE_ONCE(mm->sc_stat.cpu, new_cpu);
 
 	update_avg_scale(&mm->sc_stat.nr_running_avg, nr_running);
 	free_cpumask_var(cpus);
