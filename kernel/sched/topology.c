@@ -685,6 +685,11 @@ DEFINE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
 DEFINE_STATIC_KEY_FALSE(sched_asym_cpucapacity);
 DEFINE_STATIC_KEY_FALSE(sched_cluster_active);
 
+#ifdef CONFIG_SCHED_CACHE
+static int __rcu *llc_to_node_map;
+static void rebuild_llc_node_map(int size);
+#endif
+
 static void update_top_cache_domain(int cpu)
 {
 	struct sched_domain_shared *sds = NULL;
@@ -856,6 +861,56 @@ DEFINE_STATIC_KEY_FALSE(sched_cache_active);
 /* user wants cache aware scheduling [0 or 1] */
 int sysctl_sched_cache_user = 1;
 
+int llc_to_node(int llc)
+{
+	int node = -1;
+	int *map = NULL;
+
+	rcu_read_lock();
+	map = rcu_dereference(llc_to_node_map);
+	if (map && llc >= 0 && llc <= max_lid)
+		node = map[llc];
+	rcu_read_unlock();
+
+	return node;
+}
+
+static void rebuild_llc_node_map(int size)
+{
+	int *new_map, *old_map;
+	u8 *seen_llc;
+	int cpu, llc;
+
+	new_map = kcalloc(size, sizeof(int), GFP_KERNEL);
+	if (!new_map)
+		return;
+	seen_llc = kcalloc(size, sizeof(*seen_llc), GFP_KERNEL);
+	if (!seen_llc) {
+		kfree(new_map);
+		return;
+	}
+
+	/*
+	 * for_each_possible_cpu() revisits the same LLC non-consecutively
+	 * under SMT (each node's LLCs are walked once per thread), so
+	 * dedup by llc id via seen_llc[], not by comparing against the
+	 * immediately preceding CPU's llc.
+	 */
+	for_each_possible_cpu(cpu) {
+		llc = per_cpu(sd_llc_id, cpu);
+		if (llc < 0 || llc >= size || seen_llc[llc])
+			continue;
+		seen_llc[llc] = 1;
+		new_map[llc] = cpu_to_node(cpu);
+	}
+	kfree(seen_llc);
+
+	old_map = rcu_dereference_protected(llc_to_node_map, true);
+	rcu_assign_pointer(llc_to_node_map, new_map);
+	synchronize_rcu();
+	kfree(old_map);
+}
+
 /*
  * Get the effective LLC size in bytes that @cpu's bottom sched_domain
  * can use. A CPU within a cpuset partition can only use a proportion
@@ -925,6 +980,7 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 		}
 	}
 
+	rebuild_llc_node_map(max_lid + 1);
 	return true;
 err:
 	for_each_cpu(i, cpu_map) {
