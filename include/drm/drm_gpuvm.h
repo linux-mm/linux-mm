@@ -30,6 +30,7 @@
 #include <linux/llist.h>
 #include <linux/rbtree.h>
 #include <linux/types.h>
+#include <linux/folio_pool.h>
 
 #include <drm/drm_device.h>
 #include <drm/drm_gem.h>
@@ -338,6 +339,11 @@ struct drm_gpuvm {
 	 * @bo_defer: structure holding vm_bos that need to be destroyed
 	 */
 	struct llist_head bo_defer;
+
+	/**
+	 * @va_scratchpad: folio scratchpad for transient GPU VA range allocations
+	 */
+	struct folio_scratchpad va_scratchpad;
 };
 
 void drm_gpuvm_init(struct drm_gpuvm *gpuvm, const char *name,

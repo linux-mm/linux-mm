@@ -288,8 +288,20 @@ static int lockdep_stats_show(struct seq_file *m, void *v)
 			nr_lock_classes, MAX_LOCKDEP_KEYS);
 	seq_printf(m, " dynamic-keys:                  %11lu\n",
 			nr_dynamic_keys);
-	seq_printf(m, " direct dependencies:           %11lu [max: %lu]\n",
-			nr_list_entries, MAX_LOCKDEP_ENTRIES);
+	{
+		unsigned int fp_chunks = 0;
+		size_t fp_chunk_sz = 0, fp_tail_used = 0;
+
+		lockdep_pool_stats(&fp_chunks, &fp_chunk_sz, &fp_tail_used);
+		if (fp_chunks) {
+			seq_printf(m, " direct dependencies:           %11lu [dynamic: %u x %zu kB, tail: %zu kB/%zu kB]\n",
+				   nr_list_entries, fp_chunks, fp_chunk_sz / 1024,
+				   fp_tail_used / 1024, fp_chunk_sz / 1024);
+		} else {
+			seq_printf(m, " direct dependencies:           %11lu [max: %lu]\n",
+				   nr_list_entries, MAX_LOCKDEP_ENTRIES);
+		}
+	}
 	seq_printf(m, " indirect dependencies:         %11lu\n",
 			sum_forward_deps);
 
