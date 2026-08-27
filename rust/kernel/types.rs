@@ -15,6 +15,18 @@ use pin_init::{PinInit, Wrapper, Zeroable};
 pub mod for_lt;
 pub use for_lt::ForLt;
 
+pub use crate::{
+    owned::{
+        Ownable,
+        OwnableRefCounted,
+        Owned, //
+    },
+    sync::aref::{
+        AlwaysRefCounted,
+        RefCounted, //
+    }, //
+};
+
 /// Used to transfer ownership to and from foreign (non-Rust) languages.
 ///
 /// Ownership is transferred from Rust to a foreign language by calling [`Self::into_foreign`] and
