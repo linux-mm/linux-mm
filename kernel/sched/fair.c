@@ -1568,8 +1568,13 @@ static void account_llc_enqueue(struct rq *rq, struct task_struct *p)
 	p->pref_llc_queued = pref_llc_queued;
 
 	sd = rcu_dereference_all(rq->sd);
-	if (sd && (unsigned int)pref_llc < sd->llc_max)
+	if (sd && (unsigned int)pref_llc < sd->llc_max) {
+		int pref_numa = llc_to_node(pref_llc);
 		sd->llc_counts[pref_llc]++;
+		if (sd->numa_counts &&
+		    (unsigned int)pref_numa < nr_node_ids)
+			sd->numa_counts[pref_numa]++;
+	}
 }
 
 static void account_llc_dequeue(struct rq *rq, struct task_struct *p)
@@ -1606,8 +1611,14 @@ static void account_llc_dequeue(struct rq *rq, struct task_struct *p)
 		 * This undercount is temporary and accurate accounting
 		 * will resume once the rq has a chance to be idle.
 		 */
-		if (sd->llc_counts[pref_llc])
+		if (sd->llc_counts[pref_llc]) {
+			int pref_numa = llc_to_node(pref_llc);
 			sd->llc_counts[pref_llc]--;
+			if (sd->numa_counts &&
+			    (unsigned int)pref_numa < nr_node_ids &&
+			    sd->numa_counts[pref_numa])
+				sd->numa_counts[pref_numa]--;
+		}
 	}
 }
 
@@ -1766,11 +1777,12 @@ void account_mm_sched(struct rq *rq, struct task_struct *p, s64 delta_exec)
 	mm_sched_llc = get_pref_llc(p, mm);
 
 	/* task not on rq accounted later in account_entity_enqueue() */
-	if (task_running_on_cpu(rq->cpu, p) &&
-	    READ_ONCE(p->preferred_llc) != mm_sched_llc) {
-		account_llc_dequeue(rq, p);
-		WRITE_ONCE(p->preferred_llc, mm_sched_llc);
-		account_llc_enqueue(rq, p);
+	if (task_running_on_cpu(rq->cpu, p)) {
+		if (READ_ONCE(p->preferred_llc) != mm_sched_llc) {
+			account_llc_dequeue(rq, p);
+			WRITE_ONCE(p->preferred_llc, mm_sched_llc);
+			account_llc_enqueue(rq, p);
+		}
 	}
 }
 
