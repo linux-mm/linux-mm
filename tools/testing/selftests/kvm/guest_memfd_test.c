@@ -76,33 +76,53 @@ static void test_mmap_supported(int fd, size_t total_size)
 	kvm_munmap(mem, total_size);
 }
 
+/*
+ * Fill @nids with the first @nr_nids nodes in the allowed mask.
+ * Return false if the mask contains fewer than @nr_nids nodes.
+ */
+static bool get_numa_node_ids(int *nids, int nr_nids)
+{
+	unsigned long nodemask = get_numa_mem_nodes();
+	unsigned long nid;
+	int nr_found = 0;
+
+	for_each_set_bit(nid, &nodemask, BITS_PER_TYPE(nodemask)) {
+		nids[nr_found++] = nid;
+		if (nr_found == nr_nids)
+			return true;
+	}
+
+	return false;
+}
+
 static void test_mbind(int fd, size_t total_size)
 {
-	const unsigned long nodemask_0 = 1; /* nid: 0 */
-	unsigned long nodemask = 0;
-	unsigned long maxnode = BITS_PER_TYPE(nodemask);
+	unsigned long nodemask, bind_nodemask;
+	unsigned long maxnode = BITS_PER_TYPE(nodemask) + 1;
 	int policy;
 	char *mem;
+	int nid;
 	int ret;
 
-	if (!is_multi_numa_node_system())
+	if (!get_numa_node_ids(&nid, 1))
 		return;
 
+	bind_nodemask = 1UL << nid;
 	mem = kvm_mmap(total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd);
 
 	/* Test MPOL_INTERLEAVE policy */
-	kvm_mbind(mem, page_size * 2, MPOL_INTERLEAVE, &nodemask_0, maxnode, 0);
+	kvm_mbind(mem, page_size * 2, MPOL_INTERLEAVE, &bind_nodemask, maxnode, 0);
 	kvm_get_mempolicy(&policy, &nodemask, maxnode, mem, MPOL_F_ADDR);
-	TEST_ASSERT(policy == MPOL_INTERLEAVE && nodemask == nodemask_0,
+	TEST_ASSERT(policy == MPOL_INTERLEAVE && nodemask == bind_nodemask,
 		    "Wanted MPOL_INTERLEAVE (%u) and nodemask 0x%lx, got %u and 0x%lx",
-		    MPOL_INTERLEAVE, nodemask_0, policy, nodemask);
+		    MPOL_INTERLEAVE, bind_nodemask, policy, nodemask);
 
 	/* Test basic MPOL_BIND policy */
-	kvm_mbind(mem + page_size * 2, page_size * 2, MPOL_BIND, &nodemask_0, maxnode, 0);
+	kvm_mbind(mem + page_size * 2, page_size * 2, MPOL_BIND, &bind_nodemask, maxnode, 0);
 	kvm_get_mempolicy(&policy, &nodemask, maxnode, mem + page_size * 2, MPOL_F_ADDR);
-	TEST_ASSERT(policy == MPOL_BIND && nodemask == nodemask_0,
+	TEST_ASSERT(policy == MPOL_BIND && nodemask == bind_nodemask,
 		    "Wanted MPOL_BIND (%u) and nodemask 0x%lx, got %u and 0x%lx",
-		    MPOL_BIND, nodemask_0, policy, nodemask);
+		    MPOL_BIND, bind_nodemask, policy, nodemask);
 
 	/* Test MPOL_DEFAULT policy */
 	kvm_mbind(mem, total_size, MPOL_DEFAULT, NULL, 0, 0);
@@ -112,7 +132,7 @@ static void test_mbind(int fd, size_t total_size)
 		    MPOL_DEFAULT, policy, nodemask);
 
 	/* Test with invalid policy */
-	ret = mbind(mem, page_size, 999, &nodemask_0, maxnode, 0);
+	ret = mbind(mem, page_size, 999, &bind_nodemask, maxnode, 0);
 	TEST_ASSERT(ret == -1 && errno == EINVAL,
 		    "mbind with invalid policy should fail with EINVAL");
 
@@ -121,17 +141,19 @@ static void test_mbind(int fd, size_t total_size)
 
 static void test_numa_allocation(int fd, size_t total_size)
 {
-	unsigned long node0_mask = 1;  /* Node 0 */
-	unsigned long node1_mask = 2;  /* Node 1 */
-	unsigned long maxnode = 8;
+	unsigned long bind_nodemasks[2];
+	unsigned long maxnode = BITS_PER_TYPE(bind_nodemasks[0]) + 1;
 	void *pages[4];
+	int nids[2];
 	int status[4];
 	char *mem;
 	int i;
 
-	if (!is_multi_numa_node_system())
+	if (!get_numa_node_ids(nids, ARRAY_SIZE(nids)))
 		return;
 
+	bind_nodemasks[0] = 1UL << nids[0];
+	bind_nodemasks[1] = 1UL << nids[1];
 	mem = kvm_mmap(total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd);
 
 	for (i = 0; i < 4; i++)
@@ -139,36 +161,140 @@ static void test_numa_allocation(int fd, size_t total_size)
 
 	/* Set NUMA policy after allocation */
 	memset(mem, 0xaa, page_size);
-	kvm_mbind(pages[0], page_size, MPOL_BIND, &node0_mask, maxnode, 0);
+	kvm_mbind(pages[0], page_size, MPOL_BIND, &bind_nodemasks[0], maxnode, 0);
 	kvm_fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, page_size);
 
 	/* Set NUMA policy before allocation */
-	kvm_mbind(pages[0], page_size * 2, MPOL_BIND, &node1_mask, maxnode, 0);
-	kvm_mbind(pages[2], page_size * 2, MPOL_BIND, &node0_mask, maxnode, 0);
+	kvm_mbind(pages[0], page_size * 2, MPOL_BIND, &bind_nodemasks[1], maxnode, 0);
+	kvm_mbind(pages[2], page_size * 2, MPOL_BIND, &bind_nodemasks[0], maxnode, 0);
 	memset(mem, 0xaa, total_size);
 
 	/* Validate if pages are allocated on specified NUMA nodes */
 	kvm_move_pages(0, 4, pages, NULL, status, 0);
-	TEST_ASSERT(status[0] == 1, "Expected page 0 on node 1, got it on node %d", status[0]);
-	TEST_ASSERT(status[1] == 1, "Expected page 1 on node 1, got it on node %d", status[1]);
-	TEST_ASSERT(status[2] == 0, "Expected page 2 on node 0, got it on node %d", status[2]);
-	TEST_ASSERT(status[3] == 0, "Expected page 3 on node 0, got it on node %d", status[3]);
+	TEST_ASSERT(status[0] == nids[1],
+		    "Expected page 0 on node %d, got it on node %d", nids[1], status[0]);
+	TEST_ASSERT(status[1] == nids[1],
+		    "Expected page 1 on node %d, got it on node %d", nids[1], status[1]);
+	TEST_ASSERT(status[2] == nids[0],
+		    "Expected page 2 on node %d, got it on node %d", nids[0], status[2]);
+	TEST_ASSERT(status[3] == nids[0],
+		    "Expected page 3 on node %d, got it on node %d", nids[0], status[3]);
 
 	/* Punch hole for all pages */
 	kvm_fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, total_size);
 
 	/* Change NUMA policy nodes and reallocate */
-	kvm_mbind(pages[0], page_size * 2, MPOL_BIND, &node0_mask, maxnode, 0);
-	kvm_mbind(pages[2], page_size * 2, MPOL_BIND, &node1_mask, maxnode, 0);
+	kvm_mbind(pages[0], page_size * 2, MPOL_BIND, &bind_nodemasks[0], maxnode, 0);
+	kvm_mbind(pages[2], page_size * 2, MPOL_BIND, &bind_nodemasks[1], maxnode, 0);
 	memset(mem, 0xaa, total_size);
 
 	kvm_move_pages(0, 4, pages, NULL, status, 0);
-	TEST_ASSERT(status[0] == 0, "Expected page 0 on node 0, got it on node %d", status[0]);
-	TEST_ASSERT(status[1] == 0, "Expected page 1 on node 0, got it on node %d", status[1]);
-	TEST_ASSERT(status[2] == 1, "Expected page 2 on node 1, got it on node %d", status[2]);
-	TEST_ASSERT(status[3] == 1, "Expected page 3 on node 1, got it on node %d", status[3]);
+	TEST_ASSERT(status[0] == nids[0],
+		    "Expected page 0 on node %d, got it on node %d", nids[0], status[0]);
+	TEST_ASSERT(status[1] == nids[0],
+		    "Expected page 1 on node %d, got it on node %d", nids[0], status[1]);
+	TEST_ASSERT(status[2] == nids[1],
+		    "Expected page 2 on node %d, got it on node %d", nids[1], status[2]);
+	TEST_ASSERT(status[3] == nids[1],
+		    "Expected page 3 on node %d, got it on node %d", nids[1], status[3]);
 
 	kvm_munmap(mem, total_size);
+}
+
+static void verify_pages_on_node(char **pages, int page_count, int *status,
+				 int nid, const char *when)
+{
+	int i;
+
+	kvm_move_pages(0, page_count, pages, NULL, status, 0);
+
+	for (i = 0; i < page_count; i++) {
+		char expected = i;
+		size_t off;
+
+		TEST_ASSERT(status[i] == nid,
+			    "Expected page %d on node %d %s, got it on node %d",
+			    i, nid, when, status[i]);
+
+		for (off = 0; off < page_size; off++)
+			TEST_ASSERT(pages[i][off] == expected,
+				    "Page %d corrupted at offset %zu %s",
+				    i, off, when);
+	}
+}
+
+static void move_pages_to_node(char **pages, int page_count, int *nodes,
+			       int *status, int nid)
+{
+	int i;
+
+	for (i = 0; i < page_count; i++)
+		nodes[i] = nid;
+
+	kvm_move_pages(0, page_count, pages, nodes, status, MPOL_MF_MOVE);
+}
+
+static void __test_migrate_folio(int fd, size_t total_size, bool migratable)
+{
+	int page_count = total_size / page_size;
+	unsigned long nodemask;
+	unsigned long maxnode = BITS_PER_TYPE(nodemask) + 1;
+	int *nodes, *status;
+	char **pages;
+	char *mem;
+	int nids[2];
+	int i;
+
+	if (!get_numa_node_ids(nids, ARRAY_SIZE(nids)))
+		return;
+
+	mem = kvm_mmap(total_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd);
+
+	pages = calloc(page_count, sizeof(*pages));
+	nodes = calloc(page_count, sizeof(*nodes));
+	status = calloc(page_count, sizeof(*status));
+	TEST_ASSERT(pages && nodes && status, "Failed to allocate page arrays");
+
+	/* Allocate all folios on the source node and fill in a known pattern. */
+	nodemask = 1UL << nids[0];
+	kvm_mbind(mem, total_size, MPOL_BIND, &nodemask, maxnode, 0);
+	for (i = 0; i < page_count; i++) {
+		pages[i] = mem + i * page_size;
+		memset(pages[i], i, page_size);
+	}
+	verify_pages_on_node(pages, page_count, status, nids[0], "on allocation");
+
+	if (migratable) {
+		move_pages_to_node(pages, page_count, nodes, status, nids[1]);
+		verify_pages_on_node(pages, page_count, status, nids[1],
+				     "after migration");
+
+		move_pages_to_node(pages, page_count, nodes, status, nids[0]);
+		verify_pages_on_node(pages, page_count, status, nids[0],
+				     "after round-trip");
+	} else {
+		for (i = 0; i < page_count; i++)
+			nodes[i] = nids[1];
+		TEST_ASSERT_EQ(move_pages(0, page_count, pages, nodes, status,
+					  MPOL_MF_MOVE), page_count);
+		verify_pages_on_node(pages, page_count, status, nids[0],
+				     "after rejected migration");
+	}
+
+	free(status);
+	free(nodes);
+	free(pages);
+	kvm_munmap(mem, total_size);
+}
+
+static void test_migrate_folio_supported(int fd, size_t total_size)
+{
+	__test_migrate_folio(fd, total_size, true);
+}
+
+static void test_migrate_folio_not_supported(int fd, size_t total_size)
+{
+	__test_migrate_folio(fd, total_size, false);
 }
 
 static void test_collapse(int fd, u64 flags)
@@ -453,6 +579,11 @@ static void __test_guest_memfd(struct kvm_vm *vm, u64 flags)
 			gmem_test(fault_overflow, vm, flags);
 			gmem_test(numa_allocation, vm, flags);
 			__gmem_test(collapse, vm, flags, pmd_size);
+
+			if (flags & GUEST_MEMFD_FLAG_MIGRATABLE)
+				gmem_test(migrate_folio_supported, vm, flags);
+			else
+				gmem_test(migrate_folio_not_supported, vm, flags);
 		} else {
 			gmem_test(fault_private, vm, flags);
 		}
@@ -471,6 +602,9 @@ static void __test_guest_memfd(struct kvm_vm *vm, u64 flags)
 
 static void test_guest_memfd(unsigned long vm_type)
 {
+	const u64 migratable_flags = GUEST_MEMFD_FLAG_MMAP |
+				     GUEST_MEMFD_FLAG_INIT_SHARED |
+				     GUEST_MEMFD_FLAG_MIGRATABLE;
 	struct kvm_vm *vm = vm_create_barebones_type(vm_type);
 	u64 flags;
 
@@ -486,6 +620,9 @@ static void test_guest_memfd(unsigned long vm_type)
 	if (flags & GUEST_MEMFD_FLAG_INIT_SHARED)
 		__test_guest_memfd(vm, GUEST_MEMFD_FLAG_MMAP |
 				       GUEST_MEMFD_FLAG_INIT_SHARED);
+
+	if ((flags & migratable_flags) == migratable_flags)
+		__test_guest_memfd(vm, migratable_flags);
 
 	kvm_vm_free(vm);
 }

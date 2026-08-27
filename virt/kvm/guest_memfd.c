@@ -488,13 +488,45 @@ static struct file_operations kvm_gmem_fops = {
 	.fallocate	= kvm_gmem_fallocate,
 };
 
+#ifdef CONFIG_MIGRATION
 static int kvm_gmem_migrate_folio(struct address_space *mapping,
 				  struct folio *dst, struct folio *src,
 				  enum migrate_mode mode)
 {
-	WARN_ON_ONCE(1);
-	return -EINVAL;
+	struct inode *inode = mapping->host;
+	pgoff_t start, end;
+	int ret;
+
+	/*
+	 * Migration invokes ->migrate_folio() while holding the folio lock.
+	 * Use a non-blocking trylock to avoid inverting the lock order with
+	 * truncation, which takes the invalidate lock before locking the
+	 * folios.
+	 */
+	if (!filemap_invalidate_trylock_shared(mapping))
+		return -EAGAIN;
+
+	start = src->index;
+	end = start + folio_nr_pages(src);
+
+	kvm_gmem_invalidate_start(inode, start, end);
+
+	/*
+	 * For non-confidential guests the folio is host-readable, so
+	 * filemap_migrate_folio() can copy the contents itself via
+	 * folio_mc_copy().
+	 * For confidential guests, this would need firmware assistance.
+	 */
+	ret = filemap_migrate_folio(mapping, dst, src, mode);
+
+	kvm_gmem_invalidate_end(inode, start, end);
+
+	filemap_invalidate_unlock_shared(mapping);
+	return ret;
 }
+#else
+#define kvm_gmem_migrate_folio NULL
+#endif
 
 static int kvm_gmem_error_folio(struct address_space *mapping, struct folio *folio)
 {
@@ -557,6 +589,11 @@ bool __weak kvm_arch_supports_gmem_init_shared(struct kvm *kvm)
 	return true;
 }
 
+bool __weak kvm_arch_supports_gmem_migration(struct kvm *kvm)
+{
+	return false;
+}
+
 static int __kvm_gmem_create(struct kvm *kvm, loff_t size, u64 flags)
 {
 	static const char *name = "[kvm-gmem]";
@@ -591,10 +628,16 @@ static int __kvm_gmem_create(struct kvm *kvm, loff_t size, u64 flags)
 	inode->i_mapping->a_ops = &kvm_gmem_aops;
 	inode->i_mode |= S_IFREG;
 	inode->i_size = size;
-	mapping_set_gfp_mask(inode->i_mapping, GFP_HIGHUSER);
 	mapping_set_inaccessible(inode->i_mapping);
-	/* Unmovable mappings are supposed to be marked unevictable as well. */
-	WARN_ON_ONCE(!mapping_unevictable(inode->i_mapping));
+	/* guest_memfd mappings should be marked unevictable. */
+	mapping_set_unevictable(inode->i_mapping);
+
+	if (flags & GUEST_MEMFD_FLAG_MIGRATABLE) {
+		mapping_set_gfp_mask(inode->i_mapping, GFP_HIGHUSER_MOVABLE);
+	} else {
+		mapping_set_gfp_mask(inode->i_mapping, GFP_HIGHUSER);
+		mapping_set_unmovable(inode->i_mapping);
+	}
 
 	GMEM_I(inode)->flags = flags;
 
@@ -721,6 +764,8 @@ static void __kvm_gmem_unbind(struct kvm_memory_slot *slot, struct gmem_file *f)
 
 void kvm_gmem_unbind(struct kvm_memory_slot *slot)
 {
+	struct file *gmem_file;
+
 	/*
 	 * Nothing to do if the underlying file was _already_ closed, as
 	 * kvm_gmem_release() invalidates and nullifies all bindings.
@@ -733,21 +778,24 @@ void kvm_gmem_unbind(struct kvm_memory_slot *slot)
 	/*
 	 * However, if the file is _being_ closed, then the bindings need to be
 	 * removed as kvm_gmem_release() might not run until after the memslot
-	 * is freed.  Note, modifying the bindings is safe even though the file
-	 * is dying as kvm_gmem_release() nullifies slot->gmem.file under
+	 * is freed.  Note, dereferencing the dying file is safe as
+	 * kvm_gmem_release() nullifies slot->gmem.file under
 	 * slots_lock, and only puts its reference to KVM after destroying all
 	 * bindings.  I.e. reaching this point means kvm_gmem_release() hasn't
 	 * yet destroyed the bindings or freed the gmem_file, and can't do so
 	 * until the caller drops slots_lock.
 	 */
-	if (!file) {
-		__kvm_gmem_unbind(slot, slot->gmem.file->private_data);
-		return;
-	}
+	gmem_file = file ?: slot->gmem.file;
 
-	filemap_invalidate_lock(file->f_mapping);
-	__kvm_gmem_unbind(slot, file->private_data);
-	filemap_invalidate_unlock(file->f_mapping);
+	/*
+	 * Take the invalidate lock even for a dying file.  Otherwise,
+	 * kvm_gmem_invalidate_start() can find the binding and increment
+	 * mmu_invalidate_in_progress while kvm_gmem_invalidate_end() misses
+	 * the removed binding and skips decrement.
+	 */
+	filemap_invalidate_lock(gmem_file->f_mapping);
+	__kvm_gmem_unbind(slot, gmem_file->private_data);
+	filemap_invalidate_unlock(gmem_file->f_mapping);
 }
 
 /* Returns a locked folio on success.  */
