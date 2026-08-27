@@ -10651,7 +10651,7 @@ static bool get_span_stats(const struct cpumask *span, unsigned long *util_out,
  * Decide if migration should happen on a specific node.
  * The node here is an LLC or a NUMA.
  */
-static enum llc_mig __maybe_unused can_migrate_node(int src_cpu, int dst_cpu,
+static enum llc_mig can_migrate_node(int src_cpu, int dst_cpu,
 			struct task_struct *p, bool to_pref)
 {
 	const struct cpumask *span;
@@ -11981,8 +11981,8 @@ static inline bool llc_balance(struct lb_env *env, struct sg_lb_stats *sgs,
 		return false;
 
 	if (sgs->nr_pref_dst_llc &&
-	    can_migrate_llc(cpumask_first(sched_group_span(group)),
-			    env->dst_cpu, 0, true) == mig_llc)
+	    can_migrate_node(cpumask_first(sched_group_span(group)),
+			    env->dst_cpu, NULL, true) == mig_llc)
 		return true;
 
 	return false;
@@ -12201,6 +12201,12 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 {
 	int i, nr_running, local_group, sd_flags = env->sd->flags;
 	bool balancing_at_rd = !env->sd->parent;
+#ifdef CONFIG_SCHED_CACHE
+	int last_node = -1, node_num = 0;
+	int *cache_data, *affi;
+
+	lb_affi_scratch(&cache_data, &affi);
+#endif
 
 	memset(sgs, 0, sizeof(*sgs));
 
@@ -12230,7 +12236,8 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 			if (llc_id(i) != dst_llc) {
 				sd_tmp = rcu_dereference_all(rq->sd);
 				if (sd_tmp && (unsigned int)dst_llc < sd_tmp->llc_max)
-					sgs->nr_pref_dst_llc += sd_tmp->llc_counts[dst_llc];
+					sgs->nr_pref_dst_llc += cal_affinity_score(env->sd, rq, i,
+					    env->dst_cpu, cache_data, affi, &last_node, &node_num);
 			}
 		}
 #endif
@@ -13328,9 +13335,13 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 	unsigned long busiest_util = 0, busiest_load = 0, busiest_capacity = 1;
 	unsigned int __maybe_unused busiest_pref_llc = 0;
 	struct sched_domain __maybe_unused *sd_tmp;
+	int __maybe_unused dst_llc, __maybe_unused *cache_data, __maybe_unused *affi;
+	int __maybe_unused last_node = -1, __maybe_unused node_num = 0, i;
 	unsigned int busiest_nr = 0;
-	int __maybe_unused dst_llc;
-	int i;
+
+#ifdef CONFIG_SCHED_CACHE
+	lb_affi_scratch(&cache_data, &affi);
+#endif
 
 	for_each_cpu_and(i, sched_group_span(group), env->cpus) {
 		unsigned long capacity, load, util;
@@ -13464,8 +13475,8 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 
 			if (sd_tmp && (unsigned)dst_llc < sd_tmp->llc_max) {
 				unsigned int this_pref_llc =
-					sd_tmp->llc_counts[dst_llc];
-
+					cal_affinity_score(env->sd, rq, i, env->dst_cpu,
+					    cache_data, affi, &last_node, &node_num);
 				if (busiest_pref_llc < this_pref_llc) {
 					busiest_pref_llc = this_pref_llc;
 					busiest = rq;
