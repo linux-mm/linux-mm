@@ -11,12 +11,11 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/rbtree.h>
+#include <linux/maple_tree.h>
 #include <linux/dma-mapping.h>
 
 /* iova structure */
 struct iova {
-	struct rb_node	node;
 	unsigned long	pfn_hi; /* Highest allocated pfn */
 	unsigned long	pfn_lo; /* Lowest allocated pfn */
 };
@@ -26,15 +25,15 @@ struct iova_rcache;
 
 /* holds all the iova translations for a domain */
 struct iova_domain {
-	spinlock_t	iova_rbtree_lock; /* Lock to protect update of rbtree */
-	struct rb_root	rbroot;		/* iova domain rbtree root */
-	struct rb_node	*cached_node;	/* Save last alloced node */
-	struct rb_node	*cached32_node; /* Save last 32-bit alloced node */
+	spinlock_t	iova_lock;	/* Protects the maple tree */
+	struct maple_tree	mtree;
 	unsigned long	granule;	/* pfn granularity for this domain */
 	unsigned long	start_pfn;	/* Lower limit for this domain */
 	unsigned long	dma_32bit_pfn;
 	unsigned long	max32_alloc_size; /* Size of last failed allocation */
-	struct iova	anchor;		/* rbtree lookup anchor */
+	/* Bounding range of deferred erases; lo > hi when there are none. */
+	unsigned long	deferred_lo;
+	unsigned long	deferred_hi;
 
 	struct iova_rcache	*rcaches;
 	struct hlist_node	cpuhp_dead;
@@ -102,6 +101,14 @@ void init_iova_domain(struct iova_domain *iovad, unsigned long granule,
 int iova_domain_init_rcaches(struct iova_domain *iovad);
 struct iova *find_iova(struct iova_domain *iovad, unsigned long pfn);
 void put_iova_domain(struct iova_domain *iovad);
+#if IS_ENABLED(CONFIG_IOMMU_IOVA_KUNIT_TEST)
+bool iova_domain_verify_invariants(struct iova_domain *iovad);
+bool iova_domain_has_deferred(struct iova_domain *iovad);
+extern bool iova_kunit_defer_erase;
+void iova_kunit_store_types(struct iova_domain *iovad, struct iova *iova,
+			    enum store_type *erase, enum store_type *marker,
+			    unsigned char *marker_nodes);
+#endif
 #else
 static inline int iova_cache_get(void)
 {
