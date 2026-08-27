@@ -294,19 +294,15 @@ extern unsigned long totalreserve_pages;
 #define nr_free_pages() global_zone_page_state(NR_FREE_PAGES)
 
 /* linux/mm/folio.c */
-void folio_add_lru(struct folio *folio);
+void __folio_add_lru(struct folio *folio, bool mlockit);
+static inline void folio_add_lru(struct folio *folio)
+{
+	__folio_add_lru(folio, false);
+}
 void folio_mark_accessed(struct folio *folio);
-void lru_add_drain_all(void);
 
 /* linux/mm/folio-compat.c */
 void mark_page_accessed(struct page *page);
-
-extern atomic_t lru_disable_count;
-
-static inline bool lru_cache_disabled(void)
-{
-	return atomic_read(&lru_disable_count);
-}
 
 extern unsigned long shrink_all_memory(unsigned long nr_pages);
 extern int vm_swappiness;
