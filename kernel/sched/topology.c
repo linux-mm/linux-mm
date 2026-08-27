@@ -641,8 +641,9 @@ static void destroy_sched_domain(struct sched_domain *sd)
 	free_sched_domain_shared(sd->shared);
 
 #ifdef CONFIG_SCHED_CACHE
-	/* only the bottom sd has llc_counts array */
+	/* only the bottom sd has llc_counts/numa_counts array */
 	kfree(sd->llc_counts);
+	kfree(sd->numa_counts);
 #endif
 	kfree(sd);
 }
@@ -853,10 +854,12 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 			sd->llc_counts = tmp->llc_counts;
 			sd->llc_max = tmp->llc_max;
 			sd->llc_bytes = tmp->llc_bytes;
+			sd->numa_counts = tmp->numa_counts;
 			/* make sure destroy_sched_domain() does not free it */
 			tmp->llc_counts = NULL;
 			tmp->llc_max = 0;
 			tmp->llc_bytes = 0;
+			tmp->numa_counts = NULL;
 #endif
 			/*
 			 * sched groups hold the flags of the child sched
@@ -1434,7 +1437,7 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 			 struct s_data *d)
 {
 	struct sched_domain *sd, *top_llc, *parent;
-	unsigned int *p;
+	unsigned int *p_llc, *p_node;
 	int i;
 
 	for_each_cpu(i, cpu_map) {
@@ -1442,9 +1445,13 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 		if (!sd)
 			goto err;
 
-		p = kcalloc_node(max_lid + 1, sizeof(unsigned int),
+		p_llc = kcalloc_node(max_lid + 1, sizeof(unsigned int),
 				 GFP_KERNEL, cpu_to_node(i));
-		if (!p)
+
+		p_node = kcalloc_node(nr_node_ids, sizeof(unsigned int),
+				 GFP_KERNEL, cpu_to_node(i));
+
+		if (!p_llc || !p_node)
 			goto err;
 
 		top_llc = sd;
@@ -1459,12 +1466,25 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 
 		if (top_llc->flags & SD_SHARE_LLC) {
 			sd->llc_max = max_lid + 1;
-			sd->llc_counts = p;
+			sd->llc_counts = p_llc;
 			sd->llc_bytes = get_effective_llc_bytes(i, top_llc);
 		} else {
 			/* avoid memory leak */
-			kfree(p);
+			kfree(p_llc);
 		}
+
+		parent = top_llc;
+		/* Like above, find the lowest SD_NUMA domain */
+		for (parent = rcu_dereference_protected(top_llc->parent, true);
+		     parent; parent = rcu_dereference_protected(parent->parent, true)) {
+			if (parent->flags & SD_NUMA)
+				break;
+		}
+
+		if (parent)
+			sd->numa_counts = p_node;
+		else
+			kfree(p_node);
 	}
 
 	rebuild_llc_node_map(max_lid + 1);
@@ -1481,6 +1501,7 @@ err:
 			sd->llc_counts = NULL;
 			sd->llc_max = 0;
 			sd->llc_bytes = 0;
+			sd->numa_counts = NULL;
 		}
 	}
 
