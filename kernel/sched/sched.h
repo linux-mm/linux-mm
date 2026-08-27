@@ -4124,6 +4124,20 @@ extern int sched_node_order_at(int cpu, int idx);
 	     ((node) = sched_node_order_at((cpu), __sn_idx)) >= 0;	\
 	     __sn_idx++)
 
+extern int llc_node_count(int node);
+extern const struct cpumask *llc_node_span_by_dist(int node, int index, int *llc_out);
+
+/*
+ * Walk each individual LLC belonging to NUMA node @node, nearest-first
+ * by the same-node-only llc_intra_node_distance() ordering instead of
+ * the plain ascending llc_id order of for_each_llc_in_node().
+ */
+#define for_each_llc_node_span(node, span)					\
+	for (int __lns_idx = 0, __lns_nr = llc_node_count((node));		\
+	     __lns_idx < __lns_nr &&						\
+	     ((span) = llc_node_span_by_dist((node), __lns_idx, NULL)) != NULL; \
+	     __lns_idx++)
+
 #endif
 
 void sched_domains_free_llc_id(int cpu);
