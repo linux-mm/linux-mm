@@ -485,6 +485,7 @@ struct pci_dev {
 	unsigned int	shpc_managed:1;		/* SHPC owned by shpchp */
 	unsigned int	is_thunderbolt:1;	/* Thunderbolt controller */
 	unsigned int	is_cxl:1;               /* Compute Express Link (CXL) */
+	unsigned int	cxl_unmask_sbr:1;	/* SBR unmask allowed by user */
 	/*
 	 * Devices marked being untrusted are the ones that can potentially
 	 * execute DMA attacks and similar. They are typically connected
@@ -1605,6 +1606,21 @@ int devm_request_pci_bus_resources(struct device *dev,
 
 /* Temporary until new and working PCI SBR API in place */
 int pci_bridge_secondary_bus_reset(struct pci_dev *dev);
+
+/**
+ * struct pci_cxl_sbr_region_ops - CXL region callbacks for a bus reset
+ * @disable_regions: disable the regions below @dport, 0 or errno
+ * @unbind_regions: unbind the drivers of the regions below @dport, leaving
+ *		    their memory online, for a link already contained
+ * @enable_regions: re-enable the regions below @dport
+ */
+struct pci_cxl_sbr_region_ops {
+	int (*disable_regions)(struct pci_dev *dport);
+	void (*unbind_regions)(struct pci_dev *dport);
+	void (*enable_regions)(struct pci_dev *dport);
+};
+
+void pci_cxl_set_sbr_region_ops(const struct pci_cxl_sbr_region_ops *ops);
 
 #define __pci_bus_for_each_res0(bus, res, ...)				\
 	for (unsigned int __b = 0;					\

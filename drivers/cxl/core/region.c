@@ -12,6 +12,7 @@
 #include <linux/idr.h>
 #include <linux/memory-tiers.h>
 #include <linux/string_choices.h>
+#include <linux/pci.h>
 #include <cxlmem.h>
 #include <cxl.h>
 #include "core.h"
@@ -222,7 +223,7 @@ static struct cxl_region_ref *cxl_rr_load(struct cxl_port *port,
 	return xa_load(&port->regions, (unsigned long)cxlr);
 }
 
-static int cxl_region_invalidate_memregion(struct cxl_region *cxlr)
+int cxl_region_invalidate_memregion(struct cxl_region *cxlr)
 {
 	if (!cpu_cache_has_invalidate_memregion()) {
 		if (IS_ENABLED(CONFIG_CXL_REGION_INVALIDATION_TEST)) {
@@ -4263,14 +4264,17 @@ static struct cxl_driver cxl_region_driver = {
 
 int cxl_region_init(void)
 {
+	pci_cxl_set_sbr_region_ops(&cxl_sbr_region_ops);
 	return cxl_driver_register(&cxl_region_driver);
 }
 
 void cxl_region_exit(void)
 {
 	cxl_driver_unregister(&cxl_region_driver);
+	pci_cxl_set_sbr_region_ops(NULL);
 }
 
 MODULE_IMPORT_NS("CXL");
 MODULE_IMPORT_NS("DEVMEM");
+MODULE_IMPORT_NS("CXL_MHP");
 MODULE_ALIAS_CXL(CXL_DEVICE_REGION);

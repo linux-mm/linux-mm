@@ -13,6 +13,9 @@ extern const struct device_type cxl_pmu_type;
 
 extern struct attribute_group cxl_base_attribute_group;
 
+struct cxl_port *find_cxl_port(struct device *dport_dev,
+			       struct cxl_dport **dport);
+
 enum cxl_detach_mode {
 	DETACH_ONLY,
 	DETACH_INVALIDATE,
@@ -53,6 +56,9 @@ u64 cxl_dpa_to_hpa(struct cxl_region *cxlr, const struct cxl_memdev *cxlmd,
 int devm_cxl_add_dax_region(struct cxl_region *cxlr);
 int devm_cxl_add_pmem_region(struct cxl_region *cxlr);
 void kill_regions(struct cxl_root_decoder *cxlrd);
+int cxl_region_invalidate_memregion(struct cxl_region *cxlr);
+struct pci_cxl_sbr_region_ops;
+extern const struct pci_cxl_sbr_region_ops cxl_sbr_region_ops;
 
 #else
 static inline u64 cxl_dpa_to_hpa(struct cxl_region *cxlr,
@@ -213,6 +219,28 @@ int cxl_gpf_port_setup(struct cxl_dport *dport);
 struct cxl_hdm;
 int cxl_hdm_decode_init(struct cxl_dev_state *cxlds, struct cxl_hdm *cxlhdm,
 			struct cxl_endpoint_dvsec_info *info);
+void cxl_enable_hdm(struct cxl_hdm *cxlhdm, u32 global_ctrl);
+int cxl_set_mem_enable(struct cxl_dev_state *cxlds, u16 val);
+/**
+ * struct cxl_hdm_state - one CXL port's HDM decoder programming, saved
+ * @global_ctrl: CXL HDM Decoder Global Control
+ * @nr_ctrl: number of entries in @ctrl
+ * @ctrl: CXL HDM Decoder n Control, indexed by decoder id
+ *
+ * Holds the fields of those two registers that the driver does not model, read
+ * before a reset and written back after it. Instances are held in an xarray
+ * keyed by the &struct cxl_port they were read from.
+ */
+struct cxl_hdm_state {
+	u32 global_ctrl;
+	int nr_ctrl;
+	u32 ctrl[];
+};
+
+int cxl_port_save_hdm_state(struct cxl_port *port, struct xarray *hdm_state);
+void cxl_port_put_hdm_state(struct xarray *hdm_state);
+int cxl_port_recommit_decoders(struct cxl_port *port,
+			       struct xarray *hdm_state);
 int cxl_port_get_possible_dports(struct cxl_port *port);
 
 #ifdef CONFIG_CXL_FEATURES
