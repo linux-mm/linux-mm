@@ -2396,6 +2396,7 @@ struct sched_cache_stat {
 	raw_spinlock_t lock;
 	unsigned long epoch;
 	u64 nr_running_avg;
+	u64 util_avg;
 	unsigned long next_scan;
 	unsigned long footprint;
 	int cpu;
