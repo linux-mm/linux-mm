@@ -10864,7 +10864,7 @@ static int mm_estimated_range_dist(int pref_cpu, u64 group_util,
 		int next_dist = INT_MAX;
 
 		for_each_sched_node(pref_cpu, node) {
-			for_each_llc_node_span(node, span) {
+			for_each_llc_node_span_from(node, llc_id(pref_cpu), span) {
 				int cpu = cpumask_first(span);
 				int dist = mm_cache_distance(pref_cpu, cpu);
 
@@ -10879,7 +10879,7 @@ static int mm_estimated_range_dist(int pref_cpu, u64 group_util,
 			break;
 
 		for_each_sched_node(pref_cpu, node) {
-			for_each_llc_node_span(node, span) {
+			for_each_llc_node_span_from(node, llc_id(pref_cpu), span) {
 				int cpu = cpumask_first(span);
 
 				if (mm_cache_distance(pref_cpu, cpu) != next_dist)
@@ -11028,7 +11028,7 @@ static enum llc_mig can_migrate_node(int src_cpu, int dst_cpu,
 		if (cpumask_test_cpu(dst_cpu, cpumask_of_node(node))) {
 			nu = 0;
 			nc = 0;
-			for_each_llc_node_span(node, span) {
+			for_each_llc_node_span_from(node, llc_id(target_cpu), span) {
 				get_span_stats(span, &u, &c);
 				nu += u;
 				nc += c;
@@ -11080,7 +11080,7 @@ static enum llc_mig can_migrate_node(int src_cpu, int dst_cpu,
 		}
 
 		/* Don't migrate if this is a good place to live. */
-		for_each_llc_node_span(node, span) {
+		for_each_llc_node_span_from(node, llc_id(target_cpu), span) {
 			get_span_stats(span, &u, &c);
 			if (cpumask_test_cpu(src_cpu, span)) {
 				if (fits_llc_capacity(u, c))

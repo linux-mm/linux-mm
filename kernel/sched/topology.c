@@ -1022,6 +1022,25 @@ static int llc_local_rank_node_count(int node)
 	return count;
 }
 
+/*
+ * 0-based rank of @llc within its own NUMA node, -1 when unknown.
+ * Ranks are handed out in ascending LLC id order, so the node's first
+ * LLC always has rank 0.
+ */
+static int llc_local_rank(int llc)
+{
+	struct llc_local_rank_topology *topo;
+	int rank = -1;
+
+	rcu_read_lock();
+	topo = rcu_dereference(llc_local_rank_topo);
+	if (topo && llc >= 0 && llc < topo->nr_llc)
+		rank = topo->rank[llc];
+	rcu_read_unlock();
+
+	return rank;
+}
+
 static void rebuild_llc_node_map(int size)
 {
 	int *new_map, *old_map;
@@ -2854,24 +2873,61 @@ int llc_node_count(int node)
 
 /*
  * Return a pointer to the cached cpumask of the LLC at position @index
- * within NUMA node @node, ordered ascending by
- * llc_intra_node_distance() from that node's lowest-id LLC.
+ * within NUMA node @node, ordered ascending by llc_intra_node_distance()
+ * from @anchor_llc.
+ *
+ * @anchor_llc is only honoured when it belongs to @node. Pass -1, or an LLC
+ * from any other node, to get the canonical order anchored at the node's own
+ * first LLC - the order every LLC outside the node agrees on.
  */
-const struct cpumask *llc_node_span_by_dist(int node, int index, int *llc_out)
+const struct cpumask *llc_node_span_from(int node, int anchor_llc, int index,
+					 int *llc_out)
 {
 	struct llc_aggr_topology *topo = rcu_dereference_all(llc_aggr_topo);
-	int llc;
+	int base, cnt, rank, self_slot, slot, llc;
 
 	if (!topo || node < 0 || node >= topo->nr_node)
 		return NULL;
-	if (index < 0 || index >= llc_local_rank_node_count(node))
+
+	cnt = llc_local_rank_node_count(node);
+	if (index < 0 || index >= cnt)
 		return NULL;
 
-	llc = topo->node_llc_by_dist[topo->node_offset[node] + index];
+	base = topo->node_offset[node];
+
+	if (anchor_llc < 0 || llc_to_node(anchor_llc) != node) {
+		llc = topo->node_llc_by_dist[base + index];
+	} else if (!index) {
+		llc = anchor_llc;		/* distance 0 */
+	} else {
+		rank = llc_local_rank(anchor_llc);
+		if (rank < 0)
+			return NULL;
+
+		/*
+		 * llc_intra_node_distance(anchor, x) is
+		 * (rank + rank_x) % cnt + 1, so walking that modular sum
+		 * ascending walks the distances ascending. The anchor itself
+		 * owns slot (2 * rank) % cnt and was already returned at
+		 * index 0, so step over it.
+		 */
+		self_slot = (2 * rank) % cnt;
+		slot = index - 1;
+		if (slot >= self_slot)
+			slot++;
+
+		llc = topo->node_llc[base + (slot - rank + cnt) % cnt];
+	}
+
 	if (llc_out)
 		*llc_out = llc;
 
 	return topo->llc_span[llc];
+}
+
+const struct cpumask *llc_node_span_by_dist(int node, int index, int *llc_out)
+{
+	return llc_node_span_from(node, -1, index, llc_out);
 }
 #endif /* CONFIG_SCHED_CACHE */
 

@@ -4128,6 +4128,8 @@ extern int sched_node_order_at(int cpu, int idx);
 extern int llc_node_stride;
 extern int llc_node_count(int node);
 extern const struct cpumask *llc_node_span_by_dist(int node, int index, int *llc_out);
+extern const struct cpumask *llc_node_span_from(int node, int anchor_llc,
+						int index, int *llc_out);
 
 /*
  * Walk each individual LLC belonging to NUMA node @node, nearest-first
@@ -4138,6 +4140,21 @@ extern const struct cpumask *llc_node_span_by_dist(int node, int index, int *llc
 	for (int __lns_idx = 0, __lns_nr = llc_node_count((node));		\
 	     __lns_idx < __lns_nr &&						\
 	     ((span) = llc_node_span_by_dist((node), __lns_idx, NULL)) != NULL; \
+	     __lns_idx++)
+
+/*
+ * Same walk as for_each_llc_node_span(), but ordered from @anchor_llc when
+ * that LLC lives in @node. Callers that already have a preferred LLC should
+ * use this so the walk starts at the anchor instead of the node's first LLC;
+ * the two orders differ because llc_intra_node_distance() wraps modulo the
+ * node's LLC count. For any node the anchor does not belong to, this falls
+ * back to the canonical order.
+ */
+#define for_each_llc_node_span_from(node, anchor_llc, span)			\
+	for (int __lns_idx = 0, __lns_nr = llc_node_count((node));		\
+	     __lns_idx < __lns_nr &&						\
+	     ((span) = llc_node_span_from((node), (anchor_llc), __lns_idx,	\
+					  NULL)) != NULL;			\
 	     __lns_idx++)
 
 #endif
