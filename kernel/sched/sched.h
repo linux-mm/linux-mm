@@ -2197,6 +2197,7 @@ DECLARE_PER_CPU(int, sd_llc_id);
 DECLARE_PER_CPU(int, sd_share_id);
 DECLARE_PER_CPU(struct sched_domain_shared __rcu *, sd_llc_shared);
 DECLARE_PER_CPU(struct sched_domain_shared __rcu *, sd_balance_shared);
+DECLARE_PER_CPU(struct sched_domain __rcu *, sd_node);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_numa);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_packing);
 DECLARE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
@@ -4107,6 +4108,54 @@ static inline bool sched_cache_enabled(void)
 }
 
 extern void sched_cache_active_set(void);
+
+extern int sched_node_order_count(int cpu);
+extern int sched_node_order_at(int cpu, int idx);
+
+/*
+ * Walk every NUMA node in the system starting from @cpu's own node,
+ * nearest-first by the de-duplicated sched_cache_node_distance()
+ * matrix (topology.c), until every node has been yielded. @node
+ * receives the node id at each step (index 0 is always @cpu's own
+ * node).
+ */
+#define for_each_sched_node(cpu, node)					\
+	for (int __sn_idx = 0, __sn_nr = sched_node_order_count((cpu)); \
+	     __sn_idx < __sn_nr &&					\
+	     ((node) = sched_node_order_at((cpu), __sn_idx)) >= 0;	\
+	     __sn_idx++)
+
+extern int llc_node_stride;
+extern int llc_node_count(int node);
+extern const struct cpumask *llc_node_span_by_dist(int node, int index, int *llc_out);
+extern const struct cpumask *llc_node_span_from(int node, int anchor_llc,
+						int index, int *llc_out);
+
+/*
+ * Walk each individual LLC belonging to NUMA node @node, nearest-first
+ * by the same-node-only llc_intra_node_distance() ordering instead of
+ * the plain ascending llc_id order of for_each_llc_in_node().
+ */
+#define for_each_llc_node_span(node, span)					\
+	for (int __lns_idx = 0, __lns_nr = llc_node_count((node));		\
+	     __lns_idx < __lns_nr &&						\
+	     ((span) = llc_node_span_by_dist((node), __lns_idx, NULL)) != NULL; \
+	     __lns_idx++)
+
+/*
+ * Same walk as for_each_llc_node_span(), but ordered from @anchor_llc when
+ * that LLC lives in @node. Callers that already have a preferred LLC should
+ * use this so the walk starts at the anchor instead of the node's first LLC;
+ * the two orders differ because llc_intra_node_distance() wraps modulo the
+ * node's LLC count. For any node the anchor does not belong to, this falls
+ * back to the canonical order.
+ */
+#define for_each_llc_node_span_from(node, anchor_llc, span)			\
+	for (int __lns_idx = 0, __lns_nr = llc_node_count((node));		\
+	     __lns_idx < __lns_nr &&						\
+	     ((span) = llc_node_span_from((node), (anchor_llc), __lns_idx,	\
+					  NULL)) != NULL;			\
+	     __lns_idx++)
 
 #endif
 

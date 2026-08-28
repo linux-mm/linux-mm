@@ -1424,6 +1424,8 @@ struct task_struct {
 	int				preferred_llc;
 	/* 1: task was enqueued to its preferred LLC, 0 otherwise */
 	int				pref_llc_queued;
+	/* 1: task contributed to sched_domain::llc_counts */
+	int				pref_llc_counted;
 #endif
 
 	struct rseq_data		rseq;
@@ -2392,9 +2394,12 @@ struct sched_cache_time {
 
 struct sched_cache_stat {
 	struct sched_cache_time __percpu *pcpu_sched;
+	unsigned long *node_epoch;
 	raw_spinlock_t lock;
 	unsigned long epoch;
 	u64 nr_running_avg;
+	u64 util_avg;
+	u64 llc_range;
 	unsigned long next_scan;
 	unsigned long footprint;
 	int cpu;

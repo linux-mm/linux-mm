@@ -4621,6 +4621,9 @@ DEFINE_STATIC_KEY_FALSE(sched_numa_balancing);
 
 int sysctl_numa_balancing_mode;
 
+unsigned int numa_balancing_migrate_mode __read_mostly =
+	NUMA_BALANCING_MIGRATE_DEFAULT;
+
 static void __set_numabalancing_state(bool enabled)
 {
 	if (enabled)
@@ -4673,6 +4676,83 @@ static int sysctl_numa_balancing(const struct ctl_table *table, int write,
 		__set_numabalancing_state(state);
 	}
 	return err;
+}
+
+static void numa_balancing_mode_show(char *buf, size_t size)
+{
+	unsigned int mode = numa_balancing_migrate_mode;
+
+	switch (mode & NUMA_BALANCING_MIGRATE_DEFAULT) {
+	case NUMA_BALANCING_MIGRATE_DEFAULT:
+		strscpy(buf, "page_mig task_mig", size);
+		break;
+	case NUMA_BALANCING_PAGE_MIGRATION:
+		strscpy(buf, "page_mig", size);
+		break;
+	case NUMA_BALANCING_TASK_MIGRATION:
+		strscpy(buf, "task_mig", size);
+		break;
+	default:
+		strscpy(buf, "none", size);
+	}
+}
+
+static int numa_balancing_mode_parse(char *buf)
+{
+	unsigned int mode = numa_balancing_migrate_mode;
+	char *tok;
+
+	while ((tok = strsep(&buf, " \t\n,")) != NULL) {
+		if (!*tok)
+			continue;
+
+		if (!strcmp(tok, "default") || !strcmp(tok, "enable") ||
+		    !strcmp(tok, "all")) {
+			mode = NUMA_BALANCING_MIGRATE_DEFAULT;
+		} else if (!strcmp(tok, "disable") || !strcmp(tok, "none") ||
+			   !strcmp(tok, "off")) {
+			mode = 0;
+		} else if (!strcmp(tok, "no_page_mig")) {
+			mode &= ~NUMA_BALANCING_PAGE_MIGRATION;
+		} else if (!strcmp(tok, "no_task_mig")) {
+			mode &= ~NUMA_BALANCING_TASK_MIGRATION;
+		} else if (!strcmp(tok, "page_mig")) {
+			mode |= NUMA_BALANCING_PAGE_MIGRATION;
+		} else if (!strcmp(tok, "task_mig")) {
+			mode |= NUMA_BALANCING_TASK_MIGRATION;
+		} else {
+			return -EINVAL;
+		}
+	}
+
+	numa_balancing_migrate_mode = mode;
+	return 0;
+}
+
+static int proc_numa_balancing_mode(const struct ctl_table *table, int write,
+				      void *buffer, size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table t;
+	char buf[32];
+	int err;
+
+	if (write && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	t = *table;
+	t.data = buf;
+	t.maxlen = sizeof(buf);
+
+	if (write) {
+		buf[0] = '\0';
+		err = proc_dostring(&t, write, buffer, lenp, ppos);
+		if (err)
+			return err;
+		return numa_balancing_mode_parse(buf);
+	}
+
+	numa_balancing_mode_show(buf, sizeof(buf));
+	return proc_dostring(&t, write, buffer, lenp, ppos);
 }
 #endif /* CONFIG_PROC_SYSCTL */
 #endif /* CONFIG_NUMA_BALANCING */
@@ -4786,6 +4866,13 @@ static const struct ctl_table sched_core_sysctls[] = {
 		.proc_handler	= sysctl_numa_balancing,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_FOUR,
+	},
+	{
+		.procname	= "numa_balancing_mode",
+		.data		= NULL, /* filled in by handler */
+		.maxlen		= 32,
+		.mode		= 0644,
+		.proc_handler	= proc_numa_balancing_mode,
 	},
 #endif /* CONFIG_NUMA_BALANCING */
 };

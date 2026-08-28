@@ -6,6 +6,7 @@
 #include <linux/sched/isolation.h>
 #include <linux/sched/clock.h>
 #include <linux/bsearch.h>
+#include <linux/sort.h>
 #include "sched.h"
 
 DEFINE_MUTEX(sched_domains_mutex);
@@ -640,8 +641,11 @@ static void destroy_sched_domain(struct sched_domain *sd)
 	free_sched_domain_shared(sd->shared);
 
 #ifdef CONFIG_SCHED_CACHE
-	/* only the bottom sd has llc_counts array */
+	/* only the bottom sd has llc_counts/numa_counts array */
 	kfree(sd->llc_counts);
+	kfree(sd->numa_counts);
+	kfree(sd->affi_ids);
+	kfree(sd->affi_weights);
 #endif
 	kfree(sd);
 }
@@ -678,12 +682,68 @@ DEFINE_PER_CPU(int, sd_llc_id) = -1;
 DEFINE_PER_CPU(int, sd_share_id);
 DEFINE_PER_CPU(struct sched_domain_shared __rcu *, sd_llc_shared);
 DEFINE_PER_CPU(struct sched_domain_shared __rcu *, sd_balance_shared);
+DEFINE_PER_CPU(struct sched_domain __rcu *, sd_node);
 DEFINE_PER_CPU(struct sched_domain __rcu *, sd_numa);
 DEFINE_PER_CPU(struct sched_domain __rcu *, sd_asym_packing);
 DEFINE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
 
 DEFINE_STATIC_KEY_FALSE(sched_asym_cpucapacity);
 DEFINE_STATIC_KEY_FALSE(sched_cluster_active);
+
+#ifdef CONFIG_NUMA
+/*
+ * The de-duplicated NUMA distance tiers. Defined here, rather than next to
+ * the rest of the NUMA topology state further down, because the cache aware
+ * code below has to reach them as well.
+ */
+static int			sched_numa_node_levels;
+static int			*sched_numa_node_distance;
+#endif
+
+#ifdef CONFIG_SCHED_CACHE
+static int __rcu *llc_to_node_map;
+static void rebuild_llc_node_map(int size);
+static void rebuild_llc_aggr_windows(int size);
+static int __rcu *sched_cache_node_dist_matrix;
+static int sched_cache_node_dist_size;
+static void rebuild_node_distance_matrix(int size);
+static void rebuild_node_order(int size);
+
+/*
+ * Per-LLC rank within its own node (0-based) plus each node's LLC
+ * count, used by llc_intra_node_distance() to derive a same-node LLC
+ * distance.
+ */
+struct llc_local_rank_topology {
+	int nr_llc;
+	int nr_node;
+	int *rank;		/* [nr_llc]: LLC's 0-based rank within its node */
+	int *node_count;	/* [nr_node]: number of LLCs in the node */
+};
+
+static struct llc_local_rank_topology __rcu *llc_local_rank_topo;
+
+/*
+ * Largest number of LLCs held by any single NUMA node. mm_cache_distance()
+ * multiplies the node distance by this so that one node's per-LLC offsets
+ * cannot reach into the next node's range.
+ */
+int llc_node_stride __read_mostly = 1;
+static void rebuild_llc_local_rank(int size);
+#endif
+
+/* Get sched domain by its name */
+static struct sched_domain *get_sched_domain_by_name(int cpu, char *name)
+{
+	struct sched_domain *sd = NULL;
+
+	for_each_domain(cpu, sd) {
+		if (!strcmp(sd->name, name))
+			break;
+	}
+
+	return sd;
+}
 
 static void update_top_cache_domain(int cpu)
 {
@@ -716,6 +776,9 @@ static void update_top_cache_domain(int cpu)
 	 * but equals to LLC id on non-Cluster machines.
 	 */
 	per_cpu(sd_share_id, cpu) = id;
+
+	sd = get_sched_domain_by_name(cpu, "NODE");
+	rcu_assign_pointer(per_cpu(sd_node, cpu), sd);
 
 	sd = lowest_flag_domain(cpu, SD_NUMA);
 	rcu_assign_pointer(per_cpu(sd_numa, cpu), sd);
@@ -800,10 +863,16 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 			sd->llc_counts = tmp->llc_counts;
 			sd->llc_max = tmp->llc_max;
 			sd->llc_bytes = tmp->llc_bytes;
+			sd->numa_counts = tmp->numa_counts;
+			sd->affi_ids = tmp->affi_ids;
+			sd->affi_weights = tmp->affi_weights;
 			/* make sure destroy_sched_domain() does not free it */
 			tmp->llc_counts = NULL;
 			tmp->llc_max = 0;
 			tmp->llc_bytes = 0;
+			tmp->numa_counts = NULL;
+			tmp->affi_ids = NULL;
+			tmp->affi_weights = NULL;
 #endif
 			/*
 			 * sched groups hold the flags of the child sched
@@ -856,6 +925,519 @@ DEFINE_STATIC_KEY_FALSE(sched_cache_active);
 /* user wants cache aware scheduling [0 or 1] */
 int sysctl_sched_cache_user = 1;
 
+int llc_to_node(int llc)
+{
+	int node = -1;
+	int *map = NULL;
+
+	rcu_read_lock();
+	map = rcu_dereference(llc_to_node_map);
+	if (map && llc >= 0 && llc <= max_lid)
+		node = map[llc];
+	rcu_read_unlock();
+
+	return node;
+}
+
+/*
+ * De-duplicated NUMA-node distance, looked up from
+ * sched_cache_node_dist_matrix[]. Unlike node_distance(), no two nodes
+ * seen from the same node compare equal, while every relative ordering
+ * of the original node_distance() values (e.g. node_distance(a,b) >
+ * node_distance(a,c)) is preserved. Falls back to the raw
+ * node_distance() if the matrix has not been built yet (e.g. very
+ * early boot, before the first rebuild_node_distance_matrix() call).
+ */
+int sched_cache_node_distance(int node0, int node1)
+{
+	int *matrix;
+	int size;
+	int dist = -1;
+
+	if (node0 == node1)
+		return 0;
+
+	rcu_read_lock();
+	matrix = rcu_dereference(sched_cache_node_dist_matrix);
+	size = READ_ONCE(sched_cache_node_dist_size);
+	if (matrix && node0 >= 0 && node0 < size
+		   && node1 >= 0 && node1 < size)
+		dist = matrix[node0 * size + node1];
+	rcu_read_unlock();
+
+	if (dist >= 0)
+		return dist;
+
+	return node_distance(node0, node1);
+}
+
+/*
+ * LLC distance restricted to same-node pairs, derived from each LLC's
+ * rank within its node (llc_local_rank_topo)
+ * dist = (rank1 + rank2) % k + 1, where k is the LLC count of
+ * the shared node. Except that @llc1 equals @llc2, the distance is 0.
+ * This formuler ensure that there is no identical distance between a
+ * certain llc with any of its sibling llcs in the same node.
+ *
+ * NOTE: It's the caller's responsibility to check if llc1 and llc2 are
+ * in the same node.
+ */
+int llc_intra_node_distance(int llc1, int llc2, int node)
+{
+	struct llc_local_rank_topology *topo;
+	int rank1, rank2, k;
+
+	if (llc1 == llc2)
+		return 0;
+
+	rcu_read_lock();
+	topo = rcu_dereference(llc_local_rank_topo);
+	if (!topo || llc1 >= topo->nr_llc || llc2 >= topo->nr_llc || node < 0) {
+		rcu_read_unlock();
+		return -1;
+	}
+	rank1 = topo->rank[llc1];
+	rank2 = topo->rank[llc2];
+	k = topo->node_count[node];
+	rcu_read_unlock();
+
+	return (rank1 + rank2) % k + 1;
+}
+
+/*
+ * Number of LLCs in @node, sourced from llc_local_rank_topo
+ * (rebuild_llc_local_rank()).
+ */
+static int llc_local_rank_node_count(int node)
+{
+	struct llc_local_rank_topology *topo;
+	int count;
+
+	rcu_read_lock();
+	topo = rcu_dereference(llc_local_rank_topo);
+	count = (topo && node >= 0 && node < topo->nr_node) ?
+		topo->node_count[node] : 0;
+	rcu_read_unlock();
+
+	return count;
+}
+
+/*
+ * 0-based rank of @llc within its own NUMA node, -1 when unknown.
+ * Ranks are handed out in ascending LLC id order, so the node's first
+ * LLC always has rank 0.
+ */
+static int llc_local_rank(int llc)
+{
+	struct llc_local_rank_topology *topo;
+	int rank = -1;
+
+	rcu_read_lock();
+	topo = rcu_dereference(llc_local_rank_topo);
+	if (topo && llc >= 0 && llc < topo->nr_llc)
+		rank = topo->rank[llc];
+	rcu_read_unlock();
+
+	return rank;
+}
+
+static void rebuild_llc_node_map(int size)
+{
+	int *new_map, *old_map;
+	u8 *seen_llc;
+	int cpu, llc;
+
+	new_map = kcalloc(size, sizeof(int), GFP_KERNEL);
+	if (!new_map)
+		return;
+	seen_llc = kcalloc(size, sizeof(*seen_llc), GFP_KERNEL);
+	if (!seen_llc) {
+		kfree(new_map);
+		return;
+	}
+
+	/*
+	 * for_each_possible_cpu() revisits the same LLC non-consecutively
+	 * under SMT (each node's LLCs are walked once per thread), so
+	 * dedup by llc id via seen_llc[], not by comparing against the
+	 * immediately preceding CPU's llc.
+	 */
+	for_each_possible_cpu(cpu) {
+		llc = per_cpu(sd_llc_id, cpu);
+		if (llc < 0 || llc >= size || seen_llc[llc])
+			continue;
+		seen_llc[llc] = 1;
+		new_map[llc] = cpu_to_node(cpu);
+	}
+	kfree(seen_llc);
+
+	old_map = rcu_dereference_protected(llc_to_node_map, true);
+	rcu_assign_pointer(llc_to_node_map, new_map);
+	synchronize_rcu();
+	kfree(old_map);
+}
+
+/*
+ * Build a de-duplicated NUMA-node distance matrix using a tiering +
+ * greedy edge-coloring technique, applied directly to node pairs.
+ * Reuses the already sorted, de-duplicated distance tier list
+ * (sched_numa_node_distance[]/sched_numa_node_levels).
+ *
+ * Guarantees, compared to the raw node_distance() table:
+ *   - still symmetric;
+ *   - every relative ordering between two node_distance() values is
+ *     preserved (if node_distance(a,b) > node_distance(a,c) then
+ *     sched_cache_node_distance(a,b) > sched_cache_node_distance(a,c),
+ *     and likewise for equal/less-than);
+ *   - looked at from any single node, the distances to every other
+ *     node are pairwise distinct (this is the property the raw table
+ *     can violate, e.g. two nodes genuinely equidistant from a third).
+ */
+static void rebuild_node_distance_matrix(int size)
+{
+	int *matrix = NULL, *old_matrix;
+	int *tier_dist = NULL;
+	int *tier_ncolors = NULL;
+	int nr_tiers = 0;
+	unsigned long **used_colors = NULL;
+	int i, j, t;
+	int scale;
+
+	if (size <= 0)
+		return;
+
+#ifdef CONFIG_NUMA
+	nr_tiers = READ_ONCE(sched_numa_node_levels);
+	if (nr_tiers > 0) {
+		tier_dist = kmalloc_array(nr_tiers, sizeof(int), GFP_KERNEL);
+		if (tier_dist) {
+			int *d;
+
+			rcu_read_lock();
+			d = rcu_dereference(sched_numa_node_distance);
+			if (d)
+				memcpy(tier_dist, d, nr_tiers * sizeof(int));
+			else
+				nr_tiers = 0;
+			rcu_read_unlock();
+		} else {
+			nr_tiers = 0;
+		}
+
+		if (!nr_tiers) {
+			kfree(tier_dist);
+			tier_dist = NULL;
+		}
+	}
+#endif
+
+	matrix = kcalloc(size * size, sizeof(int), GFP_KERNEL);
+	if (!matrix)
+		goto out;
+
+	if (!tier_dist) {
+		/*
+		 * NUMA distance tiers not available yet (e.g. very early
+		 * boot or a non-NUMA build): fall back to the raw
+		 * node_distance() table, same as sched_cache_node_distance()
+		 * would have returned anyway.
+		 */
+		for (i = 0; i < size; i++) {
+			for (j = 0; j < size; j++) {
+				if (i == j)
+					continue;
+				matrix[i * size + j] = node_distance(i, j);
+			}
+		}
+		goto commit;
+	}
+
+	tier_ncolors = kcalloc(nr_tiers, sizeof(*tier_ncolors), GFP_KERNEL);
+	if (!tier_ncolors)
+		goto out;
+
+	used_colors = kcalloc(size, sizeof(*used_colors), GFP_KERNEL);
+	if (!used_colors)
+		goto out;
+	for (i = 0; i < size; i++) {
+		used_colors[i] = bitmap_zalloc(size, GFP_KERNEL);
+		if (!used_colors[i])
+			goto out;
+	}
+
+	/* Greedy edge-color each tier; pack (tier, color) into matrix[]. */
+	for (t = 0; t < nr_tiers; t++) {
+		int dist = tier_dist[t];
+		int tier_max_color = 0;
+
+		for (i = 0; i < size; i++)
+			bitmap_zero(used_colors[i], size);
+
+		for (i = 0; i < size; i++) {
+			for (j = i + 1; j < size; j++) {
+				int color;
+
+				if (node_distance(i, j) != dist)
+					continue;
+
+				/* smallest color free at both endpoints */
+				color = 0;
+				for (;;) {
+					color = find_next_zero_bit(used_colors[i], size, color);
+					if (WARN_ONCE(color >= size,
+						      "sched_cache: no free color left in NUMA tier (node=%d)",
+						      i)) {
+						color = size - 1;
+						break;
+					}
+					if (!test_bit(color, used_colors[j]))
+						break;
+					color++;
+				}
+
+				set_bit(color, used_colors[i]);
+				set_bit(color, used_colors[j]);
+				if (color + 1 > tier_max_color)
+					tier_max_color = color + 1;
+
+				matrix[i * size + j] = t * (size + 1) + color;
+				matrix[j * size + i] = matrix[i * size + j];
+			}
+		}
+		tier_ncolors[t] = tier_max_color;
+	}
+
+	/*
+	 * Pick the smallest integer scale such that every tier's
+	 * span of increments (0..tier_ncolors[t]-1) still fits strictly
+	 * inside the gap to the next distinct tier once scaled.
+	 */
+	scale = 1;
+	for (;;) {
+		bool need_more = false;
+
+		for (t = 0; t < nr_tiers - 1; t++) {
+			int gap;
+
+			if (tier_ncolors[t] <= 1)
+				continue;
+			gap = tier_dist[t + 1] - tier_dist[t];
+			if (tier_ncolors[t] - 1 >= gap * scale) {
+				need_more = true;
+				break;
+			}
+		}
+		if (!need_more)
+			break;
+		if (++scale > 1000) {
+			scale = 1000;
+			break;
+		}
+	}
+
+	/* Unpack (tier, color) into the final, close-to-original value. */
+	for (i = 0; i < size; i++) {
+		for (j = 0; j < size; j++) {
+			int packed, t2, color;
+
+			if (i == j)
+				continue;
+
+			packed = matrix[i * size + j];
+			t2 = packed / (size + 1);
+			color = packed % (size + 1);
+			matrix[i * size + j] = tier_dist[t2] * scale + color;
+		}
+	}
+
+commit:
+	old_matrix = rcu_dereference_protected(sched_cache_node_dist_matrix, true);
+	sched_cache_node_dist_size = size;
+	rcu_assign_pointer(sched_cache_node_dist_matrix, matrix);
+	synchronize_rcu();
+	kfree(old_matrix);
+	matrix = NULL;
+out:
+	if (used_colors) {
+		for (i = 0; i < size; i++)
+			bitmap_free(used_colors[i]);
+		kfree(used_colors);
+	}
+	kfree(tier_ncolors);
+	kfree(tier_dist);
+	kfree(matrix);
+}
+
+struct sched_node_order_topology {
+	int nr_node;
+	int *order;
+};
+
+static struct sched_node_order_topology __rcu *sched_node_order_topo;
+
+static void free_node_order_topology(struct sched_node_order_topology *topo)
+{
+	if (!topo)
+		return;
+	kfree(topo->order);
+	kfree(topo);
+}
+
+/*
+ * Generic {distance, id} sort key: candidates are ranked by @dist, with
+ * @id as a deterministic tie-break when two candidates land on the same
+ * @dist.
+ */
+struct dist_key {
+	int dist;
+	int id;
+};
+
+static int dist_key_cmp(const void *a, const void *b)
+{
+	const struct dist_key *ka = a, *kb = b;
+
+	if (ka->dist != kb->dist)
+		return ka->dist - kb->dist;
+	return ka->id - kb->id;
+}
+
+static void rebuild_node_order(int size)
+{
+	struct sched_node_order_topology *topo, *old;
+	struct dist_key *cand;
+	int root, i, k;
+
+	if (size <= 0)
+		return;
+
+	topo = kzalloc_obj(*topo);
+	if (!topo)
+		return;
+
+	topo->nr_node = size;
+	topo->order = kmalloc_array((size_t)size * size, sizeof(int), GFP_KERNEL);
+	cand = kmalloc_array(size, sizeof(*cand), GFP_KERNEL);
+	if (!topo->order || !cand) {
+		kfree(cand);
+		free_node_order_topology(topo);
+		return;
+	}
+
+	for (root = 0; root < size; root++) {
+		for (i = 0; i < size; i++) {
+			cand[i].id = i;
+			cand[i].dist = sched_cache_node_distance(root, i);
+		}
+
+		/* sched_cache_node_distance() guarantees no ties within a row. */
+		sort(cand, size, sizeof(*cand), dist_key_cmp, NULL);
+
+		for (k = 0; k < size; k++)
+			topo->order[root * size + k] = cand[k].id;
+	}
+	kfree(cand);
+
+	old = rcu_dereference_protected(sched_node_order_topo,
+					lockdep_is_held(&sched_domains_mutex));
+	rcu_assign_pointer(sched_node_order_topo, topo);
+	synchronize_rcu();
+	free_node_order_topology(old);
+}
+
+/*
+ * Return the total number of steps in @cpu's for_each_sched_node() walk,
+ * i.e. the number of nodes in the system. 1 if the topology cache isn't
+ * populated yet (e.g. very early boot).
+ */
+int sched_node_order_count(int cpu)
+{
+	struct sched_node_order_topology *topo = rcu_dereference_all(sched_node_order_topo);
+	int root = cpu_to_node(cpu);
+
+	if (root < 0)
+		return 0;
+	if (!topo || root >= topo->nr_node)
+		return 1;
+
+	return topo->nr_node;
+}
+
+/*
+ * Return the node id at position @idx (0-indexed, 0 == @cpu's own node)
+ * in @cpu's node's ascending sched_cache_node_distance() order. -1 if
+ * @idx is out of range, which ends the for_each_sched_node() walk.
+ */
+int sched_node_order_at(int cpu, int idx)
+{
+	struct sched_node_order_topology *topo = rcu_dereference_all(sched_node_order_topo);
+	int root = cpu_to_node(cpu);
+
+	if (root < 0)
+		return -1;
+	if (!topo || root >= topo->nr_node)
+		return idx == 0 ? root : -1;
+	if (idx < 0 || idx >= topo->nr_node)
+		return -1;
+
+	return topo->order[root * topo->nr_node + idx];
+}
+
+static void free_llc_local_rank_topology(struct llc_local_rank_topology *topo)
+{
+	if (!topo)
+		return;
+
+	kfree(topo->rank);
+	kfree(topo->node_count);
+	kfree(topo);
+}
+
+/*
+ * Compute each LLC's rank within its own node (ascending llc id) and
+ * each node's LLC count, consumed by llc_intra_node_distance() to
+ * derive a same-node LLC distance on the fly.
+ */
+static void rebuild_llc_local_rank(int size)
+{
+	struct llc_local_rank_topology *topo, *old;
+	int llc, node, stride;
+
+	if (size <= 0)
+		return;
+
+	topo = kzalloc_obj(*topo);
+	if (!topo)
+		return;
+
+	topo->nr_llc = size;
+	topo->nr_node = nr_node_ids;
+	topo->rank = kcalloc(size, sizeof(int), GFP_KERNEL);
+	topo->node_count = kcalloc(nr_node_ids, sizeof(int), GFP_KERNEL);
+	if (!topo->rank || !topo->node_count) {
+		free_llc_local_rank_topology(topo);
+		return;
+	}
+
+	for (llc = 0; llc < size; llc++) {
+		node = llc_to_node(llc);
+		if (node < 0 || node >= nr_node_ids)
+			continue;
+		topo->rank[llc] = topo->node_count[node]++;
+	}
+
+	stride = 1;
+	for (node = 0; node < nr_node_ids; node++)
+		stride = max(stride, topo->node_count[node]);
+	WRITE_ONCE(llc_node_stride, stride);
+
+	old = rcu_dereference_protected(llc_local_rank_topo,
+					 lockdep_is_held(&sched_domains_mutex));
+	rcu_assign_pointer(llc_local_rank_topo, topo);
+	synchronize_rcu();
+	free_llc_local_rank_topology(old);
+}
+
 /*
  * Get the effective LLC size in bytes that @cpu's bottom sched_domain
  * can use. A CPU within a cpuset partition can only use a proportion
@@ -892,7 +1474,8 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 			 struct s_data *d)
 {
 	struct sched_domain *sd, *top_llc, *parent;
-	unsigned int *p;
+	unsigned int *p_llc, *p_node;
+	int *p_ids, *p_w;
 	int i;
 
 	for_each_cpu(i, cpu_map) {
@@ -900,10 +1483,28 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 		if (!sd)
 			goto err;
 
-		p = kcalloc_node(max_lid + 1, sizeof(unsigned int),
+		p_llc = kcalloc_node(max_lid + 1, sizeof(unsigned int),
 				 GFP_KERNEL, cpu_to_node(i));
-		if (!p)
+
+		p_node = kcalloc_node(nr_node_ids, sizeof(unsigned int),
+				 GFP_KERNEL, cpu_to_node(i));
+
+		/* Scratch for the affinity score, see cal_affinity_score(). */
+		p_ids = kcalloc_node(max_lid + 1, sizeof(int),
+				 GFP_KERNEL, cpu_to_node(i));
+		p_w = kcalloc_node(max_lid + 1, sizeof(int),
+				 GFP_KERNEL, cpu_to_node(i));
+
+		if (!p_llc || !p_node || !p_ids || !p_w) {
+			kfree(p_llc);
+			kfree(p_node);
+			kfree(p_ids);
+			kfree(p_w);
 			goto err;
+		}
+
+		sd->affi_ids = p_ids;
+		sd->affi_weights = p_w;
 
 		top_llc = sd;
 		/*
@@ -917,23 +1518,47 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 
 		if (top_llc->flags & SD_SHARE_LLC) {
 			sd->llc_max = max_lid + 1;
-			sd->llc_counts = p;
+			sd->llc_counts = p_llc;
 			sd->llc_bytes = get_effective_llc_bytes(i, top_llc);
 		} else {
 			/* avoid memory leak */
-			kfree(p);
+			kfree(p_llc);
 		}
+
+		parent = top_llc;
+		/* Like above, find the lowest SD_NUMA domain */
+		for (parent = rcu_dereference_protected(top_llc->parent, true);
+		     parent; parent = rcu_dereference_protected(parent->parent, true)) {
+			if (parent->flags & SD_NUMA)
+				break;
+		}
+
+		if (parent)
+			sd->numa_counts = p_node;
+		else
+			kfree(p_node);
 	}
 
+	rebuild_llc_node_map(max_lid + 1);
+	rebuild_node_distance_matrix(nr_node_ids);
+	rebuild_node_order(nr_node_ids);
+	rebuild_llc_local_rank(max_lid + 1);
+	rebuild_llc_aggr_windows(max_lid + 1);
 	return true;
 err:
 	for_each_cpu(i, cpu_map) {
 		sd = *per_cpu_ptr(d->sd, i);
 		if (sd) {
 			kfree(sd->llc_counts);
+			kfree(sd->numa_counts);
+			kfree(sd->affi_ids);
+			kfree(sd->affi_weights);
 			sd->llc_counts = NULL;
 			sd->llc_max = 0;
 			sd->llc_bytes = 0;
+			sd->numa_counts = NULL;
+			sd->affi_ids = NULL;
+			sd->affi_weights = NULL;
 		}
 	}
 
@@ -1893,15 +2518,13 @@ enum numa_topology_type sched_numa_topology_type;
 
 /*
  * sched_domains_numa_distance is derived from sched_numa_node_distance
- * and provides a simplified view of NUMA distances used specifically
- * for building NUMA scheduling domains.
+ * (defined near the top of this file) and provides a simplified view of
+ * NUMA distances used specifically for building NUMA scheduling domains.
  */
 static int			sched_domains_numa_levels;
-static int			sched_numa_node_levels;
 
 int				sched_max_numa_distance;
 static int			*sched_domains_numa_distance;
-static int			*sched_numa_node_distance;
 static struct cpumask		***sched_domains_numa_masks;
 #endif /* CONFIG_NUMA */
 
@@ -2077,6 +2700,236 @@ const struct cpumask *tl_mc_mask(struct sched_domain_topology_level *tl, int cpu
 #endif
 
 #define llc_mask(cpu) arch_llc_mask(cpu)
+
+#ifdef CONFIG_SCHED_CACHE
+/*
+ * For each node we remember where its slice of the flattened per-node
+ * LLC-id list (node_llc[]) starts (used by the for_each_llc_in_node()
+ * iterator; per-node LLC counts come from llc_local_rank_topo, see
+ * llc_local_rank_node_count()). We also cache each LLC's own cpumask
+ * (llc_span[]).
+ */
+struct llc_aggr_topology {
+	int nr_llc;
+	int nr_node;
+	int *node_offset;		/* [nr_node]: node's slice start in node_llc[] */
+	int *node_llc;			/* [nr_llc]: flattened per-node LLC ids, ascending */
+	int *node_llc_by_dist;		/* [nr_llc]: same slices as node_llc[], sorted by
+					 * llc_intra_node_distance() from each node's
+					 * lowest-id LLC instead of by id
+					 */
+	struct cpumask **llc_span;	/* [nr_llc]: cpumask of each LLC */
+};
+
+static struct llc_aggr_topology __rcu *llc_aggr_topo;
+
+static void free_llc_aggr_topology(struct llc_aggr_topology *topo)
+{
+	int i;
+
+	if (!topo)
+		return;
+
+	if (topo->llc_span) {
+		for (i = 0; i < topo->nr_llc; i++)
+			kfree(topo->llc_span[i]);
+		kfree(topo->llc_span);
+	}
+	kfree(topo->node_offset);
+	kfree(topo->node_llc);
+	kfree(topo->node_llc_by_dist);
+	kfree(topo);
+}
+
+static void rebuild_llc_aggr_windows(int size)
+{
+	struct llc_aggr_topology *topo, *old;
+	int *seen;
+	u8 *seen_llc;
+	int cpu, llc, node, i;
+
+	if (size <= 0)
+		return;
+
+	topo = kzalloc_obj(*topo);
+	if (!topo)
+		return;
+
+	topo->nr_llc  = size;
+	topo->nr_node = nr_node_ids;
+	topo->node_offset = kcalloc(nr_node_ids, sizeof(int), GFP_KERNEL);
+	topo->node_llc    = kcalloc(size, sizeof(int), GFP_KERNEL);
+	topo->node_llc_by_dist = kcalloc(size, sizeof(int), GFP_KERNEL);
+	topo->llc_span    = kcalloc(size, sizeof(struct cpumask *), GFP_KERNEL);
+	seen = kcalloc(nr_node_ids, sizeof(int), GFP_KERNEL);
+	seen_llc = kcalloc(size, sizeof(*seen_llc), GFP_KERNEL);
+	if (!topo->node_offset ||
+	    !topo->node_llc || !topo->node_llc_by_dist ||
+	    !topo->llc_span || !seen || !seen_llc) {
+		kfree(seen);
+		kfree(seen_llc);
+		free_llc_aggr_topology(topo);
+		return;
+	}
+
+	/* Cache each LLC's cpumask. */
+	for_each_possible_cpu(cpu) {
+		llc = per_cpu(sd_llc_id, cpu);
+		if (llc < 0 || llc >= size || seen_llc[llc])
+			continue;
+		seen_llc[llc] = 1;
+
+		topo->llc_span[llc] = kzalloc(cpumask_size(), GFP_KERNEL);
+		if (!topo->llc_span[llc]) {
+			kfree(seen);
+			kfree(seen_llc);
+			free_llc_aggr_topology(topo);
+			return;
+		}
+		cpumask_copy(topo->llc_span[llc], llc_mask(cpu));
+	}
+
+	for (i = 1; i < nr_node_ids; i++)
+		topo->node_offset[i] = topo->node_offset[i - 1] +
+					llc_local_rank_node_count(i - 1);
+
+	/* Fill node_llc[] (ascending llc_id per node). */
+	memset(seen_llc, 0, size * sizeof(*seen_llc));
+	for_each_possible_cpu(cpu) {
+		llc = per_cpu(sd_llc_id, cpu);
+		if (llc < 0 || llc >= size || seen_llc[llc])
+			continue;
+		seen_llc[llc] = 1;
+
+		node = llc_to_node(llc);
+		if (node < 0 || node >= nr_node_ids)
+			continue;
+
+		topo->node_llc[topo->node_offset[node] + seen[node]] = llc;
+		seen[node]++;
+	}
+	kfree(seen);
+	kfree(seen_llc);
+
+	/*
+	 * fill node_llc_by_dist[], the same per-node slices as
+	 * node_llc[] above but sorted ascending by
+	 * llc_intra_node_distance() from that node's lowest-id LLC (the
+	 * same one node_llc[]'s slice starts with) instead of by id. Used
+	 * by for_each_llc_node_span() to walk a node's own LLCs
+	 * nearest-first, unlike the plain id order of for_each_llc_in_node().
+	 * llc_intra_node_distance() guarantees no two same-node LLCs tie
+	 * from a fixed anchor's point of view, so this sort is unambiguous.
+	 */
+	for (node = 0; node < nr_node_ids; node++) {
+		struct dist_key *cand;
+		int base = topo->node_offset[node];
+		int cnt = llc_local_rank_node_count(node);
+		int anchor, k;
+
+		if (cnt == 0)
+			continue;
+
+		anchor = topo->node_llc[base];
+
+		cand = kmalloc_array(cnt, sizeof(*cand), GFP_KERNEL);
+		if (!cand) {
+			free_llc_aggr_topology(topo);
+			return;
+		}
+
+		for (k = 0; k < cnt; k++) {
+			int llc_id = topo->node_llc[base + k];
+
+			cand[k].id = llc_id;
+			cand[k].dist = llc_intra_node_distance(anchor, llc_id, node);
+		}
+
+		sort(cand, cnt, sizeof(*cand), dist_key_cmp, NULL);
+
+		for (k = 0; k < cnt; k++)
+			topo->node_llc_by_dist[base + k] = cand[k].id;
+		kfree(cand);
+	}
+
+
+	old = rcu_dereference_protected(llc_aggr_topo,
+					lockdep_is_held(&sched_domains_mutex));
+	rcu_assign_pointer(llc_aggr_topo, topo);
+	synchronize_rcu();
+	free_llc_aggr_topology(old);
+}
+
+/* Return the number of LLCs belonging to NUMA node @node. */
+int llc_node_count(int node)
+{
+	struct llc_aggr_topology *topo = rcu_dereference_all(llc_aggr_topo);
+
+	if (!topo || node < 0 || node >= topo->nr_node)
+		return 0;
+
+	return llc_local_rank_node_count(node);
+}
+
+/*
+ * Return a pointer to the cached cpumask of the LLC at position @index
+ * within NUMA node @node, ordered ascending by llc_intra_node_distance()
+ * from @anchor_llc.
+ *
+ * @anchor_llc is only honoured when it belongs to @node. Pass -1, or an LLC
+ * from any other node, to get the canonical order anchored at the node's own
+ * first LLC - the order every LLC outside the node agrees on.
+ */
+const struct cpumask *llc_node_span_from(int node, int anchor_llc, int index,
+					 int *llc_out)
+{
+	struct llc_aggr_topology *topo = rcu_dereference_all(llc_aggr_topo);
+	int base, cnt, rank, self_slot, slot, llc;
+
+	if (!topo || node < 0 || node >= topo->nr_node)
+		return NULL;
+
+	cnt = llc_local_rank_node_count(node);
+	if (index < 0 || index >= cnt)
+		return NULL;
+
+	base = topo->node_offset[node];
+
+	if (anchor_llc < 0 || llc_to_node(anchor_llc) != node) {
+		llc = topo->node_llc_by_dist[base + index];
+	} else if (!index) {
+		llc = anchor_llc;		/* distance 0 */
+	} else {
+		rank = llc_local_rank(anchor_llc);
+		if (rank < 0)
+			return NULL;
+
+		/*
+		 * llc_intra_node_distance(anchor, x) is
+		 * (rank + rank_x) % cnt + 1, so walking that modular sum
+		 * ascending walks the distances ascending. The anchor itself
+		 * owns slot (2 * rank) % cnt and was already returned at
+		 * index 0, so step over it.
+		 */
+		self_slot = (2 * rank) % cnt;
+		slot = index - 1;
+		if (slot >= self_slot)
+			slot++;
+
+		llc = topo->node_llc[base + (slot - rank + cnt) % cnt];
+	}
+
+	if (llc_out)
+		*llc_out = llc;
+
+	return topo->llc_span[llc];
+}
+
+const struct cpumask *llc_node_span_by_dist(int node, int index, int *llc_out)
+{
+	return llc_node_span_from(node, -1, index, llc_out);
+}
+#endif /* CONFIG_SCHED_CACHE */
 
 const struct cpumask *tl_pkg_mask(struct sched_domain_topology_level *tl, int cpu)
 {

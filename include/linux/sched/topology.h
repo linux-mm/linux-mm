@@ -121,6 +121,13 @@ struct sched_domain {
 	unsigned int llc_max;
 	unsigned int *llc_counts __counted_by_ptr(llc_max);
 	unsigned long llc_bytes;
+	unsigned int *numa_counts;
+	/*
+	 * Scratch for the load balance affinity score, llc_max entries each.
+	 * Only the bottom sd owns them, like llc_counts above.
+	 */
+	int *affi_ids;
+	int *affi_weights;
 #endif
 
 #ifdef CONFIG_SCHEDSTATS

@@ -23,10 +23,22 @@ enum sched_tunable_scaling {
 #define NUMA_BALANCING_NORMAL		0x1
 #define NUMA_BALANCING_MEMORY_TIERING	0x2
 
+/*
+ * Fine-grained control of the NUMA balancing sub-features. These are
+ * independent of the master NUMA_BALANCING_NORMAL switch and let the page
+ * migration and task migration paths be disabled separately.
+ */
+#define NUMA_BALANCING_PAGE_MIGRATION	0x1
+#define NUMA_BALANCING_TASK_MIGRATION	0x2
+#define NUMA_BALANCING_MIGRATE_DEFAULT	(NUMA_BALANCING_PAGE_MIGRATION | \
+					 NUMA_BALANCING_TASK_MIGRATION)
+
 #ifdef CONFIG_NUMA_BALANCING
 extern int sysctl_numa_balancing_mode;
+extern unsigned int numa_balancing_migrate_mode;
 #else
 #define sysctl_numa_balancing_mode	0
+#define numa_balancing_migrate_mode	NUMA_BALANCING_MIGRATE_DEFAULT
 #endif
 
 #endif /* _LINUX_SCHED_SYSCTL_H */
