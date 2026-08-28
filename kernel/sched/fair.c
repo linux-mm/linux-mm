@@ -3312,6 +3312,9 @@ static int task_numa_migrate(struct task_struct *p)
 	struct rq *best_rq;
 	int nid, ret, dist;
 
+	if (!(numa_balancing_migrate_mode & NUMA_BALANCING_TASK_MIGRATION))
+		return -EAGAIN;
+
 	/*
 	 * Pick the lowest SD_NUMA domain, as that would have the smallest
 	 * imbalance and would be the first to start moving tasks about.

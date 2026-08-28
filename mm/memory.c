@@ -6049,6 +6049,9 @@ int numa_migrate_check(struct folio *folio, struct vm_fault *vmf,
 		*flags |= TNF_FAULT_LOCAL;
 	}
 
+	if (!(numa_balancing_migrate_mode & NUMA_BALANCING_PAGE_MIGRATION))
+		return NUMA_NO_NODE;
+
 	return mpol_misplaced(folio, vmf, addr);
 }
 
