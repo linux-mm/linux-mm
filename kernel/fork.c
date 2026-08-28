@@ -120,6 +120,8 @@
 /* For dup_mmap(). */
 #include "../mm/internal.h"
 
+#include "stack_shrinker.h"
+
 #include <trace/events/sched.h>
 
 #define CREATE_TRACE_POINTS
@@ -207,11 +209,6 @@ static DEFINE_PER_CPU(struct vm_struct *, cached_stacks[NR_CACHED_STACKS]);
  */
 #define GFP_VMAP_STACK (GFP_KERNEL | __GFP_ZERO | __GFP_SKIP_KASAN)
 
-struct vm_stack {
-	struct rcu_head rcu;
-	struct vm_struct *stack_vm_area;
-};
-
 static struct vm_struct *alloc_thread_stack_node_from_cache(struct task_struct *tsk, int node)
 {
 	struct vm_struct *vm_area;
@@ -272,6 +269,117 @@ static bool try_release_thread_stack_to_cache(struct vm_struct *vm_area)
 	return false;
 }
 
+#ifdef CONFIG_RECLAIMABLE_STACK
+static void free_vmap_stack(struct vm_struct *vm_area)
+{
+	int i;
+
+	remove_vm_area(vm_area->addr);
+
+	for (i = 0; i < vm_area->nr_pages; i++) {
+		mod_node_page_state(page_pgdat(vm_area->pages[i]), NR_VMALLOC, -1);
+		__free_page(vm_area->pages[i]);
+	}
+
+	kfree(vm_area->pages);
+	kfree(vm_area);
+}
+
+static struct vm_struct *alloc_vmap_stack(int node)
+{
+	struct vm_struct *vm_area;
+	int ret;
+
+	vm_area = get_vm_area_node(THREAD_SIZE, THREAD_ALIGN, VM_MAP | VM_SPARSE, node);
+	if (!vm_area)
+		return NULL;
+
+	vm_area->pages = kcalloc_node(THREAD_SIZE >> PAGE_SHIFT, sizeof(*vm_area->pages),
+				      GFP_KERNEL | __GFP_ZERO, node);
+	if (!vm_area->pages)
+		goto alloc_failure;
+
+	while (vm_area->nr_pages < THREAD_SIZE >> PAGE_SHIFT) {
+		struct page *page;
+		gfp_t gfp = GFP_VMAP_STACK | __GFP_HIGHMEM;
+
+		if (node == NUMA_NO_NODE)
+			page = alloc_pages(gfp, 0);
+		else
+			page = alloc_pages_node(node, gfp, 0);
+
+		if (!page)
+			goto alloc_failure;
+
+		/*
+		 * Non-reclaimable vmap stacks pages aren't charged against an
+		 * memcg until account_kernel_stack(), but they are added to
+		 * the node's NR_VMALLOC counter. Copy that behavior to avoid
+		 * confusing userspace.
+		 */
+		mod_node_page_state(page_pgdat(page), NR_VMALLOC, 1);
+		vm_area->pages[vm_area->nr_pages++] = page;
+	}
+
+	ret = vmap_pages_range((unsigned long)vm_area->addr,
+			       (unsigned long)vm_area->addr + THREAD_SIZE,
+			       PAGE_KERNEL, vm_area->pages, PAGE_SHIFT);
+	if (ret)
+		goto alloc_failure;
+
+	return vm_area;
+
+alloc_failure:
+	free_vmap_stack(vm_area);
+	return NULL;
+}
+
+struct vm_stack {
+	struct rcu_work work;
+	struct vm_struct *stack_vm_area;
+};
+
+static void thread_stack_free_work(struct work_struct *work)
+{
+	struct vm_stack *vm_stack = container_of(to_rcu_work(work), struct vm_stack, work);
+	struct vm_struct *vm_area = vm_stack->stack_vm_area;
+
+	if (try_release_thread_stack_to_cache(vm_stack->stack_vm_area))
+		return;
+
+	free_vmap_stack(vm_area);
+}
+
+static void thread_stack_delayed_free(struct task_struct *tsk)
+{
+	struct vm_stack *vm_stack = tsk->stack;
+
+	vm_stack->stack_vm_area = tsk->stack_vm_area;
+	INIT_RCU_WORK(&vm_stack->work, thread_stack_free_work);
+	queue_rcu_work(system_wq, &vm_stack->work);
+}
+
+#else /* !CONFIG_RECLAIMABLE_STACK */
+static void free_vmap_stack(struct vm_struct *vm_area)
+{
+	vfree(vm_area->addr);
+}
+
+static struct vm_struct *alloc_vmap_stack(int node)
+{
+	void *stack = __vmalloc_node(THREAD_SIZE, THREAD_ALIGN,
+				     GFP_VMAP_STACK,
+				     node, __builtin_return_address(0));
+	if (!stack)
+		return NULL;
+	return find_vm_area(stack);
+}
+
+struct vm_stack {
+	struct rcu_head rcu;
+	struct vm_struct *stack_vm_area;
+};
+
 static void thread_stack_free_rcu(struct rcu_head *rh)
 {
 	struct vm_stack *vm_stack = container_of(rh, struct vm_stack, rcu);
@@ -280,7 +388,7 @@ static void thread_stack_free_rcu(struct rcu_head *rh)
 	if (try_release_thread_stack_to_cache(vm_stack->stack_vm_area))
 		return;
 
-	vfree(vm_area->addr);
+	free_vmap_stack(vm_area);
 }
 
 static void thread_stack_delayed_free(struct task_struct *tsk)
@@ -290,6 +398,7 @@ static void thread_stack_delayed_free(struct task_struct *tsk)
 	vm_stack->stack_vm_area = tsk->stack_vm_area;
 	call_rcu(&vm_stack->rcu, thread_stack_free_rcu);
 }
+#endif /* CONFIG_RECLAIMABLE_STACK */
 
 static int free_vm_stack_cache(unsigned int cpu)
 {
@@ -302,7 +411,7 @@ static int free_vm_stack_cache(unsigned int cpu)
 		if (!vm_area)
 			continue;
 
-		vfree(vm_area->addr);
+		free_vmap_stack(vm_area);
 		cached_vm_stack_areas[i] = NULL;
 	}
 
@@ -338,7 +447,7 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 	vm_area = alloc_thread_stack_node_from_cache(tsk, node);
 	if (vm_area) {
 		if (memcg_charge_kernel_stack(vm_area)) {
-			vfree(vm_area->addr);
+			free_vmap_stack(vm_area);
 			return -ENOMEM;
 		}
 
@@ -353,20 +462,20 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 
 		tsk->stack_vm_area = vm_area;
 		tsk->stack = stack;
+		add_to_stack_shrinker(tsk, node);
 		return 0;
 	}
 
-	stack = __vmalloc_node(THREAD_SIZE, THREAD_ALIGN,
-				     GFP_VMAP_STACK,
-				     node, __builtin_return_address(0));
-	if (!stack)
+	vm_area = alloc_vmap_stack(node);
+	if (!vm_area)
 		return -ENOMEM;
+	stack = vm_area->addr;
 
-	vm_area = find_vm_area(stack);
 	if (memcg_charge_kernel_stack(vm_area)) {
-		vfree(stack);
+		free_vmap_stack(vm_area);
 		return -ENOMEM;
 	}
+
 	/*
 	 * We can't call find_vm_area() in interrupt context, and
 	 * free_thread_stack() can be called in interrupt context,
@@ -375,6 +484,7 @@ static int alloc_thread_stack_node(struct task_struct *tsk, int node)
 	tsk->stack_vm_area = vm_area;
 	stack = kasan_reset_tag(stack);
 	tsk->stack = stack;
+	add_to_stack_shrinker(tsk, node);
 	return 0;
 }
 
@@ -793,6 +903,7 @@ void __put_task_struct(struct task_struct *tsk)
 	delayacct_tsk_free(tsk);
 	put_signal_struct(tsk->signal);
 	sched_core_free(tsk);
+	remove_from_stack_shrinker(tsk);
 	free_task(tsk);
 }
 EXPORT_SYMBOL_GPL(__put_task_struct);
@@ -1014,6 +1125,7 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 free_stack:
 	exit_task_stack_account(tsk);
 	free_thread_stack(tsk);
+	remove_from_stack_shrinker(tsk);
 free_tsk:
 	free_task_struct(tsk);
 	return NULL;
