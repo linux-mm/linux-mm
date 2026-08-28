@@ -1410,6 +1410,41 @@ __read_mostly unsigned int llc_epoch_affinity_timeout = EPOCH_LLC_AFFINITY_TIMEO
 __read_mostly unsigned int llc_imb_pct		= 20;
 __read_mostly unsigned int llc_overaggr_pct	= 50;
 
+#define MM_LLC_RANGE_INVALID	U64_MAX
+
+static u64 mm_llc_range_pack(int cpu, int dist)
+{
+	return (u64)(u32)cpu << 32 | (u32)dist;
+}
+
+static int mm_llc_range_cpu(u64 range)
+{
+	return upper_32_bits(range);
+}
+
+static int mm_llc_range_dist(u64 range)
+{
+	return lower_32_bits(range);
+}
+
+static int mm_estimated_range_dist(int pref_cpu, u64 group_util,
+				   u64 nr_running);
+static int mm_cache_distance(int pref_cpu, int cpu);
+
+static bool mm_llc_in_estimated_range(struct mm_struct *mm, int pref_cpu,
+				      int cpu)
+{
+	u64 range = READ_ONCE(mm->sc_stat.llc_range);
+	int dist;
+
+	if (range == MM_LLC_RANGE_INVALID ||
+	    mm_llc_range_cpu(range) != pref_cpu)
+		return false;
+
+	dist = mm_cache_distance(pref_cpu, cpu);
+	return dist >= 0 && dist <= mm_llc_range_dist(range);
+}
+
 static int llc_id(int cpu)
 {
 	if (cpu < 0)
@@ -1499,12 +1534,42 @@ static bool invalid_llc_nr(struct mm_struct *mm, struct task_struct *p,
 			(scale * per_cpu(sd_llc_size, cpu)));
 }
 
+static bool task_llc_affinity_counted(struct rq *rq, struct task_struct *p,
+				      int pref_llc)
+{
+	u64 range;
+	int pref_cpu;
+
+	if (pref_llc < 0)
+		return false;
+
+	/*
+	 * LLCs inside the estimated range are equivalent homes. Do not add
+	 * an anchor-directed affinity score while a task is already inside
+	 * that range; retain the anchor preference outside it so load balance
+	 * can still pull an escaped task back.
+	 */
+	pref_cpu = p->mm ? READ_ONCE(p->mm->sc_stat.cpu) : -1;
+	if (pref_cpu >= 0 && llc_id(pref_cpu) == pref_llc) {
+		range = READ_ONCE(p->mm->sc_stat.llc_range);
+		/* A single-LLC range still needs the original anchor affinity. */
+		if (range != MM_LLC_RANGE_INVALID &&
+		    mm_llc_range_cpu(range) == pref_cpu &&
+		    mm_llc_range_dist(range) > 0 &&
+		    mm_llc_in_estimated_range(p->mm, pref_cpu, cpu_of(rq)))
+			return false;
+	}
+
+	return true;
+}
+
 static void account_llc_enqueue(struct rq *rq, struct task_struct *p)
 {
 	int pref_llc, pref_llc_queued;
 	struct sched_domain *sd;
 
 	pref_llc = p->preferred_llc;
+	p->pref_llc_counted = 0;
 	if (pref_llc < 0)
 		return;
 
@@ -1529,12 +1594,14 @@ static void account_llc_enqueue(struct rq *rq, struct task_struct *p)
 	p->pref_llc_queued = pref_llc_queued;
 
 	sd = rcu_dereference_all(rq->sd);
-	if (sd && (unsigned int)pref_llc < sd->llc_max) {
+	if (sd && task_llc_affinity_counted(rq, p, pref_llc) &&
+	    (unsigned int)pref_llc < sd->llc_max) {
 		int pref_numa = llc_to_node(pref_llc);
 		sd->llc_counts[pref_llc]++;
 		if (sd->numa_counts &&
 		    (unsigned int)pref_numa < nr_node_ids)
 			sd->numa_counts[pref_numa]++;
+		p->pref_llc_counted = 1;
 	}
 }
 
@@ -1542,8 +1609,11 @@ static void account_llc_dequeue(struct rq *rq, struct task_struct *p)
 {
 	struct sched_domain *sd;
 	int pref_llc;
+	int pref_llc_counted;
 
 	pref_llc = p->preferred_llc;
+	pref_llc_counted = p->pref_llc_counted;
+	p->pref_llc_counted = 0;
 	if (pref_llc < 0)
 		return;
 
@@ -1559,7 +1629,8 @@ static void account_llc_dequeue(struct rq *rq, struct task_struct *p)
 	}
 
 	sd = rcu_dereference_all(rq->sd);
-	if (sd && (unsigned int)pref_llc < sd->llc_max) {
+	if (sd && pref_llc_counted &&
+	    (unsigned int)pref_llc < sd->llc_max) {
 		/*
 		 * There is a race condition between dequeue
 		 * and CPU hotplug. After a task has been enqueued
@@ -1605,6 +1676,7 @@ void mm_init_sched(struct mm_struct *mm,
 	mm->sc_stat.next_scan = jiffies;
 	mm->sc_stat.nr_running_avg = 0;
 	mm->sc_stat.util_avg = 0;
+	mm->sc_stat.llc_range = MM_LLC_RANGE_INVALID;
 	mm->sc_stat.footprint = 0;
 	mm->sc_stat.node_epoch = kcalloc(num_possible_nodes(),
 					 sizeof(*mm->sc_stat.node_epoch),
@@ -1695,6 +1767,7 @@ void account_mm_sched(struct rq *rq, struct task_struct *p, s64 delta_exec)
 	struct sched_cache_time *pcpu_sched;
 	struct mm_struct *mm = p->mm;
 	unsigned long *node_epoch;
+	bool pref_llc_counted;
 	int mm_sched_llc = -1;
 	int node, pref_nid;
 	unsigned long epoch;
@@ -1734,6 +1807,7 @@ void account_mm_sched(struct rq *rq, struct task_struct *p, s64 delta_exec)
 	    exceed_llc_capacity(mm, cpu_of(rq))) {
 		if (READ_ONCE(mm->sc_stat.cpu) != -1)
 			WRITE_ONCE(mm->sc_stat.cpu, -1);
+		WRITE_ONCE(mm->sc_stat.llc_range, MM_LLC_RANGE_INVALID);
 
 		if (node_epoch)
 			memset(mm->sc_stat.node_epoch, 0,
@@ -1747,10 +1821,12 @@ void account_mm_sched(struct rq *rq, struct task_struct *p, s64 delta_exec)
 	}
 
 	mm_sched_llc = get_pref_llc(p, mm);
+	pref_llc_counted = task_llc_affinity_counted(rq, p, mm_sched_llc);
 
 	/* task not on rq accounted later in account_entity_enqueue() */
 	if (task_running_on_cpu(rq->cpu, p)) {
-		if (READ_ONCE(p->preferred_llc) != mm_sched_llc) {
+		if (READ_ONCE(p->preferred_llc) != mm_sched_llc ||
+		    READ_ONCE(p->pref_llc_counted) != pref_llc_counted) {
 			account_llc_dequeue(rq, p);
 			WRITE_ONCE(p->preferred_llc, mm_sched_llc);
 			account_llc_enqueue(rq, p);
@@ -1918,6 +1994,7 @@ static void task_cache_work(struct callback_head *work)
 	    exceed_llc_capacity(mm, curr_cpu)) {
 		if (READ_ONCE(mm->sc_stat.cpu) != -1)
 			WRITE_ONCE(mm->sc_stat.cpu, -1);
+		WRITE_ONCE(mm->sc_stat.llc_range, MM_LLC_RANGE_INVALID);
 
 		return;
 	}
@@ -2038,11 +2115,34 @@ static void task_cache_work(struct callback_head *work)
 	else if (pref_llc_cpu >= 0 && pref_llc_occ > 2 * curr_m_a_occ)
 		new_cpu = pref_llc_cpu;
 
+	update_avg_scale(&mm->sc_stat.nr_running_avg, nr_running);
+	update_mm_util_avg(&mm->sc_stat.util_avg, group_util);
+
+	/*
+	 * The estimated LLC range is consumed from the load-balance hot path.
+	 * Compute its distance frontier here, where a topology walk is cheap,
+	 * and publish the anchor and frontier in one 64-bit value so readers
+	 * never combine values from different preference updates.
+	 */
+	pref_cpu = new_cpu >= 0 ? new_cpu : READ_ONCE(mm->sc_stat.cpu);
+	if (pref_cpu >= 0) {
+		int range_dist = mm_estimated_range_dist(pref_cpu,
+					READ_ONCE(mm->sc_stat.util_avg),
+					READ_ONCE(mm->sc_stat.nr_running_avg));
+
+		if (range_dist >= 0)
+			WRITE_ONCE(mm->sc_stat.llc_range,
+				   mm_llc_range_pack(pref_cpu, range_dist));
+		else
+			WRITE_ONCE(mm->sc_stat.llc_range,
+				   MM_LLC_RANGE_INVALID);
+	} else {
+		WRITE_ONCE(mm->sc_stat.llc_range, MM_LLC_RANGE_INVALID);
+	}
+
 	if (new_cpu >= 0)
 		WRITE_ONCE(mm->sc_stat.cpu, new_cpu);
 
-	update_avg_scale(&mm->sc_stat.nr_running_avg, nr_running);
-	update_mm_util_avg(&mm->sc_stat.util_avg, group_util);
 	free_cpumask_var(cpus);
 }
 
@@ -2057,6 +2157,7 @@ void init_sched_mm(struct task_struct *p)
 	 * polluting account_llc_enqueue().
 	 */
 	p->preferred_llc = -1;
+	p->pref_llc_counted = 0;
 }
 
 #else /* CONFIG_SCHED_CACHE */
@@ -2068,8 +2169,7 @@ void init_sched_mm(struct task_struct *p) { }
 
 static void task_tick_cache(struct rq *rq, struct task_struct *p) { }
 
-static inline int get_pref_llc(struct task_struct *p,
-			       struct mm_struct *mm)
+static inline int get_pref_llc(struct task_struct *p, struct mm_struct *mm)
 {
 	return -1;
 }
@@ -10524,6 +10624,16 @@ static inline int task_is_ineligible_on_dst_cpu(struct task_struct *p, int dest_
 }
 
 #ifdef CONFIG_SCHED_CACHE
+static u32 llc_aggr_capacity_pct(void)
+{
+	u32 aggr_pct = READ_ONCE(llc_overaggr_pct);
+
+	if (cpu_smt_num_threads == 1)
+		aggr_pct = aggr_pct * 3 / 2;
+
+	return aggr_pct;
+}
+
 /*
  * The margin used when comparing LLC utilization with CPU capacity.
  * It determines the LLC load level where active LLC aggregation is
@@ -10534,16 +10644,18 @@ static inline int task_is_ineligible_on_dst_cpu(struct task_struct *p, int dest_
  */
 static bool fits_llc_capacity(unsigned long util, unsigned long max)
 {
-	u32 aggr_pct = llc_overaggr_pct;
+	return util * 100 < max * llc_aggr_capacity_pct();
+}
 
-	/*
-	 * For single core systems, raise the aggregation
-	 * threshold to accommodate more tasks.
-	 */
-	if (cpu_smt_num_threads == 1)
-		aggr_pct = (aggr_pct * 3 / 2);
+/* The estimated range may be filled exactly to the aggregation margin. */
+static bool fits_llc_range_capacity(unsigned long util, unsigned long max)
+{
+	return util * 100 <= max * llc_aggr_capacity_pct();
+}
 
-	return util * 100 < max * aggr_pct;
+static bool fits_llc_full_capacity(unsigned long util, unsigned long max)
+{
+	return util <= max;
 }
 
 /*
@@ -10667,6 +10779,143 @@ static bool get_span_stats(const struct cpumask *span, unsigned long *util_out,
 }
 
 /*
+ * Return the cache distance from the mm's preferred CPU to @cpu. LLCs in
+ * the preferred NUMA node are ordered relative to the preferred LLC. For a
+ * remote node, start at the node distance and add the target LLC's position
+ * in that node's cached LLC order. This makes the first LLC in a remote node
+ * the nearest one and opens the remaining LLCs one at a time.
+ */
+static int mm_cache_distance(int pref_cpu, int cpu)
+{
+	int pref_node = cpu_to_node(pref_cpu);
+	int node = cpu_to_node(cpu);
+	int anchor_llc, node_dist, offset;
+
+	if (pref_node == node)
+		return llc_intra_node_distance(llc_id(pref_cpu), llc_id(cpu),
+					       pref_node);
+
+	/*
+	 * for_each_llc_node_span() orders a remote node from its first LLC.
+	 * Reuse that anchor here. From the first LLC, the intra-node distance
+	 * is 0 for itself and local_rank + 1 for every other LLC, so removing
+	 * the non-zero bias gives the required zero-based offset.
+	 */
+	if (!llc_node_span_by_dist(node, 0, &anchor_llc))
+		return -1;
+
+	offset = llc_intra_node_distance(anchor_llc, llc_id(cpu), node);
+	if (offset < 0)
+		return -1;
+	if (offset)
+		offset--;
+
+	node_dist = sched_cache_node_distance(pref_node, node);
+	if (node_dist < 0)
+		return -1;
+
+	/*
+	 * De-duplicated node distances are only guaranteed to differ by one,
+	 * while @offset spans the node's LLC count. Adding them directly lets
+	 * two nodes share distance values, so a single tier would open LLCs
+	 * from several nodes at once instead of filling the nearest node
+	 * first. Scale the node distance past the widest node to keep the
+	 * per-node ranges disjoint.
+	 */
+	return node_dist * READ_ONCE(llc_node_stride) + offset;
+}
+
+/*
+ * Convert the mm utilization estimate into the furthest cache-distance tier
+ * it needs. This runs from task_cache_work(), rather than can_migrate_node(),
+ * so load balance does not walk every LLC for every migration candidate.
+ *
+ * Use an inclusive capacity boundary: an mm whose utilization is exactly 50%
+ * of an LLC fits that LLC and does not require the next tier. If the estimate
+ * exceeds the configured budget of the whole machine, return the last tier so
+ * every LLC remains eligible.
+ */
+static int mm_estimated_range_dist(int pref_cpu, u64 group_util,
+				   u64 nr_running)
+{
+	const struct cpumask *span;
+	u64 budget = 0;
+	unsigned long util, cap;
+	int frontier = -1, last_dist = -1, node;
+
+	if (!group_util)
+		return -1;
+
+	/*
+	 * Build the range one cache-distance tier at a time.  The topology
+	 * iterators order nodes relative to @pref_cpu, but LLCs within each
+	 * node are cached relative to that node's first LLC.  Consequently,
+	 * their nested iteration order is not necessarily monotonic from the
+	 * mm's actual preferred LLC.  Returning the distance of the first LLC
+	 * visited could therefore make a one-LLC estimate cover several LLCs.
+	 *
+	 * A distance is also a range boundary, so all LLCs at an equal distance
+	 * become eligible together.  Account their capacity together as well;
+	 * otherwise one remote LLC's capacity could open its whole distance
+	 * tier.
+	 */
+	for (;;) {
+		u64 tier_budget = 0, tier_capacity = 0;
+		int next_dist = INT_MAX;
+
+		for_each_sched_node(pref_cpu, node) {
+			for_each_llc_node_span(node, span) {
+				int cpu = cpumask_first(span);
+				int dist = mm_cache_distance(pref_cpu, cpu);
+
+				if (dist < 0)
+					return -1;
+				if (dist > frontier && dist < next_dist)
+					next_dist = dist;
+			}
+		}
+
+		if (next_dist == INT_MAX)
+			break;
+
+		for_each_sched_node(pref_cpu, node) {
+			for_each_llc_node_span(node, span) {
+				int cpu = cpumask_first(span);
+
+				if (mm_cache_distance(pref_cpu, cpu) != next_dist)
+					continue;
+				if (!get_llc_stats(cpu, &util, &cap))
+					return -1;
+
+				tier_capacity += cap;
+				tier_budget += mul_u64_u32_div(cap,
+						llc_aggr_capacity_pct(), 100);
+			}
+		}
+
+		/*
+		 * A workload whose active parallelism and utilization both fit a
+		 * single LLC does not oversubscribe it.  Keep the original single
+		 * anchor in that case: spreading communicating threads merely because
+		 * they cross the aggregation margin loses locality without creating
+		 * CPU capacity.  Larger workloads still grow at the configured margin.
+		 */
+		if (next_dist == 0 && group_util <= tier_capacity &&
+		    nr_running * SCHED_CAPACITY_SCALE <= tier_capacity)
+			return 0;
+
+		budget += tier_budget;
+		last_dist = next_dist;
+		if (group_util <= budget)
+			return next_dist;
+
+		frontier = next_dist;
+	}
+
+	return last_dist;
+}
+
+/*
  * Decide if migration should happen on a specific node.
  * The node here is an LLC or a NUMA.
  */
@@ -10674,11 +10923,12 @@ static enum llc_mig can_migrate_node(int src_cpu, int dst_cpu,
 			struct task_struct *p, bool to_pref)
 {
 	const struct cpumask *span;
-	struct mm_struct *mm;
+	struct mm_struct *mm = NULL;
+	bool single_llc_range = false;
 	unsigned long dst_util, dst_cap, tsk_util = 0;
 	unsigned long src_util = 0, src_cap = 0;
 	unsigned long acc_util = 0, acc_cap = 0, dst_pre;
-	int node, target_cpu = src_cpu;
+	int node, target_cpu = src_cpu, mm_cpu = -1;
 	int get_src = 0;
 
 	if (!get_llc_stats(dst_cpu, &dst_util, &dst_cap))
@@ -10690,8 +10940,16 @@ static enum llc_mig can_migrate_node(int src_cpu, int dst_cpu,
 	if (p) {
 		mm = p->mm;
 		if (mm) {
-			if (mm->sc_stat.cpu >= 0)
-				target_cpu = mm->sc_stat.cpu;
+			mm_cpu = READ_ONCE(mm->sc_stat.cpu);
+			if (mm_cpu >= 0) {
+				u64 range = READ_ONCE(mm->sc_stat.llc_range);
+
+				target_cpu = mm_cpu;
+				single_llc_range =
+					range != MM_LLC_RANGE_INVALID &&
+					mm_llc_range_cpu(range) == mm_cpu &&
+					mm_llc_range_dist(range) == 0;
+			}
 		}
 		tsk_util = task_util(p);
 	}
@@ -10699,7 +10957,27 @@ static enum llc_mig can_migrate_node(int src_cpu, int dst_cpu,
 	dst_util = dst_util + tsk_util;
 	dst_pre = dst_util - tsk_util;
 
+	/*
+	 * Do not let a nearer LLC that can hold one task veto a destination
+	 * which the mm's aggregate demand is expected to need. The range check
+	 * says the destination belongs to the area needed by the whole mm. Let
+	 * it fill exactly to the aggregation margin; the ordinary strict check
+	 * would reject that boundary and strand runnable tasks on busier LLCs.
+	 */
+	if (!to_pref && mm_cpu >= 0 &&
+	    mm_llc_in_estimated_range(mm, target_cpu, dst_cpu) &&
+	    fits_llc_range_capacity(dst_util, dst_cap))
+		return mig_llc;
+
 	if (to_pref) {
+		/*
+		 * A single-LLC range means the mm fits without oversubscribing
+		 * the anchor.  Preserve that locality up to the LLC's full
+		 * capacity instead of applying the aggregation margin.
+		 */
+		if (single_llc_range && cpus_share_cache(dst_cpu, target_cpu) &&
+		    fits_llc_full_capacity(dst_util, dst_cap))
+			return mig_llc;
 
 		if (fits_llc_capacity(dst_util, dst_cap))
 			return mig_llc;
@@ -10724,6 +11002,11 @@ static enum llc_mig can_migrate_node(int src_cpu, int dst_cpu,
 
 		return mig_forbid;
 	}
+
+	/* Do not split a fitting single-LLC mm merely at the aggr margin. */
+	if (single_llc_range && cpus_share_cache(src_cpu, target_cpu) &&
+	    src_cap && fits_llc_full_capacity(src_util, src_cap))
+		return mig_forbid;
 
 	for_each_sched_node(target_cpu, node) {
 		unsigned long u = 0, c = 0, nu, nc;
@@ -10859,6 +11142,7 @@ static enum llc_mig can_migrate_llc_task(int src_cpu, int dst_cpu,
 	    exceed_llc_capacity(mm, dst_cpu)) {
 		if (READ_ONCE(mm->sc_stat.cpu) != -1)
 			WRITE_ONCE(mm->sc_stat.cpu, -1);
+		WRITE_ONCE(mm->sc_stat.llc_range, MM_LLC_RANGE_INVALID);
 		return mig_unrestricted;
 	}
 
@@ -13599,12 +13883,12 @@ static inline bool llc_spread_active_balance(struct lb_env *env)
 		return false;
 
 	/*
-	 * Only move when the destination still fits with a full CPU of the load
-	 * added, and when the source leads by at least two CPUs worth, so that
-	 * moving one task cannot invert the imbalance and bounce it straight
-	 * back.
+	 * Only move when the destination still fits with a full CPU of load
+	 * added. The estimated range deliberately permits the exact aggregation
+	 * boundary, otherwise a three-task LLC cannot pull the fourth task needed
+	 * to balance a four-task-per-LLC workload.
 	 */
-	if (!fits_llc_capacity(dst_util + SCHED_CAPACITY_SCALE, dst_cap))
+	if (!fits_llc_range_capacity(dst_util + SCHED_CAPACITY_SCALE, dst_cap))
 		return false;
 
 	/* Avoid threads ping-pong migration */

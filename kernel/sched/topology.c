@@ -722,6 +722,13 @@ struct llc_local_rank_topology {
 };
 
 static struct llc_local_rank_topology __rcu *llc_local_rank_topo;
+
+/*
+ * Largest number of LLCs held by any single NUMA node. mm_cache_distance()
+ * multiplies the node distance by this so that one node's per-LLC offsets
+ * cannot reach into the next node's range.
+ */
+int llc_node_stride __read_mostly = 1;
 static void rebuild_llc_local_rank(int size);
 #endif
 
@@ -1375,7 +1382,7 @@ static void free_llc_local_rank_topology(struct llc_local_rank_topology *topo)
 static void rebuild_llc_local_rank(int size)
 {
 	struct llc_local_rank_topology *topo, *old;
-	int llc, node;
+	int llc, node, stride;
 
 	if (size <= 0)
 		return;
@@ -1399,6 +1406,11 @@ static void rebuild_llc_local_rank(int size)
 			continue;
 		topo->rank[llc] = topo->node_count[node]++;
 	}
+
+	stride = 1;
+	for (node = 0; node < nr_node_ids; node++)
+		stride = max(stride, topo->node_count[node]);
+	WRITE_ONCE(llc_node_stride, stride);
 
 	old = rcu_dereference_protected(llc_local_rank_topo,
 					 lockdep_is_held(&sched_domains_mutex));

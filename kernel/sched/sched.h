@@ -4125,6 +4125,7 @@ extern int sched_node_order_at(int cpu, int idx);
 	     ((node) = sched_node_order_at((cpu), __sn_idx)) >= 0;	\
 	     __sn_idx++)
 
+extern int llc_node_stride;
 extern int llc_node_count(int node);
 extern const struct cpumask *llc_node_span_by_dist(int node, int index, int *llc_out);
 
