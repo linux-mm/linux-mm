@@ -1605,12 +1605,23 @@ void mm_init_sched(struct mm_struct *mm,
 	mm->sc_stat.next_scan = jiffies;
 	mm->sc_stat.nr_running_avg = 0;
 	mm->sc_stat.footprint = 0;
+	mm->sc_stat.node_epoch = kcalloc(num_possible_nodes(),
+					 sizeof(*mm->sc_stat.node_epoch),
+					 GFP_KERNEL);
 	/*
 	 * The update to mm->sc_stat should not be reordered
 	 * before initialization to mm's other fields, in case
 	 * the readers may get invalid mm_sched_epoch, etc.
 	 */
 	smp_store_release(&mm->sc_stat.pcpu_sched, _pcpu_sched);
+}
+
+void mm_destroy_sched(struct mm_struct *mm)
+{
+	free_percpu(mm->sc_stat.pcpu_sched);
+	mm->sc_stat.pcpu_sched = NULL;
+	kfree(mm->sc_stat.node_epoch);
+	mm->sc_stat.node_epoch = NULL;
 }
 
 /* because why would C be fully specified */
@@ -1700,7 +1711,9 @@ void account_mm_sched(struct rq *rq, struct task_struct *p, s64 delta_exec)
 {
 	struct sched_cache_time *pcpu_sched;
 	struct mm_struct *mm = p->mm;
+	unsigned long *node_epoch;
 	int mm_sched_llc = -1;
+	int node, pref_nid;
 	unsigned long epoch;
 
 	if (!sched_cache_enabled())
@@ -1724,6 +1737,11 @@ void account_mm_sched(struct rq *rq, struct task_struct *p, s64 delta_exec)
 		epoch = rq->cpu_epoch;
 	}
 
+	node_epoch = mm->sc_stat.node_epoch;
+	pref_nid = READ_ONCE(p->numa_preferred_nid);
+	if (pref_nid != NUMA_NO_NODE && mm->sc_stat.node_epoch)
+		mm->sc_stat.node_epoch[pref_nid] = epoch;
+
 	/*
 	 * If this process hasn't hit task_cache_work() for a while invalidate
 	 * its preferred state.
@@ -1733,6 +1751,16 @@ void account_mm_sched(struct rq *rq, struct task_struct *p, s64 delta_exec)
 	    exceed_llc_capacity(mm, cpu_of(rq))) {
 		if (READ_ONCE(mm->sc_stat.cpu) != -1)
 			WRITE_ONCE(mm->sc_stat.cpu, -1);
+
+		if (node_epoch)
+			memset(mm->sc_stat.node_epoch, 0,
+				sizeof(*node_epoch) * num_possible_nodes());
+	} else if (node_epoch) {
+		for_each_node(node) {
+			if ((long)(epoch - READ_ONCE(node_epoch[node])) >
+			    llc_epoch_affinity_timeout)
+				WRITE_ONCE(node_epoch[node], 0);
+		}
 	}
 
 	mm_sched_llc = get_pref_llc(p, mm);
@@ -1777,10 +1805,12 @@ static void get_scan_cpumasks(cpumask_var_t cpus, struct task_struct *p)
 {
 #ifdef CONFIG_NUMA_BALANCING
 	int cpu, curr_cpu, nid, pref_nid;
+	unsigned long *node_epoch;
 
 	if (!static_branch_likely(&sched_numa_balancing))
 		goto out;
 
+	node_epoch = p->mm->sc_stat.node_epoch;
 	cpu = READ_ONCE(p->mm->sc_stat.cpu);
 	if (cpu != -1)
 		nid = cpu_to_node(cpu);
@@ -1800,6 +1830,18 @@ static void get_scan_cpumasks(cpumask_var_t cpus, struct task_struct *p)
 	/* honor the task's preferred node */
 	if (pref_nid == NUMA_NO_NODE)
 		goto out;
+
+	if (node_epoch) {
+		int node;
+
+		for_each_node(node) {
+			if (node == pref_nid)
+				continue;
+
+			if (node_epoch[node] > 0)
+				cpumask_or(cpus, cpus, cpumask_of_node(node));
+		}
+	}
 
 	cpumask_or(cpus, cpus, cpumask_of_node(pref_nid));
 
