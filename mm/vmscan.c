@@ -191,8 +191,20 @@ struct scan_control {
 			prefetchw(&prev->_field);			\
 		}							\
 	} while (0)
+#define prefetchw_next_lru_folio(_folio, _base, _field)			\
+	do {								\
+		if ((_folio)->lru.next != _base) {			\
+			struct folio *next;				\
+									\
+			next = list_entry((_folio)->lru.next,		\
+					struct folio, lru);		\
+			prefetchw(&next->_field);			\
+		}							\
+	} while (0)
+
 #else
 #define prefetchw_prev_lru_folio(_folio, _base, _field) do { } while (0)
+#define prefetchw_next_lru_folio(_folio, _base, _field) do { } while (0)
 #endif
 
 /*
@@ -268,6 +280,13 @@ static inline bool is_exec_file_folio(const struct folio *folio,
 		const vma_flags_t *vma_flags)
 {
 	return vma_flags_test(vma_flags, VMA_EXEC_BIT) && folio_is_file_lru(folio);
+}
+
+/* See get_type_to_scan(): these values always select FILE or ANON */
+static inline bool is_extreme_swappiness(int swappiness)
+{
+	return swappiness <= MIN_SWAPPINESS + 1 ||
+	       swappiness >= MAX_SWAPPINESS;
 }
 
 static void set_task_reclaim_state(struct task_struct *task,
@@ -3296,20 +3315,21 @@ static int folio_update_gen(struct folio *folio, int gen, const vma_flags_t *vma
 }
 
 /* protect pages accessed multiple times through file descriptors */
-static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
+static int __folio_inc_gen(struct folio *folio, int old_gen, bool *increased)
 {
-	int type = folio_is_file_lru(folio);
-	struct lru_gen_folio *lrugen = &lruvec->lrugen;
-	int new_gen, old_gen = lru_gen_from_seq(lrugen->min_seq[type]);
 	unsigned long new_flags, old_flags = READ_ONCE(folio->flags.f);
+	int new_gen;
 
 	VM_WARN_ON_ONCE_FOLIO(!(old_flags & LRU_GEN_MASK), folio);
 
 	do {
 		new_gen = ((old_flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 		/* folio_update_gen() has promoted this page? */
-		if (new_gen >= 0 && new_gen != old_gen)
+		if (new_gen >= 0 && new_gen != old_gen) {
+			if (increased)
+				*increased = false;
 			return new_gen;
+		}
 
 		new_gen = (old_gen + 1) % MAX_NR_GENS;
 
@@ -3317,8 +3337,21 @@ static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
 		new_flags |= (new_gen + 1UL) << LRU_GEN_PGOFF;
 	} while (!try_cmpxchg(&folio->flags.f, &old_flags, new_flags));
 
-	lru_gen_update_size(lruvec, folio, old_gen, new_gen);
+	if (increased)
+		*increased = true;
+	return new_gen;
+}
 
+static int folio_inc_gen(struct lruvec *lruvec, struct folio *folio)
+{
+	int type = folio_is_file_lru(folio);
+	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+	int new_gen, old_gen = lru_gen_from_seq(lrugen->min_seq[type]);
+	bool gen_increased;
+
+	new_gen = __folio_inc_gen(folio, old_gen, &gen_increased);
+	if (gen_increased)
+		lru_gen_update_size(lruvec, folio, old_gen, new_gen);
 	return new_gen;
 }
 
@@ -3897,13 +3930,27 @@ static void clear_mm_walk(void)
 		kfree(walk);
 }
 
+static inline void flush_lru_batch(struct list_head *head, struct list_head **batch_end,
+				   struct list_head *dst)
+{
+	LIST_HEAD(movable);
+
+	if (!*batch_end)
+		return;
+
+	list_cut_position(&movable, head, *batch_end);
+	list_splice_tail_init(&movable, dst);
+	*batch_end = NULL;
+}
+
 static bool inc_min_seq(struct lruvec *lruvec, int type, int swappiness)
 {
 	int zone;
-	int remaining = MAX_LRU_BATCH;
+	int remaining = MAX_LRU_BATCH / (is_extreme_swappiness(swappiness) ? 2 : 8);
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	int hist = lru_hist_from_seq(lrugen->min_seq[type]);
 	int new_gen, old_gen = lru_gen_from_seq(lrugen->min_seq[type]);
+	int target_gen = (old_gen + 1) % MAX_NR_GENS;
 
 	/* For file type, skip the check if swappiness is anon only */
 	if (type && (swappiness == SWAPPINESS_ANON_ONLY))
@@ -3915,33 +3962,55 @@ static bool inc_min_seq(struct lruvec *lruvec, int type, int swappiness)
 
 	/* prevent cold/hot inversion if the type is evictable */
 	for (zone = 0; zone < MAX_NR_ZONES; zone++) {
+		struct list_head *target_list = &lrugen->folios[target_gen][type][zone];
 		struct list_head *head = &lrugen->folios[old_gen][type][zone];
+		unsigned long protected[MAX_NR_TIERS] = {}, delta = 0;
+		struct list_head *pos = head->next;
+		struct list_head *batch_end = NULL;
 
-		while (!list_empty(head)) {
-			struct folio *folio = lru_to_folio(head);
+		while (pos != head) {
+			struct folio *folio = list_entry(pos, struct folio, lru);
+			long nr_pages = folio_nr_pages(folio);
 			int refs = folio_lru_refs(folio);
 			bool workingset = folio_test_workingset(folio);
+			bool gen_increased;
 
 			VM_WARN_ON_ONCE_FOLIO(folio_test_unevictable(folio), folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_test_active(folio), folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_is_file_lru(folio) != type, folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_zonenum(folio) != zone, folio);
 
-			new_gen = folio_inc_gen(lruvec, folio);
-			list_move_tail(&folio->lru, &lrugen->folios[new_gen][type][zone]);
+			prefetchw_next_lru_folio(folio, head, flags);
+			pos = pos->next;
+			new_gen = __folio_inc_gen(folio, old_gen, &gen_increased);
+			if (gen_increased) {
+				delta += nr_pages;
+				batch_end = &folio->lru;
 
-			/* don't count the workingset being lazily promoted */
-			if (refs + workingset != BIT(LRU_REFS_WIDTH) + 1) {
-				int tier = lru_tier_from_refs(refs, workingset);
-				int delta = folio_nr_pages(folio);
+				/* don't count the workingset being lazily promoted */
+				if (refs + workingset != BIT(LRU_REFS_WIDTH) + 1) {
+					int tier = lru_tier_from_refs(refs, workingset);
 
-				WRITE_ONCE(lrugen->protected[hist][type][tier],
-					   lrugen->protected[hist][type][tier] + delta);
+					protected[tier] += nr_pages;
+				}
+			} else {
+				flush_lru_batch(head, &batch_end, target_list);
+				list_move(&folio->lru, &lrugen->folios[new_gen][type][zone]);
 			}
-
 			if (!--remaining)
-				return false;
+				break;
 		}
+		flush_lru_batch(head, &batch_end, target_list);
+
+		WRITE_ONCE(lrugen->nr_pages[old_gen][type][zone],
+			   lrugen->nr_pages[old_gen][type][zone] - delta);
+		WRITE_ONCE(lrugen->nr_pages[target_gen][type][zone],
+			   lrugen->nr_pages[target_gen][type][zone] + delta);
+		for (int tier = 0; tier < MAX_NR_TIERS; tier++)
+			WRITE_ONCE(lrugen->protected[hist][type][tier],
+				   lrugen->protected[hist][type][tier] + protected[tier]);
+		if (!remaining)
+			return false;
 	}
 done:
 	reset_ctrl_pos(lruvec, type, true);
@@ -4151,20 +4220,28 @@ static void set_initial_priority(struct pglist_data *pgdat, struct scan_control 
 	sc->priority = clamp(priority, DEF_PRIORITY / 2, DEF_PRIORITY);
 }
 
+static inline unsigned long lruvec_gen_size(struct lru_gen_folio *lrugen,
+		int type, unsigned long seq)
+{
+	int gen = lru_gen_from_seq(seq);
+	unsigned long size = 0;
+
+	for (int zone = 0; zone < MAX_NR_ZONES; zone++)
+		size += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
+	return size;
+}
+
 static unsigned long lruvec_evictable_size(struct lruvec *lruvec, int swappiness)
 {
-	int gen, type, zone;
+	int type;
 	unsigned long seq, total = 0;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	DEFINE_MAX_SEQ(lruvec);
 	DEFINE_MIN_SEQ(lruvec);
 
 	for_each_evictable_type(type, swappiness) {
-		for (seq = min_seq[type]; seq <= max_seq; seq++) {
-			gen = lru_gen_from_seq(seq);
-			for (zone = 0; zone < MAX_NR_ZONES; zone++)
-				total += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
-		}
+		for (seq = min_seq[type]; seq <= max_seq; seq++)
+			total += lruvec_gen_size(lrugen, type, seq);
 	}
 
 	return total;
@@ -4726,7 +4803,8 @@ static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct sca
 
 static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 		       struct scan_control *sc, int type, int tier,
-		       struct list_head *list, int *isolatedp)
+		       struct list_head *list, int *isolatedp,
+		       bool *exhausted)
 {
 	int i;
 	int gen;
@@ -4737,12 +4815,15 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	int skipped = 0;
 	unsigned long remaining = nr_to_scan;
 	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+	bool early_stop = false;
 
 	VM_WARN_ON_ONCE(nr_to_scan > MAX_LRU_BATCH);
 	VM_WARN_ON_ONCE(!list_empty(list));
 
-	if (get_nr_gens(lruvec, type) == MIN_NR_GENS)
+	if (get_nr_gens(lruvec, type) == MIN_NR_GENS) {
+		*exhausted = true;
 		return 0;
+	}
 
 	gen = lru_gen_from_seq(lrugen->min_seq[type]);
 
@@ -4773,8 +4854,10 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 				skipped_zone += delta;
 			}
 
-			if (!--remaining || max(isolated, skipped_zone) >= MIN_LRU_BATCH)
+			if (!--remaining || max(isolated, skipped_zone) >= MIN_LRU_BATCH) {
+				early_stop = true;
 				break;
+			}
 		}
 
 		if (skipped_zone) {
@@ -4783,8 +4866,10 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 			skipped += skipped_zone;
 		}
 
-		if (!remaining || isolated >= MIN_LRU_BATCH)
+		if (!remaining || isolated >= MIN_LRU_BATCH) {
+			early_stop = true;
 			break;
+		}
 	}
 
 	item = PGSCAN_KSWAPD + reclaimer_offset(sc);
@@ -4795,6 +4880,13 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 				scanned, skipped, isolated,
 				type ? LRU_INACTIVE_FILE : LRU_INACTIVE_ANON);
 
+	/*
+	 * If we didn't stop early, all reclaimable folios in the current
+	 * generation have been scanned. We are exhausted if this is the last
+	 * reclaimable generation.
+	 */
+	*exhausted = !early_stop &&
+		     lrugen->min_seq[type] + MIN_NR_GENS == lrugen->max_seq;
 	*isolatedp = isolated;
 	return scanned;
 }
@@ -4822,20 +4914,50 @@ static int get_tier_idx(struct lruvec *lruvec, int type)
 static int get_type_to_scan(struct lruvec *lruvec, int swappiness)
 {
 	struct ctrl_pos sp, pv = {};
+	int anon_gain, file_gain;
 
 	if (swappiness <= MIN_SWAPPINESS + 1)
 		return LRU_GEN_FILE;
 
 	if (swappiness >= MAX_SWAPPINESS)
 		return LRU_GEN_ANON;
+
+	/*
+	 * Apply a quadratic boost based on the distance from the neutral
+	 * balance point (swappiness = MAX_SWAPPINESS / 2).
+	 *
+	 * A linear weight is easily overwhelmed by historical refault cost
+	 * when swappiness deviates from neutral. The quadratic scaling
+	 * amplifies the weight of the preferred type smoothly.
+	 */
+	if (swappiness < MAX_SWAPPINESS / 2) {
+		int delta = (MAX_SWAPPINESS / 2) - swappiness;
+		int boost = (delta * delta) >> 4;
+
+		anon_gain = swappiness;
+		file_gain = (MAX_SWAPPINESS - swappiness) + boost;
+	} else {
+		int delta = swappiness - (MAX_SWAPPINESS / 2);
+		int boost = (delta * delta) >> 4;
+
+		anon_gain = swappiness + boost;
+		file_gain = MAX_SWAPPINESS - swappiness;
+	}
+
 	/*
 	 * Compare the sum of all tiers of anon with that of file to determine
 	 * which type to scan.
 	 */
-	read_ctrl_pos(lruvec, LRU_GEN_ANON, MAX_NR_TIERS, swappiness, &sp);
-	read_ctrl_pos(lruvec, LRU_GEN_FILE, MAX_NR_TIERS, MAX_SWAPPINESS - swappiness, &pv);
+	read_ctrl_pos(lruvec, LRU_GEN_ANON, MAX_NR_TIERS, anon_gain, &sp);
+	read_ctrl_pos(lruvec, LRU_GEN_FILE, MAX_NR_TIERS, file_gain, &pv);
 
 	return positive_ctrl_err(&sp, &pv);
+}
+
+static inline bool is_single_type_reclaim(int swappiness)
+{
+	return swappiness == MIN_SWAPPINESS ||
+	       swappiness == SWAPPINESS_ANON_ONLY;
 }
 
 static int isolate_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
@@ -4843,30 +4965,39 @@ static int isolate_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 			  struct list_head *list, int *isolated,
 			  int *isolate_type, int *isolate_scanned)
 {
-	int i;
-	int total_scanned = 0;
+	bool type_fallback_allowed = !is_single_type_reclaim(swappiness);
 	int type = get_type_to_scan(lruvec, swappiness);
+	int total_scanned = 0, scanned, tier;
+	bool exhausted, tried = false;
 
-	for_each_evictable_type(i, swappiness) {
-		int scanned;
-		int tier = get_tier_idx(lruvec, type);
+retry:
+	tier = get_tier_idx(lruvec, type);
+	scanned = scan_folios(nr_to_scan, lruvec, sc,
+			      type, tier, list, isolated, &exhausted);
 
-		scanned = scan_folios(nr_to_scan, lruvec, sc,
-				      type, tier, list, isolated);
+	total_scanned += scanned;
+	if (*isolated) {
+		*isolate_type = type;
+		*isolate_scanned = scanned;
+		return total_scanned;
+	}
 
-		total_scanned += scanned;
-		if (*isolated) {
-			*isolate_type = type;
-			*isolate_scanned = scanned;
-			break;
-		}
-		/*
-		 * If scanned > 0 and isolated == 0, avoid falling back to the
-		 * other type, as this type remains sufficient. Falling back
-		 * too readily can disrupt the positive_ctrl_err() bias.
-		 */
-		if (!scanned)
-			type = !type;
+	/*
+	 * We are running out of the current reclaim type. Fall back to
+	 * the other type if allowed.
+	 */
+	if (exhausted && type_fallback_allowed) {
+		type = !type;
+		type_fallback_allowed = false;
+		goto retry;
+	}
+	/*
+	 * We are not exhausted, but failed to isolate any folios due to
+	 * races. Give this type one more chance to avoid a larger loop.
+	 */
+	if (!exhausted && !tried) {
+		tried = true;
+		goto retry;
 	}
 
 	return total_scanned;
@@ -4966,21 +5097,67 @@ retry:
 	return scanned;
 }
 
+static bool lru_gen_imbalanced(struct lruvec *lruvec, unsigned long max_seq,
+		struct scan_control *sc, int type, int swappiness)
+{
+	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+	unsigned long young = 0, old = 0, lag = 0;
+	unsigned long inactive_ratio, gb;
+	DEFINE_MIN_SEQ(lruvec);
+
+	/* we still have enough generations to reclaim */
+	if (min_seq[type] + MIN_NR_GENS < max_seq)
+		return false;
+
+	/*
+	 * Trigger aging if the preferred type is running low on reclaimable
+	 * folios, provided the generation lag of the other type remains small
+	 * enough that inc_min_seq() introduces negligible overhead
+	 */
+	for (unsigned long seq = min_seq[type]; seq <= max_seq; seq++) {
+		unsigned long size = lruvec_gen_size(lrugen, type, seq);
+
+		if (seq + MIN_NR_GENS > max_seq)
+			young += size;
+		else
+			old += size;
+	}
+	if (min_seq[!type] + MAX_NR_GENS == max_seq + 1)
+		lag += lruvec_gen_size(lrugen, !type, min_seq[!type]);
+
+	/*
+	 * Borrow the adaptive ratio from inactive_is_low(), and scale
+	 * it by sqrt(MAX_NR_GENS) to make aging less aggressive
+	 */
+	gb = (young + old) >> (30 - PAGE_SHIFT);
+	inactive_ratio = gb ? int_sqrt(10 * gb * MAX_NR_GENS) : MAX_NR_GENS;
+	return young > old * inactive_ratio && (lag < MAX_LRU_BATCH ||
+	       (is_extreme_swappiness(swappiness) && sc->priority > 2));
+}
+
 static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 			     struct scan_control *sc, int swappiness)
 {
+	int type = get_type_to_scan(lruvec, swappiness);
 	DEFINE_MIN_SEQ(lruvec);
 
-	/* have to run aging, since eviction is not possible anymore */
-	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS > max_seq)
+	/* run aging if the preferred type is exhausted */
+	if (min_seq[type] + MIN_NR_GENS > max_seq)
 		return true;
 
-	/* try to avoid aging, do gentle reclaim at the default priority */
-	if (sc->priority == DEF_PRIORITY)
+	/*
+	 * Try to avoid aging by doing gentle reclaim at the default
+	 * priority. Skip gentle reclaim for extreme swappiness.
+	 */
+	if (sc->priority == DEF_PRIORITY && !is_extreme_swappiness(swappiness))
 		return false;
 
 	/* better to run aging even though eviction is still possible */
-	return evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS == max_seq;
+	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS == max_seq)
+		return true;
+
+	/* Run aging if the preferred type is severely imbalanced across gens */
+	return lru_gen_imbalanced(lruvec, max_seq, sc, type, swappiness);
 }
 
 static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc,
