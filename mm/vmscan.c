@@ -114,6 +114,18 @@ struct scan_control {
 	/* zone_reclaim_mode, boost reclaim, cgroup restrictions */
 	unsigned int may_swap:1;
 
+	/*
+	 * When set, the slab shrinkers are not invoked because reclaimable
+	 * slab is already at or below min_slab_pages.
+	 */
+	unsigned int skip_slab_reclaim:1;
+
+	/*
+	 * When set, file pages are not reclaimed because unmapped page cache
+	 * is already at or below min_unmapped_pages.
+	 */
+	unsigned int skip_file_reclaim:1;
+
 	/* Not allow cache_trim_mode to be turned on as part of reclaim? */
 	unsigned int no_cache_trim_mode:1;
 
@@ -2575,6 +2587,21 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 		goto out;
 	}
 
+	/*
+	 * node_reclaim protects unmapped page cache down to
+	 * min_unmapped_pages: skip file pages and reclaim anon only.  As with
+	 * the anon-only case above, if anon cannot be reclaimed there is
+	 * nothing to do without breaching the floor, so scan nothing.
+	 */
+	if (sc->skip_file_reclaim) {
+		if (!can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
+			memset(nr, 0, sizeof(*nr) * NR_LRU_LISTS);
+			return;
+		}
+		scan_balance = SCAN_ANON;
+		goto out;
+	}
+
 	/* If we have no swap space, do not bother scanning anon folios. */
 	if (!sc->may_swap || !can_reclaim_anon_pages(memcg, pgdat->node_id, sc)) {
 		scan_balance = SCAN_FILE;
@@ -4741,6 +4768,14 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	VM_WARN_ON_ONCE(nr_to_scan > MAX_LRU_BATCH);
 	VM_WARN_ON_ONCE(!list_empty(list));
 
+	/*
+	 * node_reclaim protects unmapped page cache down to min_unmapped_pages,
+	 * so leave the file type alone; isolate_folios() then falls back to
+	 * anon.
+	 */
+	if (sc->skip_file_reclaim && type == LRU_GEN_FILE)
+		return 0;
+
 	if (get_nr_gens(lruvec, type) == MIN_NR_GENS)
 		return 0;
 
@@ -5116,7 +5151,8 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 
 	need_rotate = try_to_shrink_lruvec(lruvec, sc);
 
-	shrink_slab(sc->gfp_mask, pgdat->node_id, memcg, sc->priority);
+	if (!sc->skip_slab_reclaim)
+		shrink_slab(sc->gfp_mask, pgdat->node_id, memcg, sc->priority);
 
 	if (!sc->proactive)
 		vmpressure(sc->gfp_mask, sc->order, memcg, false,
@@ -6219,8 +6255,9 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 
 		shrink_lruvec(lruvec, sc);
 
-		shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
-			    sc->priority);
+		if (!sc->skip_slab_reclaim)
+			shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
+				    sc->priority);
 
 		/* Record the group's reclaim efficiency */
 		if (!sc->proactive)
@@ -7851,16 +7888,16 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat,
 	noreclaim_flag = memalloc_noreclaim_save();
 	set_task_reclaim_state(p, &sc->reclaim_state);
 
-	if (node_pagecache_reclaimable(pgdat) > pgdat->min_unmapped_pages ||
-	    node_page_state_pages(pgdat, NR_SLAB_RECLAIMABLE_B) > pgdat->min_slab_pages) {
-		/*
-		 * Free memory by calling shrink node with increasing
-		 * priorities until we have enough memory freed.
-		 */
-		do {
-			shrink_node(pgdat, sc);
-		} while (sc->nr_reclaimed < nr_pages && --sc->priority >= 0);
-	}
+	/*
+	 * Free memory by calling shrink node with increasing
+	 * priorities until we have enough memory freed.
+	 *
+	 * What to reclaim is gated per type by sc->skip_slab_reclaim and
+	 * sc->skip_file_reclaim.
+	 */
+	do {
+		shrink_node(pgdat, sc);
+	} while (sc->nr_reclaimed < nr_pages && --sc->priority >= 0);
 
 	set_task_reclaim_state(p, NULL);
 	memalloc_noreclaim_restore(noreclaim_flag);
@@ -7890,18 +7927,14 @@ unsigned long node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned i
 	};
 
 	/*
-	 * Node reclaim reclaims unmapped file backed pages and
-	 * slab pages if we are over the defined limits.
-	 *
-	 * A small portion of unmapped file backed pages is needed for
-	 * file I/O otherwise pages read by file I/O will be immediately
-	 * thrown out if the node is overallocated. So we do not reclaim
-	 * if less than a specified percentage of the node is used by
-	 * unmapped file backed pages.
+	 * min_unmapped_pages and min_slab_pages only gate file and slab.
+	 * Bail out only when both are under their limits and anon cannot
+	 * be reclaimed either, so we do not skip reclaimable anon.
 	 */
 	if (node_pagecache_reclaimable(pgdat) <= pgdat->min_unmapped_pages &&
 	    node_page_state_pages(pgdat, NR_SLAB_RECLAIMABLE_B) <=
-	    pgdat->min_slab_pages)
+	    pgdat->min_slab_pages &&
+	    !can_reclaim_anon_pages(NULL, pgdat->node_id, &sc))
 		return 0;
 
 	/*
@@ -7921,6 +7954,18 @@ unsigned long node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned i
 
 	if (test_and_set_bit_lock(PGDAT_RECLAIM_LOCKED, &pgdat->flags))
 		return 0;
+
+	/*
+	 * Each limit only gates its own type of reclaim.  When reclaimable
+	 * slab or unmapped page cache is already at or below its limit, leave
+	 * that type alone even if the other type tripped the gate and brought
+	 * us into node reclaim.
+	 */
+	sc.skip_slab_reclaim =
+		node_page_state_pages(pgdat, NR_SLAB_RECLAIMABLE_B) <=
+		pgdat->min_slab_pages;
+	sc.skip_file_reclaim =
+		node_pagecache_reclaimable(pgdat) <= pgdat->min_unmapped_pages;
 
 	ret = __node_reclaim(pgdat, nr_pages, &sc);
 	clear_bit_unlock(PGDAT_RECLAIM_LOCKED, &pgdat->flags);
