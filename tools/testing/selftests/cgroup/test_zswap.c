@@ -408,8 +408,11 @@ static int test_zswap_writeback(const char *root, bool wb)
 	 * Thus, the parent's setting shall be what's in effect. */
 	if (cg_write(test_group, "memory.zswap.max", "max"))
 		goto out;
-	if (cg_write(test_group, "cgroup.subtree_control", "+memory"))
-		goto out;
+	while (cg_write(test_group, "cgroup.subtree_control", "+memory")) {
+		if (errno != EBUSY)
+			goto out;
+		usleep(1000);
+	}
 
 	test_group_child = cg_name(test_group, "zswap_writeback_test_child");
 	if (!test_group_child)
@@ -630,7 +633,8 @@ static int test_no_kmem_bypass(const char *root)
 		if (stored_pages > stored_pages_threshold) {
 			int zswapped = cg_read_key_long(test_group, "memory.stat", "zswapped ");
 			int delta = stored_pages * page_size - zswapped;
-			int result_ok = delta < stored_pages * page_size / 4;
+			int result_ok = abs(delta) <
+					stored_pages * page_size / 4;
 
 			ret = result_ok ? KSFT_PASS : KSFT_FAIL;
 			break;
