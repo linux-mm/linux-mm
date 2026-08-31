@@ -1327,7 +1327,8 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 	 * free the metadata, so the page can be freed.
 	 */
 	if (!src->mapping) {
-		if (folio_test_private(src)) {
+		if (folio_test_private(src) && !folio_test_swapcache(src) &&
+		    !folio_test_hugetlb(src)) {
 			try_to_free_buffers(src);
 			goto out;
 		}
