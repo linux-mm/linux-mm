@@ -1000,13 +1000,9 @@ static void __ref __init_zone_device_page(struct page *page, unsigned long pfn,
 	page->zone_device_data = NULL;
 
 	/*
-	 * ZONE_DEVICE pages other than MEMORY_TYPE_GENERIC are released
-	 * directly to the driver page allocator which will set the page count
-	 * to 1 when allocating the page.
-	 *
-	 * MEMORY_TYPE_GENERIC and MEMORY_TYPE_FS_DAX pages automatically have
-	 * their refcount reset to one whenever they are freed (ie. after
-	 * their refcount drops to 0).
+	 * MEMORY_DEVICE_GENERIC pages regain a refcount of 1 in the free
+	 * path. The remaining ZONE_DEVICE types start from 0 here and raise
+	 * the count again when the allocator or driver hands the page out.
 	 */
 	switch (pgmap->type) {
 	case MEMORY_DEVICE_FS_DAX:
@@ -1019,6 +1015,17 @@ static void __ref __init_zone_device_page(struct page *page, unsigned long pfn,
 	case MEMORY_DEVICE_GENERIC:
 		break;
 	}
+}
+
+static void zone_device_page_init_from_template(struct page *page,
+		unsigned long pfn, struct page *template)
+{
+	set_page_section_from_pfn(template, pfn);
+#ifdef WANT_PAGE_VIRTUAL
+	if (!is_highmem_idx(ZONE_DEVICE))
+		set_page_address(template, __va(pfn << PAGE_SHIFT));
+#endif
+	memcpy_nontemporal(page, template, sizeof(*page));
 }
 
 /*
@@ -1053,6 +1060,8 @@ static void __ref memmap_init_compound(struct page *head,
 {
 	unsigned long pfn, end_pfn = head_pfn + nr_pages;
 	unsigned int order = pgmap->vmemmap_shift;
+	struct page template;
+	struct page *page;
 
 	/*
 	 * We have to initialize the pages, including setting up page links.
@@ -1061,13 +1070,23 @@ static void __ref memmap_init_compound(struct page *head,
 	 * the pages in the same go.
 	 */
 	__SetPageHead(head);
-	for (pfn = head_pfn + 1; pfn < end_pfn; pfn++) {
-		struct page *page = pfn_to_page(pfn);
 
-		__init_zone_device_page(page, pfn, zone_idx, nid, pgmap);
-		prep_compound_tail(page, head, order);
-		set_page_count(page, 0);
-	}
+	/*
+	 * All tails of the same compound page share the state established by
+	 * prep_compound_tail(). Reuse one tail template for the whole range and
+	 * refresh only the PFN-dependent fields in that template before each copy.
+	 */
+	pfn = head_pfn + 1;
+	page = pfn_to_page(pfn);
+	__init_zone_device_page(page, pfn, zone_idx, nid, pgmap);
+	prep_compound_tail(page, head, order);
+	set_page_count(page, 0);
+	memcpy(&template, page, sizeof(*page));
+
+	/* Initialize the remaining tail pages from template. */
+	for (pfn = head_pfn + 2; pfn < end_pfn; pfn++)
+		zone_device_page_init_from_template(pfn_to_page(pfn), pfn,
+						    &template);
 	prep_compound_head(head, order);
 }
 
@@ -1083,6 +1102,8 @@ void __ref memmap_init_zone_device(struct zone *zone,
 	unsigned long zone_idx = zone_idx(zone);
 	unsigned long start = jiffies;
 	int nid = pgdat->node_id;
+	struct page template;
+	struct page *page;
 
 	if (WARN_ON_ONCE(!pgmap || zone_idx != ZONE_DEVICE))
 		return;
@@ -1097,10 +1118,29 @@ void __ref memmap_init_zone_device(struct zone *zone,
 		nr_pages = end_pfn - start_pfn;
 	}
 
-	for (pfn = start_pfn; pfn < end_pfn; pfn += pfns_per_compound) {
-		struct page *page = pfn_to_page(pfn);
+	if (!nr_pages)
+		return;
 
-		__init_zone_device_page(page, pfn, zone_idx, nid, pgmap);
+	/*
+	 * Seed the reusable head-page template from the first real struct
+	 * page. The normal page-init and refcount helpers must operate on
+	 * a real memmap entry rather than a stack object.
+	 */
+	pfn = start_pfn;
+	page = pfn_to_page(pfn);
+	__init_zone_device_page(page, pfn, zone_idx, nid, pgmap);
+	memcpy(&template, page, sizeof(*page));
+	if (pfns_per_compound != 1)
+		memmap_init_compound(page, pfn, zone_idx, nid, pgmap,
+				     compound_nr_pages(pfn, altmap, pgmap));
+	pfn += pfns_per_compound;
+
+	/* Initialize the remaining head pages from template. */
+	for (; pfn < end_pfn; pfn += pfns_per_compound) {
+		page = pfn_to_page(pfn);
+
+		zone_device_page_init_from_template(page, pfn,
+						    &template);
 
 		if (IS_ALIGNED(pfn, PAGES_PER_SECTION))
 			cond_resched();
