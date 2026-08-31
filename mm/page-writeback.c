@@ -2705,10 +2705,7 @@ bool filemap_dirty_folio(struct address_space *mapping, struct folio *folio)
 	if (folio_test_set_dirty(folio))
 		return false;
 
-	__folio_mark_dirty(folio, mapping,
-			   !(folio_test_private(folio) &&
-			     !folio_test_swapcache(folio) &&
-			     !folio_test_hugetlb(folio)));
+	__folio_mark_dirty(folio, mapping, !folio_test_fs_private(folio));
 
 	if (mapping->host) {
 		/* !PageAnon && !swapper_space */

@@ -3053,9 +3053,7 @@ static inline int folio_expected_ref_count(const struct folio *folio)
 		 * One reference from filesystem private data.
 		 * Use data_race() since folio might not be locked.
 		 */
-		ref_count += data_race(folio_test_private(folio)) &&
-			     !folio_test_hugetlb(folio) &&
-			     !folio_test_swapcache(folio);
+		ref_count += data_race(folio_test_fs_private(folio));
 	}
 
 	/* One reference per page table mapping. */
