@@ -10,6 +10,7 @@
 #include <linux/kthread.h>
 #include <linux/memcontrol.h>
 #include <linux/mm.h>
+#include <linux/pid.h>
 #include <linux/psi.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -798,6 +799,17 @@ void damon_add_target(struct damon_ctx *ctx, struct damon_target *t)
 bool damon_targets_empty(struct damon_ctx *ctx)
 {
 	return list_empty(&ctx->adaptive_targets);
+}
+
+/*
+ * Assign the struct pid of the given pid number to the given target.
+ */
+int damon_set_target_pid(struct damon_target *t, int pid)
+{
+	t->pid = find_get_pid(pid);
+	if (!t->pid)
+		return -EINVAL;
+	return 0;
 }
 
 static void damon_del_target(struct damon_target *t)
@@ -1953,8 +1965,6 @@ static int __damon_start(struct damon_ctx *ctx)
 
 	return err;
 }
-
-static int __damon_commit_ctx(struct damon_ctx *dst, struct damon_ctx *src);
 
 /**
  * damon_start() - Starts the monitorings for a given group of contexts.
