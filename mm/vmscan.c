@@ -4065,6 +4065,9 @@ restart:
 	WRITE_ONCE(lrugen->timestamps[next], jiffies);
 	/* make sure preceding modifications appear */
 	smp_store_release(&lrugen->max_seq, lrugen->max_seq + 1);
+
+	/* Count every aging pass for over-aging diagnosis. */
+	mod_lruvec_state(lruvec, AGING, 1);
 unlock:
 	lruvec_unlock_irq(lruvec);
 
@@ -5969,6 +5972,111 @@ static int __init init_lru_gen(void)
 	return 0;
 };
 late_initcall(init_lru_gen);
+
+/**
+ * lru_gen_age_memcg - Proactively age a memcg by N generations
+ * @memcg: target memcg
+ * @nr_gens: number of generations to age (1..MAX_NR_GENS)
+ *
+ * Advances max_seq without page reclaim on all nodes of @memcg, using
+ * the same lock/walk protocol as lru_gen_seq_write().  Swappiness comes
+ * from get_swappiness() so anon rotation is skipped without swap.
+ * to the next node.
+ *
+ * Return: 0 on success, -EINVAL on bad input, -EAGAIN if a lruvec did
+ * not advance, -ENOMEM on mm_walk failure, -EINTR on signal.
+ */
+int lru_gen_age_memcg(struct mem_cgroup *memcg, unsigned long nr_gens)
+{
+	struct scan_control sc = {
+		.may_writepage = true,
+		.may_unmap = true,
+		.may_swap = true,
+		.reclaim_idx = MAX_NR_ZONES - 1,
+		.gfp_mask = GFP_KERNEL,
+		.proactive = true,
+	};
+	int nid, swappiness;
+	unsigned long i;
+	int ret = 0;
+	unsigned int flags;
+	struct blk_plug plug;
+	struct lruvec *lruvec;
+
+	if (!memcg)
+		return -EINVAL;
+
+	if (nr_gens == 0 || nr_gens > MAX_NR_GENS)
+		return -EINVAL;
+
+	set_task_reclaim_state(current, &sc.reclaim_state);
+	flags = memalloc_noreclaim_save();
+	blk_start_plug(&plug);
+	if (!set_mm_walk(NULL, true)) {
+		ret = -ENOMEM;
+		goto done;
+	}
+
+	for_each_node_state(nid, N_MEMORY) {
+		if (signal_pending(current)) {
+			ret = -EINTR;
+			goto done;
+		}
+
+		lruvec = get_lruvec(memcg, nid);
+		if (!lruvec)
+			continue;
+
+		swappiness = get_swappiness(lruvec, &sc);
+
+		for (i = 0; i < nr_gens; i++) {
+			DEFINE_MAX_SEQ(lruvec);
+
+			if (!try_to_inc_max_seq(lruvec, max_seq,
+						swappiness, false)) {
+				ret = -EAGAIN;
+				break;
+			}
+		}
+
+		cond_resched();
+	}
+
+done:
+	clear_mm_walk();
+	blk_finish_plug(&plug);
+	memalloc_noreclaim_restore(flags);
+	set_task_reclaim_state(current, NULL);
+	return ret;
+}
+
+/**
+ * lru_gen_nr_oldest_pages - pages in the oldest generation of a lruvec
+ * @lruvec: target lruvec
+ * @nr_anon: filled with oldest-generation anonymous page count
+ * @nr_file: filled with oldest-generation file page count
+ *
+ * Reclaim starts from the oldest generation (min_seq) of each type, so these
+ * count what the next reclaim can evict directly.  Computed from
+ * lrugen->nr_pages[min_seq type][zone]; eventually consistent, clamped to 0.
+ */
+void lru_gen_nr_oldest_pages(struct lruvec *lruvec,
+			     unsigned long *nr_anon, unsigned long *nr_file)
+{
+	int type, zone;
+	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+	unsigned long size[ANON_AND_FILE] = {};
+
+	for (type = 0; type < ANON_AND_FILE; type++) {
+		int gen = lru_gen_from_seq(READ_ONCE(lrugen->min_seq[type]));
+
+		for (zone = 0; zone < MAX_NR_ZONES; zone++)
+			size[type] += max(READ_ONCE(lrugen->nr_pages[gen][type][zone]), 0L);
+	}
+
+	*nr_anon = size[LRU_GEN_ANON];
+	*nr_file = size[LRU_GEN_FILE];
+}
 
 #else /* !CONFIG_LRU_GEN */
 

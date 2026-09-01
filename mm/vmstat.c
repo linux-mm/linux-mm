@@ -1304,6 +1304,9 @@ const char * const vmstat_text[] = {
 	[I(PGROTATE_ANON)]			= "pgrotate_anon",
 	[I(PGROTATE_FILE)]			= "pgrotate_file",
 	[I(PGREFILL)]				= "pgrefill",
+#ifdef CONFIG_LRU_GEN
+	[I(AGING)]			= "aging",
+#endif
 #ifdef CONFIG_HUGETLB_PAGE
 	[I(NR_HUGETLB)]				= "nr_hugetlb",
 #endif

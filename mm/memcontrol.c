@@ -429,6 +429,9 @@ static const unsigned int memcg_node_stat_items[] = {
 	PGROTATE_ANON,
 	PGROTATE_FILE,
 	PGREFILL,
+#ifdef CONFIG_LRU_GEN
+	AGING,
+#endif
 #ifdef CONFIG_HUGETLB_PAGE
 	NR_HUGETLB,
 #endif
@@ -1635,6 +1638,9 @@ static const struct memory_stat memory_stats[] = {
 #ifdef CONFIG_NUMA_BALANCING
 	{ "pgpromote_success",		PGPROMOTE_SUCCESS	},
 #endif
+#ifdef CONFIG_LRU_GEN
+	{ "aging",		AGING	},
+#endif
 };
 
 /* The actual unit of the state item, not the same as the output unit */
@@ -1684,6 +1690,9 @@ static int memcg_page_state_output_unit(int item)
 	case PGSCAN_KHUGEPAGED:
 	case PGSCAN_PROACTIVE:
 	case PGREFILL:
+#ifdef CONFIG_LRU_GEN
+	case AGING:
+#endif
 #ifdef CONFIG_NUMA_BALANCING
 	case PGPROMOTE_SUCCESS:
 #endif
@@ -1752,6 +1761,30 @@ static void memcg_stat_format(struct mem_cgroup *memcg, struct seq_buf *s)
 			seq_buf_printf(s, "slab %llu\n", size);
 		}
 	}
+
+#ifdef CONFIG_LRU_GEN
+	/* Oldest-generation (min_seq) anon/file pages over this cgroup's
+	 * subtree and all N_MEMORY nodes; see lru_gen_nr_oldest_pages().
+	 */
+	{
+		struct mem_cgroup *mi;
+		int nid;
+		unsigned long oldest_anon = 0, oldest_file = 0;
+
+		for_each_mem_cgroup_tree(mi, memcg) {
+			for_each_node_state(nid, N_MEMORY) {
+				unsigned long nr_anon, nr_file;
+				struct lruvec *lruvec = mem_cgroup_lruvec(mi, NODE_DATA(nid));
+
+				lru_gen_nr_oldest_pages(lruvec, &nr_anon, &nr_file);
+				oldest_anon += nr_anon;
+				oldest_file += nr_file;
+			}
+		}
+		seq_buf_printf(s, "nr_oldest_anon %lu\n", oldest_anon);
+		seq_buf_printf(s, "nr_oldest_file %lu\n", oldest_file);
+	}
+#endif
 
 	/* Accumulated memory events */
 	seq_buf_printf(s, "pgscan %lu\n",
@@ -5099,6 +5132,29 @@ static ssize_t memory_reclaim(struct kernfs_open_file *of, char *buf,
 	return nbytes;
 }
 
+#ifdef CONFIG_LRU_GEN
+static ssize_t memory_aging(struct kernfs_open_file *of, char *buf,
+			    size_t nbytes, loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	unsigned long nr_gens;
+	int ret;
+
+	ret = kstrtoul(buf, 0, &nr_gens);
+	if (ret)
+		return ret;
+
+	if (nr_gens == 0 || nr_gens > MAX_NR_GENS)
+		return -EINVAL;
+
+	ret = lru_gen_age_memcg(memcg, nr_gens);
+	if (ret)
+		return ret;
+
+	return nbytes;
+}
+#endif
+
 static struct cftype memory_files[] = {
 	{
 		.name = "current",
@@ -5170,6 +5226,13 @@ static struct cftype memory_files[] = {
 		.flags = CFTYPE_NS_DELEGATABLE,
 		.write = memory_reclaim,
 	},
+#ifdef CONFIG_LRU_GEN
+	{
+		.name = "aging",
+		.flags = CFTYPE_NS_DELEGATABLE,
+		.write = memory_aging,
+	},
+#endif
 	{ }	/* terminate */
 };
 

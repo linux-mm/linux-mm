@@ -1468,6 +1468,41 @@ The following nested keys are defined.
 	The valid range for swappiness is [0-200, max], setting
 	swappiness=max exclusively reclaims anonymous memory.
 
+  memory.aging
+	A write-only file which exists for all cgroups when
+	CONFIG_LRU_GEN is enabled.
+
+	This interface triggers MGLRU aging (generation advancement)
+	without page reclaim. It is useful for proactively rebalancing
+	the distribution of pages across generations before invoking
+	memory.reclaim, particularly for workloads (such as the Android
+	application lifecycle) where anonymous pages concentrate in
+	the youngest generations while file pages fill up the oldest
+	generation and get over-reclaimed.
+
+	The single argument is the number of generations to age, in
+	the range [1, MAX_NR_GENS]. MAX_NR_GENS is currently 4.
+
+	Example::
+
+	  echo 2 > memory.aging
+
+	Each aging pass advances both anonymous and file generations
+	simultaneously, matching MGLRU's max_seq semantics. There is
+	no way to age only one type - this is a property of MGLRU,
+	not of this interface.
+
+	Proactive aging should be followed by memory.reclaim to
+	actually free pages::
+
+	  echo 2 > /sys/fs/cgroup/foo/memory.aging
+	  echo "100M" > /sys/fs/cgroup/foo/memory.reclaim
+
+	Returns -EAGAIN if this call did not advance the generation
+	window (typically because a concurrent caller on the same
+	cgroup got there first). Returns -EINVAL if the argument is
+	missing, zero, or out of range.
+
   memory.peak
 	A read-write single value file which exists on non-root cgroups.
 
@@ -1653,6 +1688,24 @@ The following nested keys are defined.
 		memory management lists), inactive_foo + active_foo may not be equal to
 		the value for the foo counter, since the foo counter is type-based, not
 		list-based.
+
+	  nr_oldest_anon, nr_oldest_file
+		Number of pages in the oldest generation of the anonymous and
+		file types. Only present when CONFIG_LRU_GEN is enabled.
+
+		With MGLRU, page reclaim starts from the oldest generation
+		(min_seq) of each type, so these counts show how much anonymous
+		and file memory the next reclaim pass (or a proactive
+		memory.reclaim) can directly evict. They are aggregated across
+		this cgroup's subtree and all NUMA nodes, and are reported in
+		pages, matching the per-generation breakdown in the ``lru_gen``
+		debugfs file.
+
+		Proactive-aging policy can use them together with the ``aging``
+		counter and ``workingset_refault_*``: a large ``nr_oldest_file``
+		with near-zero ``nr_oldest_anon`` indicates file cache piling up
+		in the oldest generation while anonymous pages stay young, which
+		is the condition ``memory.aging`` is meant to rebalance.
 
 	  slab_reclaimable
 		Part of "slab" that might be reclaimed, such as
