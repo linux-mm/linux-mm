@@ -4064,6 +4064,11 @@ static inline void mem_cgroup_private_id_put(struct mem_cgroup *memcg, unsigned 
 	}
 }
 
+static void mem_cgroup_private_id_kill(struct mem_cgroup *memcg)
+{
+	mem_cgroup_private_id_put(memcg, 1);
+}
+
 struct mem_cgroup *mem_cgroup_private_id_get_online(struct mem_cgroup *memcg, unsigned int n)
 {
 	while (!refcount_add_not_zero(n, &memcg->id.ref)) {
@@ -4401,7 +4406,7 @@ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 
 	drain_all_stock(memcg);
 
-	mem_cgroup_private_id_put(memcg, 1);
+	mem_cgroup_private_id_kill(memcg);
 }
 
 static void mem_cgroup_css_released(struct cgroup_subsys_state *css)
