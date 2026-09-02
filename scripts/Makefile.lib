@@ -88,6 +88,20 @@ _c_flags += $(if $(patsubst n%,, \
 _rust_flags += $(if $(patsubst n%,, \
 	$(KCOV_INSTRUMENT_$(target-stem).o)$(KCOV_INSTRUMENT)$(if $(is-kernel-object),$(CONFIG_KCOV_INSTRUMENT_ALL))), \
 	$(RUSTFLAGS_KCOV))
+# KCOV dataflow. The outer test only honours an explicit KCOV opt-out
+# (KCOV_INSTRUMENT_file.o := n / KCOV_INSTRUMENT := n, the noinstr exclusions):
+# it does not require a KCOV opt-in, so per-file KCOV_DATAFLOW_file.o := y works
+# for modules and out-of-tree objects too. The inner test is the dataflow opt-in:
+# per-file/per-directory, or every kernel object under
+# CONFIG_KCOV_DATAFLOW_INSTRUMENT_ALL.
+_c_flags += $(if $(patsubst n%,, \
+	$(KCOV_INSTRUMENT_$(target-stem).o)$(KCOV_INSTRUMENT)y),$(if $(patsubst n%,, \
+	$(KCOV_DATAFLOW_$(target-stem).o)$(KCOV_DATAFLOW)$(if $(is-kernel-object),$(CONFIG_KCOV_DATAFLOW_INSTRUMENT_ALL))), \
+	$(CFLAGS_KCOV_DATAFLOW)))
+_rust_flags += $(if $(patsubst n%,, \
+	$(KCOV_INSTRUMENT_$(target-stem).o)$(KCOV_INSTRUMENT)y),$(if $(patsubst n%,, \
+	$(KCOV_DATAFLOW_$(target-stem).o)$(KCOV_DATAFLOW)$(if $(is-kernel-object),$(CONFIG_KCOV_DATAFLOW_INSTRUMENT_ALL))), \
+	$(RUSTFLAGS_KCOV_DATAFLOW)))
 endif
 
 #
