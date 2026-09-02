@@ -7,6 +7,7 @@
 #include <linux/auxvec.h>
 #include <linux/kref.h>
 #include <linux/list.h>
+#include <linux/llist.h>
 #include <linux/spinlock.h>
 #include <linux/rbtree.h>
 #include <linux/maple_tree.h>
@@ -1375,6 +1376,10 @@ struct mm_struct {
 		atomic_long_t hugetlb_usage;
 #endif
 		struct work_struct async_put_work;
+#ifdef CONFIG_ASYNC_MM_TEARDOWN
+		struct llist_node async_reap_node;
+		unsigned long async_reap_rss;
+#endif /* CONFIG_ASYNC_MM_TEARDOWN */
 
 #ifdef CONFIG_IOMMU_MM_DATA
 		struct iommu_mm_data *iommu_mm;
@@ -1992,6 +1997,16 @@ enum {
 
 #define MMF_TOPDOWN		31	/* mm searches top down by default */
 #define MMF_TOPDOWN_MASK	BIT(MMF_TOPDOWN)
+
+/*
+ * mm is the target of an in-flight OOM kill. Only written under
+ * CONFIG_ASYNC_MM_TEARDOWN today. Sticky: never cleared -- the mm is
+ * dying (__oom_kill_process() kills every process sharing it), and a
+ * hypothetical surviving sharer would merely keep tearing down
+ * synchronously. Above bit 31, so it is outside MMF_INIT_LEGACY_MASK's
+ * domain entirely and is never inherited on fork.
+ */
+#define MMF_OOM_TARGETED	32
 
 #define MMF_INIT_LEGACY_MASK	(MMF_DUMP_FILTER_MASK |\
 				 MMF_DISABLE_THP_MASK | MMF_HAS_MDWE_MASK |\

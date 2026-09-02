@@ -1494,6 +1494,18 @@ config LAZY_MMU_MODE_KUNIT_TEST
 
 	  If unsure, say N.
 
+config ASYNC_MM_TEARDOWN
+	bool "Async off-CPU address space teardown on exit"
+	depends on MMU
+	default n
+	help
+	  Defer the address space teardown (exit_mmap()) of large exiting processes
+	  to a kernel thread instead of running it on the exiting CPU. The feature
+	  is off by default and is enabled at runtime via the vm.async_mm_teardown
+	  sysctl.
+
+	  If unsure, say N.
+
 source "mm/damon/Kconfig"
 
 endmenu

@@ -112,6 +112,8 @@
 #include <linux/unwind_deferred.h>
 #include <linux/pgalloc.h>
 #include <linux/uaccess.h>
+#include <linux/sched/isolation.h>
+#include <linux/sizes.h>
 
 #include <asm/mmu_context.h>
 #include <asm/cacheflush.h>
@@ -124,6 +126,9 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
+#ifdef CONFIG_ASYNC_MM_TEARDOWN
+#include <trace/events/mm_reaper.h>
+#endif
 
 #include <kunit/visibility.h>
 
@@ -3418,3 +3423,197 @@ static int __init init_fork_sysctl(void)
 }
 
 subsys_initcall(init_fork_sysctl);
+
+#ifdef CONFIG_ASYNC_MM_TEARDOWN
+static LLIST_HEAD(mm_reaper_list);
+static DECLARE_WAIT_QUEUE_HEAD(mm_reaper_wait);
+static atomic_long_t mm_reaper_pending_pages;
+static DEFINE_STATIC_KEY_FALSE(async_mm_teardown_key);
+static unsigned long sysctl_async_mm_teardown_thresh_pages;
+static unsigned long sysctl_async_mm_teardown_max_pending_pages;
+#ifdef CONFIG_SYSCTL
+static u8 sysctl_async_mm_teardown_enabled;
+static DEFINE_MUTEX(async_mm_teardown_lock);
+#endif
+
+static bool async_mm_teardown_eligible(struct mm_struct *mm, unsigned long rss)
+{
+	if (rss < READ_ONCE(sysctl_async_mm_teardown_thresh_pages))
+		return false;
+	if (mm_flags_test(MMF_OOM_SKIP, mm))	/* reaped, or hidden from the reaper */
+		return false;
+	/*
+	 * MMF_OOM_TARGETED is set by the OOM killer while some task still
+	 * holds a live reference to this mm (see mark_oom_victim() and
+	 * __oom_kill_process()), and this eligibility check is reached only
+	 * from mmput_exit(), after mm_users has dropped to 0 -- so marking
+	 * and this check can never overlap in time. Whichever thread
+	 * performs the final decrement is therefore guaranteed to observe
+	 * the flag already set, regardless of whether that thread was
+	 * itself ever passed to mark_oom_victim() (a CLONE_VM-sharing
+	 * process in another thread group never is, but still observes
+	 * this flag on the shared mm).
+	 */
+	if (mm_flags_test(MMF_OOM_TARGETED, mm))
+		return false;
+	return true;
+}
+
+/*
+ * Charge rss against the pending-teardown budget.  Returns true if it fits
+ * under the cap, in which case the caller enqueues and the reaper releases
+ * the same rss after __mmput().  On overshoot nothing stays charged and the
+ * caller must tear down synchronously.
+ */
+static bool async_mm_teardown_reserve(unsigned long rss)
+{
+	if (atomic_long_add_return(rss, &mm_reaper_pending_pages) >
+	    READ_ONCE(sysctl_async_mm_teardown_max_pending_pages)) {
+		atomic_long_sub(rss, &mm_reaper_pending_pages);
+		return false;
+	}
+	return true;
+}
+
+static void async_mm_teardown_queue(struct mm_struct *mm, unsigned long rss)
+{
+	count_vm_event(ASYNC_MM_TEARDOWN_QUEUED);
+	trace_mm_async_teardown_queue(mm, rss);
+	if (llist_add(&mm->async_reap_node, &mm_reaper_list))
+		wake_up(&mm_reaper_wait);
+}
+
+static int mm_reaper(void *unused)
+{
+	set_freezable();
+	while (true) {
+		struct llist_node *batch;
+		struct mm_struct *mm, *n;
+
+		wait_event_freezable(mm_reaper_wait, !llist_empty(&mm_reaper_list));
+		batch = llist_del_all(&mm_reaper_list);
+		llist_for_each_entry_safe(mm, n, batch, async_reap_node) {
+			unsigned long pages = mm->async_reap_rss;
+			unsigned long live = get_mm_rss(mm);
+
+			trace_mm_async_teardown_reap(mm, pages, live);
+
+			__mmput(mm); /* may free mm via mmdrop */
+			atomic_long_sub(pages, &mm_reaper_pending_pages);
+			cond_resched();
+			try_to_freeze();
+		}
+	}
+	return 0;
+}
+
+void mmput_exit(struct mm_struct *mm)
+{
+	might_sleep();
+	/*
+	 * Fully ordered RMW: combined with exit_mm() (or exec_mmap(), the
+	 * other path that sheds ->mm) clearing ->mm under task_lock() before
+	 * this call, it guarantees MMF_OOM_TARGETED set at any mark site is
+	 * visible here -- see mark_oom_victim(). Any new caller of
+	 * mmput_exit() outside exit_mm() must re-verify that argument.
+	 */
+	if (!atomic_dec_and_test(&mm->mm_users))
+		return;
+
+	if (static_branch_unlikely(&async_mm_teardown_key)) {
+		unsigned long rss = get_mm_rss(mm);
+
+		if (async_mm_teardown_eligible(mm, rss)) {
+			/*
+			 * exit_aio() can block indefinitely. Run it here so a stuck
+			 * AIO only hangs this task (same as how it would happen in
+			 * case of synchronous mmput()) instead of stranding every
+			 * teardown queued behind this mm
+			 */
+			exit_aio(mm);
+
+			if (async_mm_teardown_reserve(rss)) {
+				mm->async_reap_rss = rss;
+				async_mm_teardown_queue(mm, rss);
+				return;
+			}
+			count_vm_event(ASYNC_MM_TEARDOWN_REJECTED);
+		}
+	}
+
+	count_vm_event(ASYNC_MM_TEARDOWN_SYNC);
+	__mmput(mm);
+}
+
+#ifdef CONFIG_SYSCTL
+static int async_mm_teardown_enabled_handler(const struct ctl_table *table,
+					     int write, void *buffer,
+					     size_t *lenp, loff_t *ppos)
+{
+	int ret;
+
+	/*
+	 * Serialize concurrent writers so the static key state always matches
+	 * the last value written to the variable.
+	 */
+	guard(mutex)(&async_mm_teardown_lock);
+
+	ret = proc_dou8vec_minmax(table, write, buffer, lenp, ppos);
+	if (ret || !write)
+		return ret;
+
+	if (sysctl_async_mm_teardown_enabled)
+		static_branch_enable(&async_mm_teardown_key);
+	else
+		static_branch_disable(&async_mm_teardown_key);
+	return 0;
+}
+
+static const struct ctl_table async_mm_teardown_table[] = {
+	{
+		.procname	= "async_mm_teardown",
+		.data		= &sysctl_async_mm_teardown_enabled,
+		.maxlen		= sizeof(u8),
+		.mode		= 0644,
+		.proc_handler	= async_mm_teardown_enabled_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "async_mm_teardown_thresh_pages",
+		.data		= &sysctl_async_mm_teardown_thresh_pages,
+		.maxlen		= sizeof(unsigned long),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+	{
+		.procname	= "async_mm_teardown_max_pending_pages",
+		.data		= &sysctl_async_mm_teardown_max_pending_pages,
+		.maxlen		= sizeof(unsigned long),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+};
+#endif /* CONFIG_SYSCTL */
+
+static int __init mm_reaper_init(void)
+{
+	struct task_struct *th;
+
+	th = kthread_create(mm_reaper, NULL, "mm_reaper");
+	if (IS_ERR(th)) {
+		pr_err("mm_reaper: failed to start kthread: %ld\n", PTR_ERR(th));
+		return PTR_ERR(th);
+	}
+	set_user_nice(th, 19); /* minimize competition with other fair class tasks */
+	kthread_affine_preferred(th, housekeeping_cpumask(HK_TYPE_KTHREAD));
+	sysctl_async_mm_teardown_thresh_pages      = SZ_64M >> PAGE_SHIFT;
+	sysctl_async_mm_teardown_max_pending_pages = totalram_pages() / 4;  /* TODO: placeholder */
+	wake_up_process(th);
+#ifdef CONFIG_SYSCTL
+	register_sysctl_init("vm", async_mm_teardown_table);
+#endif
+	return 0;
+}
+subsys_initcall(mm_reaper_init);
+#endif
