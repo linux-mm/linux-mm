@@ -1102,7 +1102,7 @@ static int fallback_migrate_folio(struct address_space *mapping,
  *     0 - success
  */
 static int move_to_new_folio(struct folio *dst, struct folio *src,
-				enum migrate_mode mode)
+		const struct migrate_control *ctl)
 {
 	struct address_space *mapping = folio_mapping(src);
 	int rc = -EAGAIN;
@@ -1111,7 +1111,7 @@ static int move_to_new_folio(struct folio *dst, struct folio *src,
 	VM_BUG_ON_FOLIO(!folio_test_locked(dst), dst);
 
 	if (!mapping)
-		rc = migrate_folio(mapping, dst, src, mode);
+		rc = migrate_folio(mapping, dst, src, ctl->mode);
 	else if (mapping_inaccessible(mapping))
 		rc = -EOPNOTSUPP;
 	else if (mapping->a_ops->migrate_folio)
@@ -1122,10 +1122,9 @@ static int move_to_new_folio(struct folio *dst, struct folio *src,
 		 * migrate_folio callback. This is the most common path
 		 * for page migration.
 		 */
-		rc = mapping->a_ops->migrate_folio(mapping, dst, src,
-							mode);
+		rc = mapping->a_ops->migrate_folio(mapping, dst, src, ctl->mode);
 	else
-		rc = fallback_migrate_folio(mapping, dst, src, mode);
+		rc = fallback_migrate_folio(mapping, dst, src, ctl->mode);
 
 	if (!rc) {
 		/*
@@ -1197,13 +1196,13 @@ static void migrate_folio_undo_dst(struct folio *dst, bool locked,
 
 /* Cleanup src folio upon migration success */
 static void migrate_folio_done(struct folio *src,
-			       enum migrate_reason reason)
+		const struct migrate_control *ctl)
 {
-	if (reason != MR_DEMOTION)
+	if (ctl->reason != MR_DEMOTION)
 		mod_node_page_state(folio_pgdat(src), NR_ISOLATED_ANON +
 				    folio_is_file_lru(src), -folio_nr_pages(src));
 
-	if (reason != MR_MEMORY_FAILURE)
+	if (ctl->reason != MR_MEMORY_FAILURE)
 		/* We release the page in page_handle_poison. */
 		folio_put(src);
 }
@@ -1211,8 +1210,8 @@ static void migrate_folio_done(struct folio *src,
 /* Obtain the lock on page, remove all ptes. */
 static int migrate_folio_unmap(new_folio_t get_new_folio,
 		free_folio_t put_new_folio, unsigned long private,
-		struct folio *src, struct folio **dstp, enum migrate_mode mode,
-		struct list_head *ret)
+		struct folio *src, struct folio **dstp,
+		const struct migrate_control *ctl, struct list_head *ret)
 {
 	struct folio *dst;
 	int rc = -EAGAIN;
@@ -1229,7 +1228,7 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 	dst->migrate_info = 0;
 
 	if (!folio_trylock(src)) {
-		if (mode == MIGRATE_ASYNC)
+		if (ctl->mode == MIGRATE_ASYNC)
 			goto out;
 
 		/*
@@ -1253,7 +1252,7 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 		 * inserting a page into the page table), but it's not
 		 * worth waiting for I/O.
 		 */
-		if (mode == MIGRATE_SYNC_LIGHT && !folio_test_uptodate(src))
+		if (ctl->mode == MIGRATE_SYNC_LIGHT && !folio_test_uptodate(src))
 			goto out;
 
 		folio_lock(src);
@@ -1269,7 +1268,7 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 		 * the retry loop is too short and in the sync-light case,
 		 * the overhead of stalling is too much
 		 */
-		switch (mode) {
+		switch (ctl->mode) {
 		case MIGRATE_SYNC:
 			break;
 		default:
@@ -1329,7 +1328,8 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 		/* Establish migration ptes */
 		VM_BUG_ON_FOLIO(folio_test_anon(src) &&
 			       !folio_test_ksm(src) && !anon_vma, src);
-		try_to_migrate(src, mode == MIGRATE_ASYNC ? TTU_BATCH_FLUSH : 0);
+		try_to_migrate(src, ctl->mode == MIGRATE_ASYNC ?
+			TTU_BATCH_FLUSH : 0);
 		old_folio_state |= FOLIO_WAS_MAPPED;
 	}
 
@@ -1355,9 +1355,8 @@ out:
 
 /* Migrate the folio to the newly allocated folio in dst. */
 static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
-			      struct folio *src, struct folio *dst,
-			      enum migrate_mode mode, enum migrate_reason reason,
-			      struct list_head *ret)
+		struct folio *src, struct folio *dst,
+		const struct migrate_control *ctl, struct list_head *ret)
 {
 	int rc;
 	int old_folio_state = 0;
@@ -1376,7 +1375,7 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 		src_partially_mapped = folio_test_partially_mapped(src);
 	}
 
-	rc = move_to_new_folio(dst, src, mode);
+	rc = move_to_new_folio(dst, src, ctl);
 	if (rc)
 		goto out;
 
@@ -1406,7 +1405,7 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 		remove_migration_ptes(src, dst, 0);
 
 	folio_unlock(dst);
-	folio_set_owner_migrate_reason(dst, reason);
+	folio_set_owner_migrate_reason(dst, ctl->reason);
 	/*
 	 * If migration is successful, decrease refcount of dst,
 	 * which will not free the page because new page owner increased
@@ -1423,7 +1422,7 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 	if (anon_vma)
 		put_anon_vma(anon_vma);
 	folio_unlock(src);
-	migrate_folio_done(src, reason);
+	migrate_folio_done(src, ctl);
 
 	return rc;
 out:
@@ -1465,8 +1464,8 @@ out:
  */
 static int unmap_and_move_hugetlb_folio(new_folio_t get_new_folio,
 		free_folio_t put_new_folio, unsigned long private,
-		struct folio *src, int force, enum migrate_mode mode,
-		enum migrate_reason reason, struct list_head *ret)
+		struct folio *src, int force, const struct migrate_control *ctl,
+		struct list_head *ret)
 {
 	struct folio *dst;
 	int rc = -EAGAIN;
@@ -1488,7 +1487,7 @@ static int unmap_and_move_hugetlb_folio(new_folio_t get_new_folio,
 	if (!folio_trylock(src)) {
 		if (!force)
 			goto out;
-		switch (mode) {
+		switch (ctl->mode) {
 		case MIGRATE_SYNC:
 			break;
 		default:
@@ -1533,7 +1532,7 @@ static int unmap_and_move_hugetlb_folio(new_folio_t get_new_folio,
 	}
 
 	if (!folio_mapped(src))
-		rc = move_to_new_folio(dst, src, mode);
+		rc = move_to_new_folio(dst, src, ctl);
 
 	if (was_mapped)
 		remove_migration_ptes(src, !rc ? dst : src, ttu);
@@ -1549,7 +1548,7 @@ put_anon:
 		put_anon_vma(anon_vma);
 
 	if (!rc) {
-		move_hugetlb_state(src, dst, reason);
+		move_hugetlb_state(src, dst, ctl->reason);
 		put_new_folio = NULL;
 	}
 
@@ -1624,7 +1623,7 @@ struct migrate_pages_stats {
  */
 static int migrate_hugetlbs(struct list_head *from, new_folio_t get_new_folio,
 			    free_folio_t put_new_folio, unsigned long private,
-			    enum migrate_mode mode, enum migrate_reason reason,
+			    const struct migrate_control *ctl,
 			    struct migrate_pages_stats *stats,
 			    struct list_head *ret_folios)
 {
@@ -1665,8 +1664,8 @@ static int migrate_hugetlbs(struct list_head *from, new_folio_t get_new_folio,
 
 			rc = unmap_and_move_hugetlb_folio(get_new_folio,
 							  put_new_folio, private,
-							  folio, pass > 2, mode,
-							  reason, ret_folios);
+							  folio, pass > 2, ctl,
+							  ret_folios);
 			/*
 			 * The rules are:
 			 *	0: hugetlb folio will be put back
@@ -1720,7 +1719,7 @@ out:
 static void migrate_folios_move(struct list_head *src_folios,
 		struct list_head *dst_folios,
 		free_folio_t put_new_folio, unsigned long private,
-		enum migrate_mode mode, enum migrate_reason reason,
+		const struct migrate_control *ctl,
 		struct list_head *ret_folios,
 		struct migrate_pages_stats *stats, int nr_pass,
 		int *nr_failed)
@@ -1747,7 +1746,7 @@ static void migrate_folios_move(struct list_head *src_folios,
 			cond_resched();
 
 			rc = migrate_folio_move(put_new_folio, private,
-					folio, dst, mode, reason, ret_folios);
+					folio, dst, ctl, ret_folios);
 			/*
 			 * The rules are:
 			 *	0: folio will be freed
@@ -1810,8 +1809,8 @@ static void migrate_folios_undo(struct list_head *src_folios,
  */
 static int move_movable_ops_page(struct folio *src,
 		new_folio_t get_new_folio, free_folio_t put_new_folio,
-		unsigned long private, enum migrate_mode mode,
-		enum migrate_reason reason, struct list_head *ret_folios)
+		unsigned long private, const struct migrate_control *ctl,
+		struct list_head *ret_folios)
 {
 	struct folio *dst;
 	int rc = -EAGAIN;
@@ -1821,7 +1820,7 @@ static int move_movable_ops_page(struct folio *src,
 		return -ENOMEM;
 
 	if (!folio_trylock(src)) {
-		if (mode == MIGRATE_ASYNC)
+		if (ctl->mode == MIGRATE_ASYNC)
 			goto out_put_dst;
 		if (current->flags & PF_MEMALLOC)
 			goto out_put_dst;
@@ -1831,19 +1830,19 @@ static int move_movable_ops_page(struct folio *src,
 	if (unlikely(!folio_trylock(dst)))
 		goto out_unlock_src;
 
-	rc = migrate_movable_ops_page(&dst->page, &src->page, mode);
+	rc = migrate_movable_ops_page(&dst->page, &src->page, ctl->mode);
 	folio_unlock(dst);
 	if (rc)
 		goto out_unlock_src;
 
-	folio_set_owner_migrate_reason(dst, reason);
+	folio_set_owner_migrate_reason(dst, ctl->reason);
 	/* Drop migration's reference after transferring ownership to dst. */
 	folio_put(dst);
 
 	list_del(&src->lru);
 	folio_unlock(src);
 
-	if (reason != MR_MEMORY_FAILURE)
+	if (ctl->reason != MR_MEMORY_FAILURE)
 		folio_put(src);
 
 	return 0;
@@ -1871,8 +1870,8 @@ out_put_dst:
  */
 static int migrate_movable_ops_pages(struct list_head *from,
 		new_folio_t get_new_folio, free_folio_t put_new_folio,
-		unsigned long private, enum migrate_mode mode,
-		enum migrate_reason reason, struct migrate_pages_stats *stats,
+		unsigned long private, const struct migrate_control *ctl,
+		struct migrate_pages_stats *stats,
 		struct list_head *ret_folios)
 {
 	int retry = 1;
@@ -1894,7 +1893,7 @@ static int migrate_movable_ops_pages(struct list_head *from,
 
 			rc = move_movable_ops_page(folio, get_new_folio,
 						   put_new_folio, private,
-						   mode, reason, ret_folios);
+						   ctl, ret_folios);
 			switch (rc) {
 			case -ENOMEM:
 				/* Count this page and those awaiting retry. */
@@ -1932,17 +1931,17 @@ out:
  * unmap phase.
  */
 static int migrate_folio_split_on_alloc_fail(struct folio *folio,
-		struct list_head *split_folios, enum migrate_mode mode,
-		enum migrate_reason reason, struct migrate_pages_stats *stats)
+		struct list_head *split_folios, const struct migrate_control *ctl,
+		struct migrate_pages_stats *stats)
 {
 	bool is_thp = folio_test_pmd_mappable(folio);
 	int rc;
 
 	/* Large folio NUMA faulting doesn't split to retry. */
-	if (!folio_test_large(folio) || reason == MR_NUMA_MISPLACED)
+	if (!folio_test_large(folio) || ctl->reason == MR_NUMA_MISPLACED)
 		return -ENOMEM;
 
-	rc = try_split_folio(folio, split_folios, mode);
+	rc = try_split_folio(folio, split_folios, ctl->mode);
 	if (!rc) {
 		stats->nr_thp_split += is_thp;
 		stats->nr_split++;
@@ -1953,7 +1952,7 @@ static int migrate_folio_split_on_alloc_fail(struct folio *folio,
 	 * Try again to split large folio to mitigate the failure of longterm
 	 * pinning.
 	 */
-	if (reason == MR_LONGTERM_PIN && rc == -EAGAIN)
+	if (ctl->reason == MR_LONGTERM_PIN && rc == -EAGAIN)
 		return -EAGAIN;
 
 	return -ENOMEM;
@@ -1969,7 +1968,7 @@ static int migrate_folio_split_on_alloc_fail(struct folio *folio,
  */
 static int migrate_folios_unmap(struct list_head *from,
 		new_folio_t get_new_folio, free_folio_t put_new_folio,
-		unsigned long private, enum migrate_mode mode, enum migrate_reason reason,
+		unsigned long private, const struct migrate_control *ctl,
 		struct list_head *ret_folios, struct list_head *split_folios,
 		struct list_head *unmap_folios, struct list_head *dst_folios,
 		struct migrate_pages_stats *stats, int nr_pass, int *nr_failed)
@@ -2019,7 +2018,7 @@ static int migrate_folios_unmap(struct list_head *from,
 			if (nr_pages > 2 &&
 			   !list_empty(&folio->_deferred_list) &&
 			   folio_test_partially_mapped(folio)) {
-				if (!try_split_folio(folio, split_folios, mode)) {
+				if (!try_split_folio(folio, split_folios, ctl->mode)) {
 					*nr_failed += 1;
 					stats->nr_thp_failed += is_thp;
 					stats->nr_thp_split += is_thp;
@@ -2041,7 +2040,7 @@ static int migrate_folios_unmap(struct list_head *from,
 			if (!thp_migration_supported() && is_thp) {
 				*nr_failed += 1;
 				stats->nr_thp_failed++;
-				if (!try_split_folio(folio, split_folios, mode)) {
+				if (!try_split_folio(folio, split_folios, ctl->mode)) {
 					stats->nr_thp_split++;
 					stats->nr_split++;
 					continue;
@@ -2059,14 +2058,14 @@ static int migrate_folios_unmap(struct list_head *from,
 				folio_clear_active(folio);
 				folio_clear_unevictable(folio);
 				list_del(&folio->lru);
-				migrate_folio_done(folio, reason);
+				migrate_folio_done(folio, ctl);
 				stats->nr_succeeded += nr_pages;
 				stats->nr_thp_succeeded += is_thp;
 				continue;
 			}
 
 			rc = migrate_folio_unmap(get_new_folio, put_new_folio,
-					private, folio, &dst, mode, ret_folios);
+					private, folio, &dst, ctl, ret_folios);
 			/*
 			 * The rules are:
 			 *	0: folio will be put on unmap_folios list,
@@ -2085,7 +2084,7 @@ static int migrate_folios_unmap(struct list_head *from,
 				stats->nr_thp_failed += is_thp;
 
 				split_rc = migrate_folio_split_on_alloc_fail(folio,
-						split_folios, mode, reason, stats);
+						split_folios, ctl, stats);
 				if (!split_rc)
 					break;
 				/* Retry this folio in a later pass. */
@@ -2144,7 +2143,7 @@ static int migrate_folios_unmap(struct list_head *from,
  */
 static int migrate_folios_batch(struct list_head *from,
 		new_folio_t get_new_folio, free_folio_t put_new_folio,
-		unsigned long private, enum migrate_mode mode, enum migrate_reason reason,
+		unsigned long private, const struct migrate_control *ctl,
 		struct list_head *ret_folios, struct list_head *split_folios,
 		struct migrate_pages_stats *stats, int nr_pass)
 {
@@ -2153,11 +2152,11 @@ static int migrate_folios_batch(struct list_head *from,
 	LIST_HEAD(unmap_folios);
 	LIST_HEAD(dst_folios);
 
-	VM_WARN_ON_ONCE(mode != MIGRATE_ASYNC &&
+	VM_WARN_ON_ONCE(ctl->mode != MIGRATE_ASYNC &&
 			!list_empty(from) && !list_is_singular(from));
 
 	rc_saved = migrate_folios_unmap(from, get_new_folio, put_new_folio,
-			private, mode, reason, ret_folios, split_folios,
+			private, ctl, ret_folios, split_folios,
 			&unmap_folios, &dst_folios, stats, nr_pass,
 			&nr_failed);
 	if (rc_saved && list_empty(&unmap_folios)) {
@@ -2170,7 +2169,7 @@ static int migrate_folios_batch(struct list_head *from,
 
 	/* Move the unmapped folios */
 	migrate_folios_move(&unmap_folios, &dst_folios, put_new_folio, private,
-			mode, reason, ret_folios, stats, nr_pass, &nr_failed);
+			ctl, ret_folios, stats, nr_pass, &nr_failed);
 
 	rc = rc_saved ? : nr_failed;
 out:
@@ -2188,27 +2187,29 @@ out:
  */
 static int __migrate_lru_folios(struct list_head *from, new_folio_t get_new_folio,
 		free_folio_t put_new_folio, unsigned long private,
-		enum migrate_mode mode, enum migrate_reason reason,
-		struct list_head *ret_folios,
+		const struct migrate_control *ctl, struct list_head *ret_folios,
 		struct migrate_pages_stats *stats)
 {
 	int rc, nr_failed = 0;
 	LIST_HEAD(folios);
 	LIST_HEAD(split_folios);
 	struct migrate_pages_stats astats;
+	struct migrate_control async_ctl;
 
-	if (mode == MIGRATE_ASYNC) {
+	if (ctl->mode == MIGRATE_ASYNC) {
 		rc = migrate_folios_batch(from, get_new_folio, put_new_folio,
-				private, mode, reason, ret_folios,
+				private, ctl, ret_folios,
 				&split_folios, stats,
 				NR_MAX_MIGRATE_PAGES_RETRY);
 		goto out;
 	}
 
+	async_ctl = *ctl;
+	async_ctl.mode = MIGRATE_ASYNC;
 	memset(&astats, 0, sizeof(astats));
 	/* Try to migrate in batch with MIGRATE_ASYNC mode firstly */
 	rc = migrate_folios_batch(from, get_new_folio, put_new_folio, private,
-			MIGRATE_ASYNC, reason, &folios, &split_folios, &astats,
+			&async_ctl, &folios, &split_folios, &astats,
 			NR_MAX_MIGRATE_ASYNC_RETRY);
 	stats->nr_succeeded += astats.nr_succeeded;
 	stats->nr_thp_succeeded += astats.nr_thp_succeeded;
@@ -2235,8 +2236,7 @@ static int __migrate_lru_folios(struct list_head *from, new_folio_t get_new_foli
 	while (!list_empty(from)) {
 		list_move(from->next, &folios);
 		rc = migrate_folios_batch(&folios, get_new_folio, put_new_folio,
-				private, mode, reason, ret_folios,
-				&split_folios, stats,
+				private, ctl, ret_folios, &split_folios, stats,
 				NR_MAX_MIGRATE_SYNC_RETRY);
 		list_splice_tail_init(&folios, ret_folios);
 		if (rc < 0)
@@ -2254,7 +2254,7 @@ out:
 		 * folio they came from was already counted as one failure.
 		 */
 		migrate_folios_batch(&split_folios, get_new_folio, put_new_folio,
-				private, MIGRATE_ASYNC, reason, ret_folios,
+				private, &async_ctl, ret_folios,
 				NULL, stats, 1);
 		list_splice_tail_init(&split_folios, ret_folios);
 	}
@@ -2269,7 +2269,7 @@ out:
  */
 static int migrate_lru_folios(struct list_head *from, new_folio_t get_new_folio,
 		free_folio_t put_new_folio, unsigned long private,
-		enum migrate_mode mode, enum migrate_reason reason,
+		const struct migrate_control *ctl,
 		struct list_head *ret_folios,
 		struct migrate_pages_stats *stats)
 {
@@ -2291,7 +2291,7 @@ static int migrate_lru_folios(struct list_head *from, new_folio_t get_new_folio,
 			list_splice_init(from, &folios);
 
 		rc = __migrate_lru_folios(&folios, get_new_folio, put_new_folio,
-				private, mode, reason, ret_folios, stats);
+				private, ctl, ret_folios, stats);
 		list_splice_tail_init(&folios, ret_folios);
 		if (rc < 0)
 			return rc;
@@ -2334,18 +2334,22 @@ int migrate_pages(struct list_head *from, new_folio_t get_new_folio,
 	int rc, rc_gather;
 	LIST_HEAD(ret_folios);
 	struct migrate_pages_stats stats;
+	const struct migrate_control ctl = {
+		.mode = mode,
+		.reason = reason,
+	};
 
-	trace_mm_migrate_pages_start(mode, reason);
+	trace_mm_migrate_pages_start(ctl.mode, ctl.reason);
 
 	memset(&stats, 0, sizeof(stats));
 
 	rc_gather = migrate_hugetlbs(from, get_new_folio, put_new_folio, private,
-				     mode, reason, &stats, &ret_folios);
+				     &ctl, &stats, &ret_folios);
 	if (rc_gather < 0)
 		goto out;
 
 	rc = migrate_movable_ops_pages(from, get_new_folio, put_new_folio,
-				       private, mode, reason, &stats,
+				       private, &ctl, &stats,
 				       &ret_folios);
 	if (rc < 0) {
 		rc_gather = rc;
@@ -2354,7 +2358,7 @@ int migrate_pages(struct list_head *from, new_folio_t get_new_folio,
 	rc_gather += rc;
 
 	rc = migrate_lru_folios(from, get_new_folio, put_new_folio,
-			private, mode, reason, &ret_folios, &stats);
+			private, &ctl, &ret_folios, &stats);
 	if (rc < 0) {
 		rc_gather = rc;
 		goto out;
@@ -2381,8 +2385,8 @@ out:
 	count_vm_events(THP_MIGRATION_SPLIT, stats.nr_thp_split);
 	trace_mm_migrate_pages(stats.nr_succeeded, stats.nr_failed_pages,
 			       stats.nr_thp_succeeded, stats.nr_thp_failed,
-			       stats.nr_thp_split, stats.nr_split, mode,
-			       reason);
+			       stats.nr_thp_split, stats.nr_split, ctl.mode,
+			       ctl.reason);
 
 	if (ret_succeeded)
 		*ret_succeeded = stats.nr_succeeded;
