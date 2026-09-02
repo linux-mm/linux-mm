@@ -489,6 +489,31 @@ static inline int pudp_set_access_flags(struct vm_area_struct *vma,
 #endif /* CONFIG_TRANSPARENT_HUGEPAGE */
 #endif
 
+#ifndef ptep_get_nopgtable
+static inline pte_t ptep_get_nopgtable(pte_t *ptep)
+{
+	/*
+	 * Ensure this is a pointer to a copy not a pointer into a page table.
+	 * If this is a stack value, it won't be a valid virtual address, but
+	 * that's fine because it also cannot be pointing into the page table.
+	 */
+	VM_WARN_ON(virt_addr_valid(ptep) && PageTable(virt_to_page(ptep)));
+
+	return *ptep;
+}
+#endif
+
+#ifndef set_pte_nopgtable
+static inline void set_pte_nopgtable(pte_t *ptep, pte_t pte)
+{
+	/*
+	 * See comment in ptep_get_nopgtable().
+	 */
+	VM_WARN_ON(virt_addr_valid(ptep) && PageTable(virt_to_page(ptep)));
+	*ptep = pte;
+}
+#endif
+
 #ifndef ptep_get
 static inline pte_t ptep_get(pte_t *ptep)
 {

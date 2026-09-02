@@ -398,18 +398,12 @@ static inline unsigned int folio_pte_batch_flags(struct folio *folio,
 		unsigned int max_nr, fpb_t flags)
 {
 	bool any_writable = false, any_young = false, any_dirty = false;
-	pte_t expected_pte, pte = *ptentp;
+	pte_t expected_pte, pte = ptep_get_nopgtable(ptentp);
 	unsigned int nr, cur_nr;
 
 	VM_WARN_ON_FOLIO(!pte_present(pte), folio);
 	VM_WARN_ON_FOLIO(!folio_test_large(folio) || max_nr < 1, folio);
 	VM_WARN_ON_FOLIO(page_folio(pfn_to_page(pte_pfn(pte))) != folio, folio);
-	/*
-	 * Ensure this is a pointer to a copy not a pointer into a page table.
-	 * If this is a stack value, it won't be a valid virtual address, but
-	 * that's fine because it also cannot be pointing into the page table.
-	 */
-	VM_WARN_ON(virt_addr_valid(ptentp) && PageTable(virt_to_page(ptentp)));
 
 	/* Limit max_nr to the actual remaining PFNs in the folio we could batch. */
 	max_nr = min_t(unsigned long, max_nr,
@@ -438,12 +432,14 @@ static inline unsigned int folio_pte_batch_flags(struct folio *folio,
 		nr += cur_nr;
 	}
 
+	pte = ptep_get_nopgtable(ptentp);
 	if (any_writable)
-		*ptentp = pte_mkwrite(*ptentp, vma);
+		pte = pte_mkwrite(pte, vma);
 	if (any_young)
-		*ptentp = pte_mkyoung(*ptentp);
+		pte = pte_mkyoung(pte);
 	if (any_dirty)
-		*ptentp = pte_mkdirty(*ptentp);
+		pte = pte_mkdirty(pte);
+	set_pte_nopgtable(ptentp, pte);
 
 	return min(nr, max_nr);
 }

@@ -76,8 +76,10 @@ static inline void copy_page(void *to, void *from)
 
 #ifdef STRICT_MM_TYPECHECKS
 
+typedef struct { unsigned long pte; } pteraw_t;
+typedef pteraw_t __ptent pte_t;
+
 typedef struct { unsigned long pgprot; } pgprot_t;
-typedef struct { unsigned long pte; } pte_t;
 typedef struct { unsigned long pmd; } pmd_t;
 typedef struct { unsigned long pud; } pud_t;
 typedef struct { unsigned long p4d; } p4d_t;
@@ -89,6 +91,11 @@ static __always_inline unsigned long name ## _val(name ## _t name)	\
 	return name.name;						\
 }
 
+static inline unsigned long pte_val(pte_t pte)
+{
+	return ((__force pteraw_t *)&pte)->pte;
+}
+
 #else /* STRICT_MM_TYPECHECKS */
 
 typedef unsigned long pgprot_t;
@@ -97,6 +104,11 @@ typedef unsigned long pmd_t;
 typedef unsigned long pud_t;
 typedef unsigned long p4d_t;
 typedef unsigned long pgd_t;
+
+static inline unsigned long pte_val(pte_t pte)
+{
+	return pte;
+}
 
 #define DEFINE_PGVAL_FUNC(name)						\
 static __always_inline unsigned long name ## _val(name ## _t name)	\
@@ -107,7 +119,6 @@ static __always_inline unsigned long name ## _val(name ## _t name)	\
 #endif /* STRICT_MM_TYPECHECKS */
 
 DEFINE_PGVAL_FUNC(pgprot)
-DEFINE_PGVAL_FUNC(pte)
 DEFINE_PGVAL_FUNC(pmd)
 DEFINE_PGVAL_FUNC(pud)
 DEFINE_PGVAL_FUNC(p4d)
@@ -116,6 +127,7 @@ DEFINE_PGVAL_FUNC(pgd)
 typedef pte_t *pgtable_t;
 
 #define __pgprot(x)	((pgprot_t) { (x) } )
+#define __pteraw(x)	((pteraw_t) { (x) } )
 #define __pte(x)        ((pte_t) { (x) } )
 #define __pmd(x)        ((pmd_t) { (x) } )
 #define __pud(x)	((pud_t) { (x) } )
