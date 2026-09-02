@@ -939,6 +939,7 @@ void __noreturn do_exit(long code)
 		kthread_do_exit(kthread, code);
 
 	kcov_task_exit(tsk);
+	kcov_dataflow_task_exit(tsk);
 	kmsan_task_exit(tsk);
 
 	synchronize_group_exit(tsk, code);

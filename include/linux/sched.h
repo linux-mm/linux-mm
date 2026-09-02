@@ -1553,6 +1553,40 @@ struct task_struct {
 	/* KCOV sequence number: */
 	int				kcov_sequence;
 
+#if defined(CONFIG_KCOV_DATAFLOW_ARGS) || defined(CONFIG_KCOV_DATAFLOW_RET)
+	/*
+	 * KCOV dataflow per-task record sequence counter (24 bits used) plus,
+	 * in bit 31, the recursion guard held while a callback is running:
+	 */
+	u32				kcov_df_seq;
+
+	/* KCOV dataflow: separate buffer for trace-args/trace-ret */
+	unsigned int			kcov_df_size;
+	void				*kcov_df_area;
+	bool				kcov_df_enabled;
+
+	/*
+	 * The kcov_dataflow object this task's session belongs to, NULL when
+	 * no session is active. The task holds a reference on it for the whole
+	 * session, whether local (KCOV_DF_ENABLE, mirrors t->kcov) or remote
+	 * (kcov_df_remote_start()), so the buffer can never be freed under an
+	 * instrumented callback and both task exit and kcov_df_remote_stop()
+	 * reach the exact object without a hash lookup.
+	 */
+	struct kcov_dataflow		*kcov_df;
+
+	/*
+	 * Nesting depth of kcov_df_remote_start() on this task: 0 while no
+	 * remote session is active (including during a local session), 1 for
+	 * a normal bracketed work item. If a buggy caller nests, the inner
+	 * start()s only bump this and the inner stop()s only decrement it, so
+	 * the OUTER session (buffer + ref) is torn down exactly once, at the
+	 * outermost stop -- never early, which would otherwise drop the ref
+	 * and free the buffer out from under the still-running outer worker.
+	 */
+	int				kcov_df_remote_depth;
+#endif
+
 	/* Collect coverage from softirq context: */
 	unsigned int			kcov_softirq;
 
