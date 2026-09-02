@@ -1219,6 +1219,10 @@ static const char *uaccess_safe_builtin[] = {
 	"__tsan_unaligned_write16",
 	/* KCOV */
 	"write_comp_data",
+	/* KCOV dataflow */
+	"kcov_df_trace_cmp",
+	"__sanitizer_cov_trace_args",
+	"__sanitizer_cov_trace_ret",
 	"check_kcov_mode",
 	"__sanitizer_cov_trace_pc",
 	"__sanitizer_cov_trace_const_cmp1",
