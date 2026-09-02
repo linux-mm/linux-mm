@@ -2746,6 +2746,8 @@ static bool __maybe_unused seq_is_valid(struct lruvec *lruvec)
  * walk_pmd_range(); the eviction also report them when walking the rmap
  * in lru_gen_look_around().
  *
+ * A second, coarser pair of filters (pud_filters) sits one level up.
+ *
  * For future optimizations:
  * 1. It's not necessary to keep both filters all the time. The spare one can be
  *    freed after the RCU grace period and reallocated if needed again.
@@ -2771,14 +2773,13 @@ static void get_item_key(void *item, int *key)
 	key[1] = hash >> BLOOM_FILTER_SHIFT;
 }
 
-static bool test_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq,
-			      void *item)
+static bool __test_bloom_filter(unsigned long **filters, unsigned long seq, void *item)
 {
 	int key[2];
 	unsigned long *filter;
 	int gen = filter_gen_from_seq(seq);
 
-	filter = READ_ONCE(mm_state->filters[gen]);
+	filter = READ_ONCE(filters[gen]);
 	if (!filter)
 		return true;
 
@@ -2787,14 +2788,13 @@ static bool test_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long s
 	return test_bit(key[0], filter) && test_bit(key[1], filter);
 }
 
-static void update_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq,
-				void *item)
+static void __update_bloom_filter(unsigned long **filters, unsigned long seq, void *item)
 {
 	int key[2];
 	unsigned long *filter;
 	int gen = filter_gen_from_seq(seq);
 
-	filter = READ_ONCE(mm_state->filters[gen]);
+	filter = READ_ONCE(filters[gen]);
 	if (!filter)
 		return;
 
@@ -2806,12 +2806,12 @@ static void update_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long
 		set_bit(key[1], filter);
 }
 
-static void reset_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq)
+static void __reset_bloom_filter(unsigned long **filters, unsigned long seq)
 {
 	unsigned long *filter;
 	int gen = filter_gen_from_seq(seq);
 
-	filter = mm_state->filters[gen];
+	filter = filters[gen];
 	if (filter) {
 		bitmap_clear(filter, 0, BIT(BLOOM_FILTER_SHIFT));
 		return;
@@ -2819,7 +2819,41 @@ static void reset_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long 
 
 	filter = bitmap_zalloc(BIT(BLOOM_FILTER_SHIFT),
 			       __GFP_HIGH | __GFP_NOMEMALLOC | __GFP_NOWARN);
-	WRITE_ONCE(mm_state->filters[gen], filter);
+	WRITE_ONCE(filters[gen], filter);
+}
+
+static bool test_pmd_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq,
+			      void *item)
+{
+	return __test_bloom_filter(mm_state->pmd_filters, seq, item);
+}
+
+static void update_pmd_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq,
+				void *item)
+{
+	__update_bloom_filter(mm_state->pmd_filters, seq, item);
+}
+
+static void reset_pmd_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq)
+{
+	__reset_bloom_filter(mm_state->pmd_filters, seq);
+}
+
+static bool test_pud_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq,
+				  void *item)
+{
+	return __test_bloom_filter(mm_state->pud_filters, seq, item);
+}
+
+static void update_pud_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq,
+				    void *item)
+{
+	__update_bloom_filter(mm_state->pud_filters, seq, item);
+}
+
+static void reset_pud_bloom_filter(struct lru_gen_mm_state *mm_state, unsigned long seq)
+{
+	__reset_bloom_filter(mm_state->pud_filters, seq);
 }
 
 /******************************************************************************
@@ -3061,8 +3095,10 @@ done:
 
 	spin_unlock(&mm_list->lock);
 
-	if (mm && first)
-		reset_bloom_filter(mm_state, walk->seq + 1);
+	if (mm && first) {
+		reset_pmd_bloom_filter(mm_state, walk->seq + 1);
+		reset_pud_bloom_filter(mm_state, walk->seq + 1);
+	}
 
 	if (*iter)
 		mmdrop(*iter);
@@ -3510,6 +3546,8 @@ restart:
 		if (!folio)
 			continue;
 
+		walk->mm_stats[MM_LEAF_ASSOCIATED]++;
+
 		if (folio_test_large(folio)) {
 			const unsigned int max_nr = (end - addr) >> PAGE_SHIFT;
 
@@ -3610,6 +3648,8 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area
 		if (!folio)
 			goto next;
 
+		walk->mm_stats[MM_LEAF_ASSOCIATED]++;
+
 		if (!pmdp_test_and_clear_young_notify(vma, addr, pmd + i))
 			goto next;
 
@@ -3636,10 +3676,11 @@ done:
 	*first = -1;
 }
 
-static void walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
+static bool walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
 			   struct mm_walk *args)
 {
 	int i;
+	bool young = false;
 	pmd_t *pmd;
 	unsigned long next;
 	unsigned long addr;
@@ -3676,8 +3717,10 @@ restart:
 
 			walk->mm_stats[MM_LEAF_TOTAL]++;
 
-			if (pfn != -1)
+			if (pfn != -1) {
 				walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first);
+				young = true;
+			}
 			continue;
 		}
 
@@ -3687,9 +3730,10 @@ restart:
 				continue;
 
 			walk_pmd_range_locked(pud, addr, vma, args, bitmap, &first);
+			young = true;
 		}
 
-		if (!walk->force_scan && !test_bloom_filter(mm_state, walk->seq, pmd + i))
+		if (!walk->force_scan && !test_pmd_bloom_filter(mm_state, walk->seq, pmd + i))
 			continue;
 
 		walk->mm_stats[MM_NONLEAF_FOUND]++;
@@ -3698,15 +3742,18 @@ restart:
 			continue;
 
 		walk->mm_stats[MM_NONLEAF_ADDED]++;
+		young = true;
 
 		/* carry over to the next generation */
-		update_bloom_filter(mm_state, walk->seq + 1, pmd + i);
+		update_pmd_bloom_filter(mm_state, walk->seq + 1, pmd + i);
 	}
 
 	walk_pmd_range_locked(pud, -1, vma, args, bitmap, &first);
 
 	if (i < PTRS_PER_PMD && get_next_vma(PUD_MASK, PMD_SIZE, args, &start, &end))
 		goto restart;
+
+	return young;
 }
 
 static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
@@ -3717,6 +3764,7 @@ static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
 	unsigned long addr;
 	unsigned long next;
 	struct lru_gen_mm_walk *walk = args->private;
+	struct lru_gen_mm_state *mm_state = get_mm_state(walk->lruvec);
 
 	VM_WARN_ON_ONCE(p4d_leaf(*p4d));
 
@@ -3730,7 +3778,14 @@ restart:
 		if (!pud_present(val) || WARN_ON_ONCE(pud_leaf(val)))
 			continue;
 
-		walk_pmd_range(&val, addr, next, args);
+		/* Skip a subtree whose 512 PMDs all failed the PMD-level filter last gen */
+		if (!walk->force_scan && !test_pud_bloom_filter(mm_state, walk->seq, pud + i)) {
+			walk->mm_stats[MM_PUD_EMPTY_SKIPPED]++;
+			continue;
+		}
+
+		if (walk_pmd_range(&val, addr, next, args))
+			update_pud_bloom_filter(mm_state, walk->seq + 1, pud + i);
 
 		if (need_resched() || walk->batched >= MAX_LRU_BATCH) {
 			end = (addr | ~PUD_MASK) + 1;
@@ -4034,8 +4089,29 @@ static bool try_to_inc_max_seq(struct lruvec *lruvec, unsigned long seq,
 
 	do {
 		success = iterate_mm_list(walk, &mm);
-		if (mm)
+		if (mm) {
+			bool empty = false;
+
 			walk_mm(mm, walk);
+			/*
+			 * A walk that traversed page tables but found no folio
+			 * belonging to this lruvec (node+memcg) is pure waste.
+			 */
+			if (walk->mm_stats[MM_LEAF_TOTAL]) {
+				walk->mm_stats[MM_WALK_TOTAL]++;
+				if (walk->mm_stats[MM_LEAF_ASSOCIATED] == 0) {
+					walk->mm_stats[MM_WALK_EMPTY]++;
+					walk->mm_stats[MM_LEAF_EMPTY_WALKS] +=
+						walk->mm_stats[MM_LEAF_TOTAL];
+					empty = true;
+				}
+			}
+			trace_mm_vmscan_lru_gen_walk(
+					lruvec_pgdat(lruvec)->node_id, walk->seq,
+					walk->mm_stats[MM_LEAF_TOTAL],
+					walk->mm_stats[MM_LEAF_ASSOCIATED], empty,
+					walk->mm_stats[MM_PUD_EMPTY_SKIPPED]);
+		}
 	} while (mm);
 done:
 	if (success) {
@@ -4283,8 +4359,14 @@ bool lru_gen_look_around(struct page_vma_mapped_walk *pvmw, unsigned int nr)
 	lazy_mmu_mode_disable();
 
 	/* feedback from rmap walkers to page table walkers */
-	if (mm_state && suitable_to_scan(i, young))
-		update_bloom_filter(mm_state, max_seq, pvmw->pmd);
+	if (mm_state && suitable_to_scan(i, young)) {
+		/* the PUD entry covering the young PTEs scanned above */
+		pud_t *pud_p = pud_offset(p4d_offset(pgd_offset(vma->vm_mm, pvmw->address),
+						     pvmw->address), pvmw->address);
+
+		update_pmd_bloom_filter(mm_state, max_seq, pvmw->pmd);
+		update_pud_bloom_filter(mm_state, max_seq, pud_p);
+	}
 
 	mem_cgroup_put(memcg);
 
@@ -5492,14 +5574,14 @@ static void lru_gen_seq_show_full(struct seq_file *m, struct lruvec *lruvec,
 
 	seq_puts(m, "                      ");
 	for (i = 0; i < NR_MM_STATS; i++) {
-		const char *s = "xxxx";
+		const char *s = "xxxxxxxxx";
 		unsigned long n = 0;
 
 		if (seq == max_seq && NR_HIST_GENS == 1) {
-			s = "TYFA";
+			s = "TYFALWEES";
 			n = READ_ONCE(mm_state->stats[hist][i]);
 		} else if (seq != max_seq && NR_HIST_GENS > 1) {
-			s = "tyfa";
+			s = "tyfalwees";
 			n = READ_ONCE(mm_state->stats[hist][i]);
 		}
 
@@ -5829,8 +5911,10 @@ void lru_gen_exit_memcg(struct mem_cgroup *memcg)
 			continue;
 
 		for (i = 0; i < NR_BLOOM_FILTERS; i++) {
-			bitmap_free(mm_state->filters[i]);
-			mm_state->filters[i] = NULL;
+			bitmap_free(mm_state->pmd_filters[i]);
+			mm_state->pmd_filters[i] = NULL;
+			bitmap_free(mm_state->pud_filters[i]);
+			mm_state->pud_filters[i] = NULL;
 		}
 	}
 }
