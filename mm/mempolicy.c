@@ -2702,6 +2702,11 @@ static unsigned long alloc_pages_bulk_weighted_interleave(gfp_t gfp,
 	for_each_node_mask(node, nodes)
 		weight_total += weights[node];
 
+	if (!weight_total) {
+		kfree(weights);
+		return total_allocated;
+	}
+
 	/*
 	 * Calculate rounds/partial rounds to minimize __alloc_pages_bulk calls.
 	 * Track which node weighted interleave should resume from.
