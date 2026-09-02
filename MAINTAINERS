@@ -14077,7 +14077,9 @@ B:	https://bugzilla.kernel.org/buglist.cgi?component=Sanitizers&product=Memory%2
 F:	Documentation/dev-tools/kcov.rst
 F:	include/linux/kcov.h
 F:	include/uapi/linux/kcov.h
+F:	include/uapi/linux/kcov_dataflow.h
 F:	kernel/kcov.c
+F:	kernel/kcov_dataflow.c
 F:	scripts/Makefile.kcov
 
 KCSAN
