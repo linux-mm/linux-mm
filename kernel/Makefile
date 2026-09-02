@@ -44,6 +44,12 @@ KCSAN_SANITIZE_kcov.o := n
 UBSAN_SANITIZE_kcov.o := n
 KMSAN_SANITIZE_kcov.o := n
 
+KCOV_INSTRUMENT_kcov_dataflow.o := n
+KASAN_SANITIZE_kcov_dataflow.o := n
+KCSAN_SANITIZE_kcov_dataflow.o := n
+UBSAN_SANITIZE_kcov_dataflow.o := n
+KMSAN_SANITIZE_kcov_dataflow.o := n
+
 CONTEXT_ANALYSIS_kcov.o := y
 CFLAGS_kcov.o := $(call cc-option, -fno-conserve-stack) -fno-stack-protector
 
@@ -98,6 +104,9 @@ obj-$(CONFIG_AUDIT) += audit.o auditfilter.o
 obj-$(CONFIG_AUDITSYSCALL) += auditsc.o audit_watch.o audit_fsnotify.o audit_tree.o
 obj-$(CONFIG_GCOV_KERNEL) += gcov/
 obj-$(CONFIG_KCOV) += kcov.o
+ifneq ($(CONFIG_KCOV_DATAFLOW_ARGS)$(CONFIG_KCOV_DATAFLOW_RET),)
+obj-y += kcov_dataflow.o
+endif
 obj-$(CONFIG_KPROBES) += kprobes.o
 obj-$(CONFIG_FAIL_FUNCTION) += fail_function.o
 obj-$(CONFIG_KGDB) += debug/
