@@ -2225,6 +2225,10 @@ static unsigned int weighted_interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 	for_each_node_mask(nid, nodemask)
 		weight_total += table ? table[nid] : 1;
 
+
+	if (!weight_total)
+		return numa_node_id();
+
 	/* Calculate the node offset based on totals */
 	target = ilx % weight_total;
 	nid = first_node(nodemask);
