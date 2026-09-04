@@ -422,6 +422,7 @@ void efi_native_runtime_setup(void);
 #define LINUX_EFI_COCO_SECRET_AREA_GUID		EFI_GUID(0xadf956ad, 0xe98c, 0x484c,  0xae, 0x11, 0xb5, 0x1c, 0x7d, 0x33, 0x64, 0x47)
 #define LINUX_EFI_BOOT_MEMMAP_GUID		EFI_GUID(0x800f683f, 0xd08b, 0x423a,  0xa2, 0x93, 0x96, 0x5c, 0x3c, 0x6f, 0xe2, 0xb4)
 #define LINUX_EFI_UNACCEPTED_MEM_TABLE_GUID	EFI_GUID(0xd5d1de3c, 0x105c, 0x44f9,  0x9e, 0xa9, 0xbc, 0xef, 0x98, 0x12, 0x00, 0x31)
+#define LINUX_EFI_KEXEC_HANDOVER_GUID		EFI_GUID(0xc941b6c7, 0x7b3f, 0x4af6,  0x9e, 0x50, 0xfc, 0xb3, 0xa8, 0x86, 0x8a, 0x17)
 
 #define RISCV_EFI_BOOT_PROTOCOL_GUID		EFI_GUID(0xccd15fec, 0x6f73, 0x4eec,  0x83, 0x95, 0x3e, 0x69, 0xe4, 0xb9, 0x40, 0xbf)
 
@@ -1272,6 +1273,41 @@ struct linux_efi_memreserve {
 	/ sizeof_field(struct linux_efi_memreserve, entry[0]))
 
 void __init efi_arch_mem_reserve(phys_addr_t addr, u64 size);
+
+#ifdef CONFIG_EFI_KHO
+/*
+ * The LINUX_EFI_KEXEC_HANDOVER_GUID config table points to this structure.
+ * It carries the kexec handover (KHO) state from the current kernel to the
+ * next one: the addresses of the KHO state FDT and of the scratch area.
+ *
+ * This is the handover channel for architectures that boot through EFI
+ * without a device tree (e.g. LoongArch), where the /chosen linux,kho-fdt
+ * and linux,kho-scratch properties read by early_init_dt_check_kho() are not
+ * available.  The EFI stub allocates and installs the table once at boot;
+ * the current kernel updates its contents before a kexec, and the next
+ * kernel reads it back and calls kho_populate().
+ *
+ * The layout is an ABI between the two kernels and carries no version
+ * field: an incompatible change must use a new GUID.  The handover payload
+ * itself is versioned separately by the compatible string of the KHO state
+ * FDT, which kho_populate() checks.
+ */
+struct linux_efi_kho_data {
+	u64 fdt_addr;
+	u64 fdt_size;
+	u64 scratch_addr;
+	u64 scratch_size;
+} __packed;
+
+int efi_kho_update(phys_addr_t fdt_addr, u64 fdt_size,
+		   phys_addr_t scratch_addr, u64 scratch_size);
+#else
+static inline int efi_kho_update(phys_addr_t fdt_addr, u64 fdt_size,
+				 phys_addr_t scratch_addr, u64 scratch_size)
+{
+	return 0;
+}
+#endif
 
 /*
  * The LINUX_EFI_MOK_VARIABLE_TABLE_GUID config table can be provided
