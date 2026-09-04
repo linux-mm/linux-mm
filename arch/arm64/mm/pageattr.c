@@ -262,6 +262,7 @@ int set_direct_map_invalid_noflush(struct page *page, unsigned int numpages)
 	return update_range_prot((unsigned long)page_address(page),
 				 PAGE_SIZE * numpages, set_mask, clear_mask);
 }
+EXPORT_SYMBOL(set_direct_map_invalid_noflush);
 
 int set_direct_map_default_noflush(struct page *page, unsigned int numpages)
 {
@@ -274,6 +275,7 @@ int set_direct_map_default_noflush(struct page *page, unsigned int numpages)
 	return update_range_prot((unsigned long)page_address(page),
 				 PAGE_SIZE * numpages, set_mask, clear_mask);
 }
+EXPORT_SYMBOL(set_direct_map_default_noflush);
 
 static int __set_memory_enc_dec(unsigned long addr,
 				int numpages,
