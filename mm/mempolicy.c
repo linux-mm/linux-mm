@@ -887,11 +887,12 @@ bool folio_can_map_prot_numa(struct folio *folio, struct vm_area_struct *vma,
 		return false;
 
 	/*
-	 * Skip scanning top tier node if normal numa
-	 * balancing is disabled
+	 * Skip scanning top tier node if normal numa balancing is disabled,
+	 * or if the scanner only wants promotion candidates out of this VMA.
 	 */
-	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL) &&
-	    node_is_toptier(nid))
+	if (node_is_toptier(nid) &&
+	    (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL) ||
+	     (vma->numab_state && vma->numab_state->slow_only)))
 		return false;
 
 	if (folio_use_access_time(folio))

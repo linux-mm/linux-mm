@@ -4297,11 +4297,20 @@ retry_pids:
 		/*
 		 * Do not scan the VMA if task has not accessed it, unless no other
 		 * VMA candidate exists.
+		 *
+		 * Force-scan only slow-tier folios when in tiering mode, as a large
+		 * VMA can cause others to become "permanently unaccessed" if a scan
+		 * cycle is consumed entirely by the large VMA.
 		 */
+		vma->numab_state->slow_only = false;
 		if (!vma_pids_forced && !vma_is_accessed(mm, vma)) {
-			vma_pids_skipped = true;
-			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_PID_INACTIVE);
-			continue;
+			if (!(sysctl_numa_balancing_mode &
+			      NUMA_BALANCING_MEMORY_TIERING)) {
+				vma_pids_skipped = true;
+				trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_PID_INACTIVE);
+				continue;
+			}
+			vma->numab_state->slow_only = true;
 		}
 
 		do {
@@ -4329,8 +4338,14 @@ retry_pids:
 			cond_resched();
 		} while (end != vma->vm_end);
 
-		/* VMA scan is complete, do not scan until next sequence. */
-		vma->numab_state->prev_scan_seq = mm->numa_scan_seq;
+		/*
+		 * VMA scan is complete, do not scan until next sequence.
+		 * A restricted scan reached the end of the VMA but may not
+		 * have completely scanned it - it must not disarm the sequence
+		 * counting horizon in vma_is_accessed() for this VMA.
+		 */
+		if (!vma->numab_state->slow_only)
+			vma->numab_state->prev_scan_seq = mm->numa_scan_seq;
 
 		/*
 		 * Only force scan within one VMA at a time, to limit the
