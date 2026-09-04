@@ -72,6 +72,9 @@ a set. A first pass compares the approximated values, and then a second
 pass only needs the precise sum for counter trees which are within the
 possible precise sum range of the counter tree chosen by the first pass.
 
+Because the comparison is on the wrapped difference, it is not transitive:
+ordering is undefined over a set of counters spanning more than LONG_MAX.
+
 Functions and structures
 ========================
 
