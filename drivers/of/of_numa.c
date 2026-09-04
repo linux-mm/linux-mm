@@ -171,6 +171,7 @@ int of_node_to_nid(struct device_node *device)
 
 	return NUMA_NO_NODE;
 }
+EXPORT_SYMBOL(of_node_to_nid);
 
 int __init of_numa_init(void)
 {
