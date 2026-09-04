@@ -14,6 +14,7 @@
 #include <linux/cma.h>
 #include <linux/kmemleak.h>
 #include <linux/count_zeros.h>
+#include <linux/efi.h>
 #include <linux/kasan.h>
 #include <linux/kexec.h>
 #include <linux/kexec_handover.h>
@@ -2061,6 +2062,38 @@ int kho_fill_kimage(struct kimage *image)
 	image->kho.scratch = &image->segment[image->nr_segments - 1];
 
 	return 0;
+}
+
+/*
+ * Synchronize the handover transport with the image that is about to be
+ * executed.  The EFI config table channel is global, while kexec keeps
+ * separate images for a normal reboot and for crash.  Write the state of the
+ * selected image immediately before it is executed, rather than while a
+ * candidate image is being loaded, so a failed replacement cannot leave the
+ * channel pointing at that failed image.
+ *
+ * An image loaded through the legacy kexec_load() syscall, a crash image, or
+ * an image loaded while KHO is disabled carries no handover state.  Clear the
+ * channel for those images so the next kernel boots cold instead of reviving
+ * from stale state.  Clearing is best-effort because an absent channel cannot
+ * affect a cold boot.
+ */
+int kho_sync_channel(struct kimage *image)
+{
+	int err;
+
+	if (!image->kho.fdt || !image->kho.scratch) {
+		efi_kho_update(0, 0, 0, 0);
+		return 0;
+	}
+
+	err = efi_kho_update(image->kho.fdt, PAGE_SIZE,
+			     image->kho.scratch->mem,
+			     image->kho.scratch->bufsz);
+	if (err)
+		pr_warn("failed to update EFI config table: %d\n", err);
+
+	return err;
 }
 
 static int kho_walk_scratch(struct kexec_buf *kbuf,
