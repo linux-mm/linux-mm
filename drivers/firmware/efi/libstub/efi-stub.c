@@ -100,6 +100,29 @@ static void install_memreserve_table(void)
 		efi_err("Failed to install memreserve config table!\n");
 }
 
+static void install_kho_table(void)
+{
+#ifdef CONFIG_EFI_KHO
+	struct linux_efi_kho_data *kho;
+	efi_guid_t kho_table_guid = LINUX_EFI_KEXEC_HANDOVER_GUID;
+	efi_status_t status;
+
+	status = efi_bs_call(allocate_pool, EFI_LOADER_DATA, sizeof(*kho),
+			     (void **)&kho);
+	if (status != EFI_SUCCESS) {
+		efi_err("Failed to allocate KHO config table!\n");
+		return;
+	}
+
+	*kho = (struct linux_efi_kho_data){};
+
+	status = efi_bs_call(install_configuration_table, &kho_table_guid,
+			     kho);
+	if (status != EFI_SUCCESS)
+		efi_err("Failed to install KHO config table!\n");
+#endif
+}
+
 static u32 get_supported_rt_services(void)
 {
 	const efi_rt_properties_table_t *rt_prop_table;
@@ -179,6 +202,8 @@ efi_status_t efi_stub_common(efi_handle_t handle,
 			 EFI_RT_SUPPORTED_SET_VIRTUAL_ADDRESS_MAP);
 
 	install_memreserve_table();
+
+	install_kho_table();
 
 	status = efi_boot_kernel(handle, image, image_addr, cmdline_ptr);
 
