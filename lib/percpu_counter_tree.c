@@ -457,6 +457,32 @@ long percpu_counter_tree_precise_sum(struct percpu_counter_tree *counter)
 }
 EXPORT_SYMBOL_GPL(percpu_counter_tree_precise_sum);
 
+/*
+ * Each counter's approximation lies within [precise - under, precise + over]:
+ *
+ *                  approx_a range
+ *            <-----------+----------->
+ *          under_a       |       over_a
+ *                    precise_a
+ *                        |                          approx_b range
+ *                        |                    <-----------+----------->
+ *                        |                  under_b       |       over_b
+ *                        |                            precise_b
+ *                        |                                |
+ *                        |<------------ gap ------------->|
+ *  ----------------------+--------------------------------+-------------> values
+ *
+ * The two ranges are disjoint, and the comparison can return a definitive
+ * answer, only once the gap exceeds the two facing half-widths:
+ *
+ *   a below b:  gap > over_a + under_b   (a's upper edge, b's lower edge)
+ *   a above b:  gap > under_a + over_b   (a's lower edge, b's upper edge)
+ *
+ * When comparing against a plain value, the value has zero width, so the
+ * margins reduce to that single counter's under and over.
+ *
+ * accuracy_neg is used when delta < 0, and accuracy_pos is used when delta >= 0.
+ */
 static
 int compare_delta(long delta, unsigned long accuracy_neg, unsigned long accuracy_pos)
 {
@@ -494,6 +520,7 @@ int compare_delta(long delta, unsigned long accuracy_neg, unsigned long accuracy
  */
 int percpu_counter_tree_approximate_compare(struct percpu_counter_tree *a, struct percpu_counter_tree *b)
 {
+	/* See the range geometry above compare_delta(). */
 	return compare_delta(percpu_counter_tree_approximate_sum(a) - percpu_counter_tree_approximate_sum(b),
 			     a->approx_accuracy_range.over + b->approx_accuracy_range.under,
 			     a->approx_accuracy_range.under + b->approx_accuracy_range.over);
@@ -549,6 +576,7 @@ int percpu_counter_tree_precise_compare(struct percpu_counter_tree *a, struct pe
 	long delta = count_a - count_b;
 	int res;
 
+	/* See the range geometry above compare_delta(). */
 	res = compare_delta(delta,
 			    a->approx_accuracy_range.over + b->approx_accuracy_range.under,
 			    a->approx_accuracy_range.under + b->approx_accuracy_range.over);
