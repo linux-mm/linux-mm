@@ -483,7 +483,8 @@ int compare_delta(long delta, unsigned long accuracy_neg, unsigned long accuracy
  * answer if the counters are found to be either less than or greater
  * than the other. However, if the approximated comparison returns
  * 0, the counters respective sums are found to be within the two
- * counters accuracy range.
+ * counters accuracy range. The two counters are read independently;
+ * the result is not an atomic snapshot of both.
  *
  * Return:
  * * %0		- Counters @a and @b do not differ by more than the sum of their respective
@@ -532,7 +533,8 @@ EXPORT_SYMBOL_GPL(percpu_counter_tree_approximate_compare_value);
  * As an optimization, it uses the approximate counter comparison
  * to quickly compare counters which are far apart. Only cases where
  * counter sums are within the accuracy range require precise counter
- * sums.
+ * sums. The two counters are read independently; the result is not an
+ * atomic snapshot of both.
  *
  * Return:
  * * %0		- Counters are equal.
