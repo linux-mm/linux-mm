@@ -4075,6 +4075,11 @@ static void reset_ptenuma_scan(struct task_struct *p)
 	p->mm->numa_scan_offset = 0;
 }
 
+static bool vma_is_ro_file(struct vm_area_struct *vma)
+{
+	return vma->vm_file && (vma->vm_flags & (VM_READ | VM_WRITE)) == VM_READ;
+}
+
 static bool vma_is_accessed(struct mm_struct *mm, struct vm_area_struct *vma)
 {
 	unsigned long pids;
@@ -4211,6 +4216,8 @@ retry_pids:
 	}
 
 	for (; vma; vma = vma_next(&vmi)) {
+		bool ro_file;
+
 		if (!vma_migratable(vma) || !vma_policy_mof(vma) ||
 			is_vm_hugetlb_page(vma) || (vma->vm_flags & VM_MIXEDMAP)) {
 			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_UNSUITABLE);
@@ -4222,9 +4229,16 @@ retry_pids:
 		 * migrated as it is expected they are cache replicated. Avoid
 		 * hinting faults in read-only file-backed mappings or the vDSO
 		 * as migrating the pages will be of marginal benefit.
+		 *
+		 * Tiering still wants them.  A read-only mapping strands just
+		 * as much on the slow tier as any other, so scan it for slow
+		 * tier folios alone.  Nothing on the top tier is marked here,
+		 * in any mode.
 		 */
+		ro_file = vma_is_ro_file(vma);
 		if (!vma->vm_mm ||
-		    (vma->vm_file && (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ))) {
+		    (ro_file && !(sysctl_numa_balancing_mode &
+				  NUMA_BALANCING_MEMORY_TIERING))) {
 			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_SHARED_RO);
 			continue;
 		}
@@ -4302,7 +4316,7 @@ retry_pids:
 		 * VMA can cause others to become "permanently unaccessed" if a scan
 		 * cycle is consumed entirely by the large VMA.
 		 */
-		vma->numab_state->slow_only = false;
+		vma->numab_state->slow_only = ro_file;
 		if (!vma_pids_forced && !vma_is_accessed(mm, vma)) {
 			if (!(sysctl_numa_balancing_mode &
 			      NUMA_BALANCING_MEMORY_TIERING)) {
