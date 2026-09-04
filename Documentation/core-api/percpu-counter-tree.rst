@@ -43,6 +43,10 @@ This allows reading an approximated value at the root, which has a
 bounded accuracy (minimum/maximum possible precise sum range) determined
 by the tree topology.
 
+The bounded accuracy is a property of the settled tree. While updates are
+in flight the transient error can exceed it, bounded by the number of
+updaters and their increment size.
+
 Use Cases
 =========
 
