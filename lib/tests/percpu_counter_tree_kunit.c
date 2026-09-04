@@ -6,10 +6,13 @@
 #include <linux/kthread.h>
 #include <linux/wait.h>
 #include <linux/random.h>
+#include <linux/cpuhplock.h>
+#include <linux/slab.h>
+#include <linux/sched/task.h>
 
 struct multi_thread_test_data {
 	long increment;
-	int nr_inc;
+	unsigned int nr_inc;
 	int counter_index;
 };
 
@@ -30,6 +33,9 @@ static void complete_work(void)
 	if (atomic_dec_and_test(&kernel_threads_to_run))
 		wake_up(&kernel_threads_wq);
 }
+
+/* Random tasks test. */
+#define NR_RAND_TASKS	1000
 
 static void hpcc_print_info(struct kunit *test)
 {
@@ -67,18 +73,19 @@ static void check_counters(struct kunit *test)
 		/* Accuracy limits checks. */
 		percpu_counter_tree_approximate_accuracy_range(&counter[counter_index], &under_accuracy, &over_accuracy);
 
+		/*
+		 * under_accuracy and over_accuracy are unsigned long, so the
+		 * inner expression promotes to unsigned. Compute the difference
+		 * in unsigned and cast to signed for the comparison against 0.
+		 */
 		KUNIT_EXPECT_GE(test, (long)(approx_sum - (v - under_accuracy)), 0);
 		KUNIT_EXPECT_LE(test, (long)(approx_sum - (v + over_accuracy)), 0);
-		KUNIT_EXPECT_GT(test, (long)(approx_sum - (v - under_accuracy - 1)), 0);
-		KUNIT_EXPECT_LT(test, (long)(approx_sum - (v + over_accuracy + 1)), 0);
 
 		/* Precise min/max range check. */
 		percpu_counter_tree_approximate_min_max_range(approx_sum, under_accuracy, over_accuracy, &precise_min, &precise_max);
 
 		KUNIT_EXPECT_GE(test, v - precise_min, 0);
 		KUNIT_EXPECT_LE(test, v - precise_max, 0);
-		KUNIT_EXPECT_GT(test, v - (precise_min - 1), 0);
-		KUNIT_EXPECT_LT(test, v - (precise_max + 1), 0);
 	}
 	/* Compare each counter with the second counter. */
 	KUNIT_EXPECT_EQ(test, percpu_counter_tree_precise_sum(&counter[0]), percpu_counter_tree_precise_sum(&counter[1]));
@@ -96,18 +103,26 @@ static int multi_thread_worker_fn(void *data)
 	return 0;
 }
 
-static void test_run_on_specific_cpu(struct kunit *test, int target_cpu, int counter_index, unsigned int nr_inc, long increment)
+static struct task_struct *test_run_on_specific_cpu(int target_cpu, int counter_index, unsigned int nr_inc, long increment)
 {
-	struct task_struct *task;
 	struct multi_thread_test_data *td = kzalloc(sizeof(struct multi_thread_test_data), GFP_KERNEL);
+	struct task_struct *task;
 
-	KUNIT_EXPECT_PTR_NE(test, td, NULL);
+	if (!td)
+		return NULL;
 	td->increment = increment;
 	td->nr_inc = nr_inc;
 	td->counter_index = counter_index;
 	atomic_inc(&kernel_threads_to_run);
-	task = kthread_run_on_cpu(multi_thread_worker_fn, td, target_cpu, "kunit_multi_thread_worker");
-	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, task);
+	task = kthread_create_on_cpu(multi_thread_worker_fn, td, target_cpu, "kunit_multi_thread_worker");
+	if (IS_ERR_OR_NULL(task)) {
+		complete_work();
+		kfree(td);
+		return task;
+	}
+	get_task_struct(task);
+	wake_up_process(task);
+	return task;
 }
 
 static void init_kthreads(void)
@@ -115,6 +130,9 @@ static void init_kthreads(void)
 	atomic_set(&kernel_threads_to_run, 1);
 }
 
+/*
+ * The caller needs to wait for work completion _before_ stopping kthreads.
+ */
 static void fini_kthreads(void)
 {
 	/* Release our own reference. */
@@ -129,23 +147,27 @@ static void test_sync_kthreads(void)
 	init_kthreads();
 }
 
-static void init_counters(struct kunit *test, unsigned long batch_size)
+static int init_counters(unsigned long batch_size)
 {
 	int i, ret;
 
-	items = kzalloc(percpu_counter_tree_items_size() * NR_COUNTERS, GFP_KERNEL);
-	KUNIT_EXPECT_PTR_NE(test, items, NULL);
+	items = kvcalloc(NR_COUNTERS, percpu_counter_tree_items_size(), GFP_KERNEL);
+	if (!items)
+		return -ENOMEM;
 	ret = percpu_counter_tree_init_many(counter, items, NR_COUNTERS, batch_size, GFP_KERNEL);
-	KUNIT_EXPECT_EQ(test, ret, 0);
-
+	if (ret) {
+		kvfree(items);
+		return ret;
+	}
 	for (i = 0; i < NR_COUNTERS; i++)
 		atomic_long_set(&global_counter[i], 0);
+	return 0;
 }
 
 static void fini_counters(void)
 {
 	percpu_counter_tree_destroy_many(counter, NR_COUNTERS);
-	kfree(items);
+	kvfree(items);
 }
 
 enum up_test_inc_type {
@@ -164,11 +186,16 @@ static void do_hpcc_test_single_thread(struct kunit *test, int _cpu0, int _cpu1,
 	unsigned long batch_size_order = 5;
 	int cpu0 = _cpu0;
 	int cpu1 = _cpu1;
-	int i;
+	int ret, i;
 
-	init_counters(test, 1UL << batch_size_order);
+	ret = init_counters(1UL << batch_size_order);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		return;
 	init_kthreads();
+	cpus_read_lock();
 	for (i = 0; i < 10000; i++) {
+		struct task_struct *task;
 		long increment;
 
 		switch (type) {
@@ -181,18 +208,34 @@ static void do_hpcc_test_single_thread(struct kunit *test, int _cpu0, int _cpu1,
 		case INC_RANDOM:
 			increment = (long) get_random_long() % 50000;
 			break;
+		default:
+			WARN_ON_ONCE(1);
+			increment = 0;
 		}
 		if (_cpu0 < 0)
 			cpu0 = cpumask_any_distribute(cpu_online_mask);
 		if (_cpu1 < 0)
 			cpu1 = cpumask_any_distribute(cpu_online_mask);
-		test_run_on_specific_cpu(test, cpu0, 0, 1, increment);
+		task = test_run_on_specific_cpu(cpu0, 0, 1, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task);
+		if (IS_ERR_OR_NULL(task)) {
+			fini_kthreads();
+			goto end;
+		}
 		test_sync_kthreads();
-		test_run_on_specific_cpu(test, cpu1, 1, 1, increment);
+		kthread_stop_put(task);
+		task = test_run_on_specific_cpu(cpu1, 1, 1, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task);
+		if (IS_ERR_OR_NULL(task)) {
+			fini_kthreads();
+			goto end;
+		}
 		test_sync_kthreads();
+		kthread_stop_put(task);
 		check_counters(test);
 	}
-	fini_kthreads();
+end:
+	cpus_read_unlock();
 	fini_counters();
 }
 
@@ -225,62 +268,168 @@ static void hpcc_test_single_thread_random(struct kunit *test)
 
 static void do_hpcc_multi_thread_increment_each_cpu(struct kunit *test, unsigned long batch_size, unsigned int nr_inc, long increment)
 {
-	int cpu;
+	struct task_struct *(*task)[NR_COUNTERS];
+	int ret, cpu;
 
-	init_counters(test, batch_size);
+	task = kvcalloc(nr_cpu_ids, sizeof(*task), GFP_KERNEL);
+	KUNIT_EXPECT_NOT_NULL(test, task);
+	if (!task)
+		return;
+	ret = init_counters(batch_size);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto end;
 	init_kthreads();
+	cpus_read_lock();
 	for_each_online_cpu(cpu) {
-		test_run_on_specific_cpu(test, cpu, 0, nr_inc, increment);
-		test_run_on_specific_cpu(test, cpu, 1, nr_inc, increment);
+		task[cpu][0] = test_run_on_specific_cpu(cpu, 0, nr_inc, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[cpu][0]);
+		if (IS_ERR_OR_NULL(task[cpu][0]))
+			break;
+		task[cpu][1] = test_run_on_specific_cpu(cpu, 1, nr_inc, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[cpu][1]);
+		if (IS_ERR_OR_NULL(task[cpu][1]))
+			break;
 	}
 	fini_kthreads();
+	for_each_online_cpu(cpu) {
+		if (!IS_ERR_OR_NULL(task[cpu][0]))
+			kthread_stop_put(task[cpu][0]);
+		if (!IS_ERR_OR_NULL(task[cpu][1]))
+			kthread_stop_put(task[cpu][1]);
+	}
+	cpus_read_unlock();
 	check_counters(test);
 	fini_counters();
+end:
+	kvfree(task);
 }
 
 static void do_hpcc_multi_thread_increment_even_cpus(struct kunit *test, unsigned long batch_size, unsigned int nr_inc, long increment)
 {
-	int cpu;
+	struct task_struct *(*task)[NR_COUNTERS];
+	int ret, cpu;
 
-	init_counters(test, batch_size);
+	task = kvcalloc(nr_cpu_ids, sizeof(*task), GFP_KERNEL);
+	KUNIT_EXPECT_NOT_NULL(test, task);
+	if (!task)
+		return;
+	ret = init_counters(batch_size);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto end;
 	init_kthreads();
+	cpus_read_lock();
 	for_each_online_cpu(cpu) {
-		test_run_on_specific_cpu(test, cpu, 0, nr_inc, increment);
-		test_run_on_specific_cpu(test, cpu & ~1, 1, nr_inc, increment); /* even cpus. */
+		/*
+		 * Funnel pairs of CPU indexes to their associated even index.
+		 *
+		 *   Map 0 and 1 -> index 0
+		 *   Map 2 and 3 -> index 2 and so on.
+		 */
+		int even_cpu = cpu & ~1;
+
+		if (!cpumask_test_cpu(even_cpu, cpu_online_mask))
+			continue;
+		task[cpu][0] = test_run_on_specific_cpu(cpu, 0, nr_inc, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[cpu][0]);
+		if (IS_ERR_OR_NULL(task[cpu][0]))
+			break;
+		task[cpu][1] = test_run_on_specific_cpu(even_cpu, 1, nr_inc, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[cpu][1]);
+		if (IS_ERR_OR_NULL(task[cpu][1]))
+			break;
 	}
 	fini_kthreads();
+	for_each_online_cpu(cpu) {
+		if (!IS_ERR_OR_NULL(task[cpu][0]))
+			kthread_stop_put(task[cpu][0]);
+		if (!IS_ERR_OR_NULL(task[cpu][1]))
+			kthread_stop_put(task[cpu][1]);
+	}
+	cpus_read_unlock();
 	check_counters(test);
 	fini_counters();
+end:
+	kvfree(task);
 }
 
 static void do_hpcc_multi_thread_increment_single_cpu(struct kunit *test, unsigned long batch_size, unsigned int nr_inc, long increment)
 {
-	int cpu;
+	struct task_struct *(*task)[NR_COUNTERS];
+	int ret, cpu;
 
-	init_counters(test, batch_size);
+	task = kvcalloc(nr_cpu_ids, sizeof(*task), GFP_KERNEL);
+	KUNIT_EXPECT_NOT_NULL(test, task);
+	if (!task)
+		return;
+	ret = init_counters(batch_size);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto end;
 	init_kthreads();
+	cpus_read_lock();
 	for_each_online_cpu(cpu) {
-		test_run_on_specific_cpu(test, cpu, 0, nr_inc, increment);
-		test_run_on_specific_cpu(test, cpumask_first(cpu_online_mask), 1, nr_inc, increment);
+		task[cpu][0] = test_run_on_specific_cpu(cpu, 0, nr_inc, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[cpu][0]);
+		if (IS_ERR_OR_NULL(task[cpu][0]))
+			break;
+		task[cpu][1] = test_run_on_specific_cpu(cpumask_first(cpu_online_mask), 1, nr_inc, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[cpu][1]);
+		if (IS_ERR_OR_NULL(task[cpu][1]))
+			break;
 	}
 	fini_kthreads();
+	for_each_online_cpu(cpu) {
+		if (!IS_ERR_OR_NULL(task[cpu][0]))
+			kthread_stop_put(task[cpu][0]);
+		if (!IS_ERR_OR_NULL(task[cpu][1]))
+			kthread_stop_put(task[cpu][1]);
+	}
+	cpus_read_unlock();
 	check_counters(test);
 	fini_counters();
+end:
+	kvfree(task);
 }
 
 static void do_hpcc_multi_thread_increment_random_cpu(struct kunit *test, unsigned long batch_size, unsigned int nr_inc, long increment)
 {
-	int cpu;
+	struct task_struct *(*task)[NR_COUNTERS];
+	int ret, cpu;
 
-	init_counters(test, batch_size);
+	task = kvcalloc(nr_cpu_ids, sizeof(*task), GFP_KERNEL);
+	KUNIT_EXPECT_NOT_NULL(test, task);
+	if (!task)
+		return;
+	ret = init_counters(batch_size);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto end;
 	init_kthreads();
+	cpus_read_lock();
 	for_each_online_cpu(cpu) {
-		test_run_on_specific_cpu(test, cpu, 0, nr_inc, increment);
-		test_run_on_specific_cpu(test, cpumask_any_distribute(cpu_online_mask), 1, nr_inc, increment);
+		task[cpu][0] = test_run_on_specific_cpu(cpu, 0, nr_inc, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[cpu][0]);
+		if (IS_ERR_OR_NULL(task[cpu][0]))
+			break;
+		task[cpu][1] = test_run_on_specific_cpu(cpumask_any_distribute(cpu_online_mask), 1, nr_inc, increment);
+		KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[cpu][1]);
+		if (IS_ERR_OR_NULL(task[cpu][1]))
+			break;
 	}
 	fini_kthreads();
+	for_each_online_cpu(cpu) {
+		if (!IS_ERR_OR_NULL(task[cpu][0]))
+			kthread_stop_put(task[cpu][0]);
+		if (!IS_ERR_OR_NULL(task[cpu][1]))
+			kthread_stop_put(task[cpu][1]);
+	}
+	cpus_read_unlock();
 	check_counters(test);
 	fini_counters();
+end:
+	kvfree(task);
 }
 
 static void hpcc_test_multi_thread_batch_increment(struct kunit *test)
@@ -305,25 +454,50 @@ static void hpcc_test_multi_thread_batch_increment(struct kunit *test)
 
 static void hpcc_test_multi_thread_random_walk(struct kunit *test)
 {
+	struct task_struct *(*task)[NR_COUNTERS];
 	unsigned long batch_size_order = 5;
 	int loop;
 
+	task = kvcalloc(NR_RAND_TASKS, sizeof(*task), GFP_KERNEL);
+	KUNIT_EXPECT_NOT_NULL(test, task);
+	if (!task)
+		return;
 	for (loop = 0; loop < 100; loop++) {
-		int i;
+		int ret, i;
 
-		init_counters(test, 1UL << batch_size_order);
+		memset(task, 0, NR_RAND_TASKS * sizeof(*task));
+		ret = init_counters(1UL << batch_size_order);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		if (ret)
+			goto end;
 		init_kthreads();
-		for (i = 0; i < 1000; i++) {
+		cpus_read_lock();
+		for (i = 0; i < NR_RAND_TASKS; i++) {
 			long increment = (long) get_random_long() % 512;
 			unsigned int nr_inc = ((unsigned long) get_random_long()) % 1024;
 
-			test_run_on_specific_cpu(test, cpumask_any_distribute(cpu_online_mask), 0, nr_inc, increment);
-			test_run_on_specific_cpu(test, cpumask_any_distribute(cpu_online_mask), 1, nr_inc, increment);
+			task[i][0] = test_run_on_specific_cpu(cpumask_any_distribute(cpu_online_mask), 0, nr_inc, increment);
+			KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[i][0]);
+			if (IS_ERR_OR_NULL(task[i][0]))
+				break;
+			task[i][1] = test_run_on_specific_cpu(cpumask_any_distribute(cpu_online_mask), 1, nr_inc, increment);
+			KUNIT_EXPECT_NOT_ERR_OR_NULL(test, task[i][1]);
+			if (IS_ERR_OR_NULL(task[i][1]))
+				break;
 		}
 		fini_kthreads();
+		for (i = 0; i < NR_RAND_TASKS; i++) {
+			if (!IS_ERR_OR_NULL(task[i][0]))
+				kthread_stop_put(task[i][0]);
+			if (!IS_ERR_OR_NULL(task[i][1]))
+				kthread_stop_put(task[i][1]);
+		}
+		cpus_read_unlock();
 		check_counters(test);
 		fini_counters();
 	}
+end:
+	kvfree(task);
 }
 
 static void hpcc_test_init_one(struct kunit *test)
@@ -333,11 +507,16 @@ static void hpcc_test_init_one(struct kunit *test)
 	int ret;
 
 	counter_items = kzalloc(percpu_counter_tree_items_size(), GFP_KERNEL);
-	KUNIT_EXPECT_PTR_NE(test, counter_items, NULL);
+	KUNIT_EXPECT_NOT_NULL(test, counter_items);
+	if (!counter_items)
+		return;
 	ret = percpu_counter_tree_init(&pct, counter_items, 32, GFP_KERNEL);
 	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto end;
 
 	percpu_counter_tree_destroy(&pct);
+end:
 	kfree(counter_items);
 }
 
@@ -352,9 +531,13 @@ static void hpcc_test_set(struct kunit *test)
 	int i, ret;
 
 	counter_items = kzalloc(percpu_counter_tree_items_size(), GFP_KERNEL);
-	KUNIT_EXPECT_PTR_NE(test, counter_items, NULL);
+	KUNIT_EXPECT_NOT_NULL(test, counter_items);
+	if (!counter_items)
+		return;
 	ret = percpu_counter_tree_init(&pct, counter_items, 32, GFP_KERNEL);
 	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto end;
 
 	for (i = 0; i < ARRAY_SIZE(values); i++) {
 		long v = values[i];
@@ -373,6 +556,7 @@ static void hpcc_test_set(struct kunit *test)
 	}
 
 	percpu_counter_tree_destroy(&pct);
+end:
 	kfree(counter_items);
 }
 
