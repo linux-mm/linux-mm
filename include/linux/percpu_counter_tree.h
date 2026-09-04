@@ -93,7 +93,8 @@ struct percpu_counter_tree {
 	 * The "under" accuracy is larger than the "over" accuracy because the negative range of a
 	 * two's complement signed integer is one unit larger than the positive range. This delta
 	 * is summed for each tree item, which leads to a significantly larger "under" accuracy range
-	 * compared to the "over" accuracy range.
+	 * compared to the "over" accuracy range. The accuracy range is a bound on a settled counter:
+	 * one with no update in progress.
 	 */
 	struct {
 		unsigned long under;
@@ -169,6 +170,8 @@ long percpu_counter_tree_approximate_sum(struct percpu_counter_tree *counter)
  * slightly larger than the "over" range.
  * Those values are derived from the hardware topology and the counter tree batch size.
  * They are invariant for a given counter tree.
+ * The bounds describe a settled counter: one with no update in progress.
+ * An update in flight between its per-CPU increment and its carry propagation is not covered.
  * Using this function should not be typically required, see the following functions instead:
  * * percpu_counter_tree_approximate_compare(),
  * * percpu_counter_tree_approximate_compare_value(),
@@ -341,8 +344,9 @@ long percpu_counter_tree_precise_sum_positive(struct percpu_counter_tree *counte
  * @precise_min: Minimum possible value for precise sum (output).
  * @precise_max: Maximum possible value for precise sum (output).
  *
- * Calculate the minimum and maximum precise values for a given
- * approximation and (under, over) accuracy range.
+ * Calculate the minimum and maximum precise values for a given approximation
+ * and (under, over) accuracy range. The accuracy range is a bound on a settled
+ * tree: one with no update in progress.
  *
  * The range of the approximation as a function of the precise sum is expressed as:
  *
