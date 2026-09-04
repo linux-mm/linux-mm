@@ -458,6 +458,17 @@ long percpu_counter_tree_precise_sum(struct percpu_counter_tree *counter)
 EXPORT_SYMBOL_GPL(percpu_counter_tree_precise_sum);
 
 /*
+ * The comparison between counters is on the wrapped difference. It is valid
+ * only when the two counters differ by less than LONG_MAX, and results are
+ * undefined beyond that.
+ */
+static inline
+long wrapped_delta(long a, long b)
+{
+	return (long)((unsigned long)a - (unsigned long)b);
+}
+
+/*
  * Each counter's approximation lies within [precise - under, precise + over]:
  *
  *                  approx_a range
@@ -504,13 +515,15 @@ int compare_delta(long delta, unsigned long accuracy_neg, unsigned long accuracy
  * @a: First counter to compare.
  * @b: Second counter to compare.
  *
- * Evaluate an approximate comparison of two counter trees.
- * This approximation comparison is fast, and provides an accurate
- * answer if the counters are found to be either less than or greater
- * than the other. However, if the approximated comparison returns
- * 0, the counters respective sums are found to be within the two
- * counters accuracy range. The two counters are read independently;
- * the result is not an atomic snapshot of both.
+ * Evaluate an approximate comparison of two counter trees. This approximation
+ * comparison is fast, and provides an accurate answer if the counters are
+ * found to be either less than or greater than the other. However, if the
+ * approximated comparison returns 0, the counters respective sums are found to
+ * be within the two counters accuracy range. The two counters are read
+ * independently; the result is not an atomic snapshot of both.
+ * The comparison between counters is on the wrapped difference. It is valid
+ * only when the two counters differ by less than LONG_MAX, and results are
+ * undefined beyond that.
  *
  * Return:
  * * %0		- Counters @a and @b do not differ by more than the sum of their respective
@@ -521,7 +534,8 @@ int compare_delta(long delta, unsigned long accuracy_neg, unsigned long accuracy
 int percpu_counter_tree_approximate_compare(struct percpu_counter_tree *a, struct percpu_counter_tree *b)
 {
 	/* See the range geometry above compare_delta(). */
-	return compare_delta(percpu_counter_tree_approximate_sum(a) - percpu_counter_tree_approximate_sum(b),
+	return compare_delta(wrapped_delta(percpu_counter_tree_approximate_sum(a),
+					   percpu_counter_tree_approximate_sum(b)),
 			     a->approx_accuracy_range.over + b->approx_accuracy_range.under,
 			     a->approx_accuracy_range.under + b->approx_accuracy_range.over);
 }
@@ -537,6 +551,9 @@ EXPORT_SYMBOL_GPL(percpu_counter_tree_approximate_compare);
  * answer if the counter is found to be either less than or greater
  * than the value. However, if the approximated comparison returns
  * 0, the value is within the counter accuracy range.
+ * The comparison between counters is on the wrapped difference. It is valid
+ * only when @v and the counter differ by less than LONG_MAX, and results are
+ * undefined beyond that.
  *
  * Return:
  * * %0		- The value @v is within the accuracy range of the counter.
@@ -545,7 +562,7 @@ EXPORT_SYMBOL_GPL(percpu_counter_tree_approximate_compare);
  */
 int percpu_counter_tree_approximate_compare_value(struct percpu_counter_tree *counter, long v)
 {
-	return compare_delta(v - percpu_counter_tree_approximate_sum(counter),
+	return compare_delta(wrapped_delta(v, percpu_counter_tree_approximate_sum(counter)),
 			     counter->approx_accuracy_range.under,
 			     counter->approx_accuracy_range.over);
 }
@@ -556,12 +573,14 @@ EXPORT_SYMBOL_GPL(percpu_counter_tree_approximate_compare_value);
  * @a: First counter to compare.
  * @b: Second counter to compare.
  *
- * Evaluate a precise comparison of two counter trees.
- * As an optimization, it uses the approximate counter comparison
- * to quickly compare counters which are far apart. Only cases where
- * counter sums are within the accuracy range require precise counter
- * sums. The two counters are read independently; the result is not an
- * atomic snapshot of both.
+ * Evaluate a precise comparison of two counter trees. As an optimization, it
+ * uses the approximate counter comparison to quickly compare counters which
+ * are far apart. Only cases where counter sums are within the accuracy range
+ * require precise counter sums. The two counters are read independently; the
+ * result is not an atomic snapshot of both.
+ * The comparison between counters is on the wrapped difference. It is valid
+ * only when the two counters differ by less than LONG_MAX, and results are
+ * undefined beyond that.
  *
  * Return:
  * * %0		- Counters are equal.
@@ -573,7 +592,7 @@ int percpu_counter_tree_precise_compare(struct percpu_counter_tree *a, struct pe
 	long count_a = percpu_counter_tree_approximate_sum(a),
 	     count_b = percpu_counter_tree_approximate_sum(b);
 	unsigned long accuracy_a, accuracy_b;
-	long delta = count_a - count_b;
+	long delta = wrapped_delta(count_a, count_b);
 	int res;
 
 	/* See the range geometry above compare_delta(). */
@@ -597,7 +616,7 @@ int percpu_counter_tree_precise_compare(struct percpu_counter_tree *a, struct pe
 	}
 	if (accuracy_b < accuracy_a) {
 		count_a = percpu_counter_tree_precise_sum(a);
-		res = compare_delta(count_a - count_b,
+		res = compare_delta(wrapped_delta(count_a, count_b),
 				    b->approx_accuracy_range.under,
 				    b->approx_accuracy_range.over);
 		if (res)
@@ -606,7 +625,7 @@ int percpu_counter_tree_precise_compare(struct percpu_counter_tree *a, struct pe
 		count_b = percpu_counter_tree_precise_sum(b);
 	} else {
 		count_b = percpu_counter_tree_precise_sum(b);
-		res = compare_delta(count_a - count_b,
+		res = compare_delta(wrapped_delta(count_a, count_b),
 				    a->approx_accuracy_range.over,
 				    a->approx_accuracy_range.under);
 		if (res)
@@ -614,9 +633,10 @@ int percpu_counter_tree_precise_compare(struct percpu_counter_tree *a, struct pe
 		/* Precise sum of second counter is required. */
 		count_a = percpu_counter_tree_precise_sum(a);
 	}
-	if (count_a - count_b < 0)
+	delta = wrapped_delta(count_a, count_b);
+	if (delta < 0)
 		return -1;
-	if (count_a - count_b > 0)
+	if (delta > 0)
 		return 1;
 	return 0;
 }
@@ -627,11 +647,13 @@ EXPORT_SYMBOL_GPL(percpu_counter_tree_precise_compare);
  * @counter: Counter to compare.
  * @v: Value to compare.
  *
- * Evaluate a precise comparison of a counter tree against a given value.
- * As an optimization, it uses the approximate counter comparison
- * to quickly identify whether the counter and value are far apart.
- * Only cases where the value is within the counter accuracy range
- * require a precise counter sum.
+ * Evaluate a precise comparison of a counter tree against a given value. As
+ * an optimization, it uses the approximate counter comparison to quickly
+ * identify whether the counter and value are far apart. Only cases where the
+ * value is within the counter accuracy range require a precise counter sum.
+ * The comparison between counters is on the wrapped difference. It is valid
+ * only when @v and the counter differ by less than LONG_MAX, and results are
+ * undefined beyond that.
  *
  * Return:
  * * %0		- The value @v is equal to the counter.
@@ -640,10 +662,10 @@ EXPORT_SYMBOL_GPL(percpu_counter_tree_precise_compare);
  */
 int percpu_counter_tree_precise_compare_value(struct percpu_counter_tree *counter, long v)
 {
-	long count = percpu_counter_tree_approximate_sum(counter);
+	long count = percpu_counter_tree_approximate_sum(counter), delta;
 	int res;
 
-	res = compare_delta(v - count,
+	res = compare_delta(wrapped_delta(v, count),
 			    counter->approx_accuracy_range.under,
 			    counter->approx_accuracy_range.over);
 	/* The values are distanced enough for an accurate approximated comparison. */
@@ -652,9 +674,10 @@ int percpu_counter_tree_precise_compare_value(struct percpu_counter_tree *counte
 
 	/* Precise sum is required. */
 	count = percpu_counter_tree_precise_sum(counter);
-	if (v - count < 0)
+	delta = wrapped_delta(v, count);
+	if (delta < 0)
 		return -1;
-	if (v - count > 0)
+	if (delta > 0)
 		return 1;
 	return 0;
 }
