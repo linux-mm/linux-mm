@@ -555,7 +555,7 @@ void reclaim_throttle(pg_data_t *pgdat, enum vmscan_throttle_state reason)
 	 * writeback to a slow device to excessive referenced folios at the tail
 	 * of the inactive LRU.
 	 */
-	switch(reason) {
+	switch (reason) {
 	case VMSCAN_THROTTLE_WRITEBACK:
 		timeout = HZ/10;
 
@@ -1554,6 +1554,7 @@ activate_locked:
 		VM_BUG_ON_FOLIO(folio_test_active(folio), folio);
 		if (!folio_test_mlocked(folio)) {
 			int type = folio_is_file_lru(folio);
+
 			folio_set_active(folio);
 			stat->nr_activate[type] += nr_pages;
 			count_memcg_folio_events(folio, PGACTIVATE, nr_pages);
@@ -2098,8 +2099,8 @@ static void shrink_active_list(unsigned long nr_to_scan,
 	LIST_HEAD(l_hold);	/* The folios which were snipped off */
 	LIST_HEAD(l_active);
 	LIST_HEAD(l_inactive);
-	unsigned nr_deactivate, nr_activate;
-	unsigned nr_rotated = 0;
+	unsigned int nr_deactivate, nr_activate;
+	unsigned int nr_rotated = 0;
 	bool file = is_file_lru(lru);
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
@@ -2639,7 +2640,7 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	/*
 	 * If there is enough inactive page cache, we do not reclaim
 	 * anything from the anonymous working right now to make sure
-         * a streaming file access pattern doesn't cause swapping.
+	 * a streaming file access pattern doesn't cause swapping.
 	 */
 	if (sc->cache_trim_mode) {
 		scan_balance = SCAN_FILE;
@@ -3455,6 +3456,7 @@ static bool get_next_vma(unsigned long mask, unsigned long size, struct mm_walk 
 {
 	unsigned long start = round_up(*vm_end, size);
 	unsigned long end = (start | ~mask) + 1;
+
 	VMA_ITERATOR(vmi, args->mm, start);
 
 	VM_WARN_ON_ONCE(mask & size);
@@ -7785,7 +7787,7 @@ static int __init kswapd_init(void)
 	int nid;
 
 	for_each_node_state(nid, N_MEMORY)
- 		kswapd_run(nid);
+		kswapd_run(nid);
 	register_sysctl_init("vm", vmscan_sysctl_table);
 	return 0;
 }
