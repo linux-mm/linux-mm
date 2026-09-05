@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * mm/mmap.c
  *
  * Written by obz.
  *
@@ -50,9 +49,9 @@
 #include <linux/memfd.h>
 
 #include <linux/uaccess.h>
-#include <asm/cacheflush.h>
+#include <linux/cacheflush.h>
 #include <asm/tlb.h>
-#include <asm/mmu_context.h>
+#include <linux/mmu_context.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/mmap.h>
@@ -526,9 +525,9 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			 * And don't attempt to combine with hugetlb for now.
 			 */
 			if (flags & (MAP_LOCKED | MAP_HUGETLB))
-			        return -EINVAL;
+				return -EINVAL;
 			if (vma_flags_can_grow(&vma_flags))
-			        return -EINVAL;
+				return -EINVAL;
 
 			/*
 			 * If the pages can be dropped, then it doesn't make
@@ -832,6 +831,7 @@ __get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 				  = NULL;
 
 	unsigned long error = arch_mmap_check(addr, len, flags);
+
 	if (error)
 		return error;
 
@@ -942,6 +942,7 @@ find_vma_prev(struct mm_struct *mm, unsigned long addr,
 			struct vm_area_struct **pprev)
 {
 	struct vm_area_struct *vma;
+
 	VMA_ITERATOR(vmi, mm, addr);
 
 	vma = vma_iter_load(&vmi);
@@ -1017,12 +1018,12 @@ struct vm_area_struct *find_extend_vma_locked(struct mm_struct *mm, unsigned lon
 
 #if defined(CONFIG_STACK_GROWSUP)
 
-#define vma_expand_up(vma,addr) expand_upwards(vma, addr)
+#define vma_expand_up(vma, addr) expand_upwards(vma, addr)
 #define vma_expand_down(vma, addr) (-EFAULT)
 
 #else
 
-#define vma_expand_up(vma,addr) (-EFAULT)
+#define vma_expand_up(vma, addr) (-EFAULT)
 #define vma_expand_down(vma, addr) expand_downwards(vma, addr)
 
 #endif
@@ -1227,6 +1228,7 @@ int vm_brk_flags(unsigned long addr, unsigned long request, bool is_exec)
 	int ret;
 	bool populate;
 	LIST_HEAD(uf);
+
 	VMA_ITERATOR(vmi, mm, addr);
 
 	len = PAGE_ALIGN(request);
@@ -1290,6 +1292,7 @@ void exit_mmap(struct mm_struct *mm)
 	struct mmu_gather tlb;
 	struct vm_area_struct *vma;
 	unsigned long nr_accounted = 0;
+
 	VMA_ITERATOR(vmi, mm, 0);
 	struct unmap_desc unmap;
 
@@ -1454,6 +1457,7 @@ static vm_fault_t special_mapping_fault(struct vm_fault *vmf)
 
 	if (*pages) {
 		struct page *page = *pages;
+
 		get_page(page);
 		vmf->page = page;
 		return 0;
@@ -1711,6 +1715,7 @@ __latent_entropy int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
 	int retval;
 	unsigned long charge = 0;
 	LIST_HEAD(uf);
+
 	VMA_ITERATOR(vmi, mm, 0);
 
 	if (mmap_write_lock_killable(oldmm))
