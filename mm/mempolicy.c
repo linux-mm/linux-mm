@@ -1314,6 +1314,10 @@ static long migrate_to_node(struct mm_struct *mm, int source, int dest,
 		.gfp_mask = GFP_HIGHUSER_MOVABLE | __GFP_THISNODE,
 		.reason = MR_SYSCALL,
 	};
+	const struct migrate_control ctl = {
+		.mode = MIGRATE_SYNC,
+		.reason = MR_SYSCALL,
+	};
 
 	nodes_clear(nmask);
 	node_set(source, nmask);
@@ -1339,7 +1343,7 @@ static long migrate_to_node(struct mm_struct *mm, int source, int dest,
 
 	if (!list_empty(&pagelist)) {
 		err = migrate_pages(&pagelist, alloc_migration_target, NULL,
-			(unsigned long)&mtc, MIGRATE_SYNC, MR_SYSCALL, NULL);
+			(unsigned long)&mtc, &ctl, NULL);
 		if (err)
 			putback_movable_pages(&pagelist);
 	}
@@ -1518,6 +1522,10 @@ static long do_mbind(unsigned long start, unsigned long len,
 	long err;
 	long nr_failed;
 	LIST_HEAD(pagelist);
+	const struct migrate_control ctl = {
+		.mode = MIGRATE_SYNC,
+		.reason = MR_MEMPOLICY_MBIND,
+	};
 
 	if (flags & ~(unsigned long)MPOL_MF_VALID)
 		return -EINVAL;
@@ -1635,8 +1643,7 @@ static long do_mbind(unsigned long start, unsigned long len,
 	if (!err && !list_empty(&pagelist)) {
 		nr_failed |= migrate_pages(&pagelist,
 				alloc_migration_target_by_mpol, NULL,
-				(unsigned long)&mmpol, MIGRATE_SYNC,
-				MR_MEMPOLICY_MBIND, NULL);
+				(unsigned long)&mmpol, &ctl, NULL);
 	}
 
 	if (nr_failed && (flags & MPOL_MF_STRICT))
