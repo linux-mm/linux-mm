@@ -43,6 +43,7 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/dax.h>
+#include <linux/efi.h>
 #include <linux/ksm.h>
 #include <linux/rmap.h>
 #include <linux/export.h>
@@ -94,6 +95,36 @@ void num_poisoned_pages_sub(unsigned long pfn, long i)
 	atomic_long_sub(i, &num_poisoned_pages);
 	if (pfn != -1UL)
 		memblk_nr_poison_sub(pfn, i);
+}
+
+static void update_per_node_mf_stats(unsigned long pfn, enum mf_result result);
+
+bool __init hwpoison_boot_pfn(unsigned long pfn)
+{
+	struct page *page = pfn_to_online_page(pfn);
+
+	if (!page || PageHWPoison(page))
+		return false;
+
+	if (is_free_buddy_page(page)) {
+		if (!take_page_off_buddy(page))
+			return false;
+		page_ref_inc(page);
+	} else if (!PageReserved(page)) {
+		return false;
+	}
+
+	SetPageHWPoison(page);
+	update_per_node_mf_stats(pfn, MF_RECOVERED);
+	atomic_long_inc(&num_poisoned_pages);
+
+	return true;
+}
+
+/* The EFI table is the only source of inherited poison today. */
+void __init hwpoison_init_boot(void)
+{
+	efi_offline_poisoned_memory();
 }
 
 /**
@@ -1286,6 +1317,8 @@ static int action_result(unsigned long pfn, enum mf_action_page_type type,
 	if (type != MF_MSG_ALREADY_POISONED && type != MF_MSG_PFN_MAP) {
 		num_poisoned_pages_inc(pfn);
 		update_per_node_mf_stats(pfn, result);
+		/* Only hard offlines are carried over to the next kernel. */
+		efi_hwpoison_record_pfn(pfn);
 	}
 
 	pr_err("%#lx: recovery action for %s: %s\n",
