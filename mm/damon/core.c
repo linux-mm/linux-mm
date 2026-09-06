@@ -459,12 +459,6 @@ static void damon_destroy_region(struct damon_region *r,
 	damon_free_region(r);
 }
 
-static bool damon_is_last_region(struct damon_region *r,
-		struct damon_target *t)
-{
-	return list_is_last(&r->list, &t->regions_list);
-}
-
 /**
  * damon_probe_hits_wsum() - Returns probe hits weighted sum of a region.
  * @r:		region to get the weighted sum of.
@@ -2750,6 +2744,17 @@ update_stat:
 	damos_update_stat(s, sz, sz_applied, sz_ops_filter_passed);
 }
 
+static bool damos_is_deactivated(struct damos *s)
+{
+	if (!s->wmarks.activated)
+		return true;
+	if (s->max_nr_snapshots &&
+			s->max_nr_snapshots <= s->stat.nr_snapshots)
+		return true;
+
+	return false;
+}
+
 static void damon_do_apply_schemes(struct damon_ctx *c,
 				   struct damon_target *t,
 				   struct damon_region *r)
@@ -2762,7 +2767,7 @@ static void damon_do_apply_schemes(struct damon_ctx *c,
 		if (time_before(c->passed_sample_intervals, s->next_apply_sis))
 			continue;
 
-		if (!s->wmarks.activated)
+		if (damos_is_deactivated(s))
 			continue;
 
 		/* Check the quota */
@@ -2772,15 +2777,10 @@ static void damon_do_apply_schemes(struct damon_ctx *c,
 		if (damos_skip_charged_region(t, r, s, c->min_region_sz))
 			continue;
 
-		if (s->max_nr_snapshots &&
-				s->max_nr_snapshots <= s->stat.nr_snapshots)
-			continue;
-
 		if (damos_valid_target(c, r, s))
 			damos_apply_scheme(c, t, r, s);
 
-		if (damon_is_last_region(r, t))
-			s->stat.nr_snapshots++;
+		s->tried_applied = true;
 	}
 }
 
@@ -3375,7 +3375,7 @@ static void kdamond_apply_schemes(struct damon_ctx *c)
 		if (time_before(c->passed_sample_intervals, s->next_apply_sis))
 			continue;
 
-		if (!s->wmarks.activated)
+		if (damos_is_deactivated(s))
 			continue;
 
 		has_schemes_to_apply = true;
@@ -3397,6 +3397,9 @@ static void kdamond_apply_schemes(struct damon_ctx *c)
 	damon_for_each_scheme(s, c) {
 		if (time_before(c->passed_sample_intervals, s->next_apply_sis))
 			continue;
+		if (s->tried_applied)
+			s->stat.nr_snapshots++;
+		s->tried_applied = false;
 		damos_walk_complete(c, s);
 		damos_set_next_apply_sis(s, c);
 		s->last_applied = NULL;
@@ -3849,16 +3852,23 @@ static int kdamond_wait_activation(struct damon_ctx *ctx)
 
 	while (!kdamond_need_stop(ctx)) {
 		damon_for_each_scheme(s, ctx) {
+			if (s->max_nr_snapshots &&
+				s->max_nr_snapshots <= s->stat.nr_snapshots)
+				continue;
+
 			wait_time = damos_wmark_wait_us(s);
 			if (!init_wait_time || wait_time < min_wait_time) {
 				init_wait_time = true;
 				min_wait_time = wait_time;
 			}
 		}
-		if (!min_wait_time)
+		if (!min_wait_time && init_wait_time)
 			return 0;
 
-		kdamond_usleep(min_wait_time);
+		if (min_wait_time)
+			kdamond_usleep(min_wait_time);
+		else
+			kdamond_usleep(ctx->attrs.sample_interval);
 
 		kdamond_call(ctx, false);
 		if (ctx->maybe_corrupted)
