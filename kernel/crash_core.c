@@ -138,6 +138,13 @@ void __noclone __crash_kexec(struct pt_regs *regs)
 		if (kexec_crash_image) {
 			struct pt_regs fixed_regs;
 
+			/*
+			 * A crash image carries no KHO state: clear the
+			 * transport so the crash kernel boots cold instead
+			 * of reviving from stale state.
+			 */
+			(void)kho_sync_channel(kexec_crash_image);
+
 			crash_setup_regs(&fixed_regs, regs);
 			crash_save_vmcoreinfo();
 			machine_crash_shutdown(&fixed_regs);
