@@ -803,6 +803,13 @@ struct vma_numab_state {
 	 * A VMA is not eligible for scanning if prev_scan_seq == numa_scan_seq
 	 */
 	int prev_scan_seq;
+
+	/*
+	 * Set by the scanner for the duration of a scan of this VMA when only
+	 * folios on non-toptier nodes should be made NUMA hintable, because
+	 * the scanning task has not accessed the VMA recently.
+	 */
+	bool slow_only;
 };
 
 #ifdef __HAVE_PFNMAP_TRACKING
