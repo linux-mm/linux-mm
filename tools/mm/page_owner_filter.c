@@ -20,23 +20,26 @@
 #include <getopt.h>
 #include <signal.h>
 
-#define MAX_CMD_LEN	512
+#define MAX_CMD_LEN	2048
+#define TASK_COMM_LEN	16
 
 static void usage(const char *prog)
 {
 	fprintf(stderr, "Usage: %s [OPTIONS]\n", prog);
 	fprintf(stderr, "\nOptions:\n");
-	fprintf(stderr, "  -m, --mode MODE      : print_mode (stack, handle, or stack_handle)\n");
-	fprintf(stderr, "  -n, --nid NID_LIST   : NUMA node IDs (comma-separated or ranges)\n");
-	fprintf(stderr, "  -o, --output FILE    : output file (default: stdout)\n");
-	fprintf(stderr, "  -h, --help           : show this help message\n");
+	fprintf(stderr, "  -m, --mode MODE       : print_mode (stack, handle, stack_handle)\n");
+	fprintf(stderr, "  -n, --nid NID_LIST    : NUMA nodes (comma-separated or ranges)\n");
+	fprintf(stderr, "  -p, --pid PID_LIST    : Process IDs (comma-separated, max 16)\n");
+	fprintf(stderr, "  -t, --tgid TGID_LIST  : Thread Group IDs (comma-separated, max 16)\n");
+	fprintf(stderr, "  -c, --comm COMM_LIST  : Process names (comma-separated, max 8)\n");
+	fprintf(stderr, "                          Supports wildcards: * ? [a-z]\n");
+	fprintf(stderr, "  -g, --cgroup PATH     : Memory cgroup path\n");
+	fprintf(stderr, "  -o, --output FILE     : output file (default: stdout)\n");
+	fprintf(stderr, "  -h, --help            : show this help message\n");
 	fprintf(stderr, "\nExamples:\n");
-	fprintf(stderr, "  %s -m stack\n", prog);
-	fprintf(stderr, "  %s -m handle\n", prog);
-	fprintf(stderr, "  %s -m stack_handle\n", prog);
-	fprintf(stderr, "  %s -m stack -o output.txt\n", prog);
-	fprintf(stderr, "  %s -n 0,1,2\n", prog);
-	fprintf(stderr, "  %s -m stack -n 0\n", prog);
+	fprintf(stderr, "  %s -m handle -o output.txt\n", prog);
+	fprintf(stderr, "  %s -n 0,1 -c bash\n", prog);
+	fprintf(stderr, "  %s -c \"python*\" -g user.slice\n", prog);
 }
 
 static int validate_mode(const char *mode)
@@ -132,6 +135,131 @@ static int validate_nid_list(const char *nid_list)
 	return 0;
 }
 
+static int validate_pid_list(const char *pid_list)
+{
+	const char *p;
+	int count = 0;
+
+	if (!pid_list || strlen(pid_list) == 0) {
+		fprintf(stderr, "Error: Empty pid/tgid list\n");
+		return -1;
+	}
+
+	for (p = pid_list; *p; p++) {
+		if (*p == ',') {
+			count++;
+			continue;
+		}
+		if (!isdigit((unsigned char)*p)) {
+			fprintf(stderr,
+				"Error: Invalid character '%c' in pid_list (only digits allowed)\n",
+				*p);
+			return -1;
+		}
+	}
+
+	if (++count > 16) {
+		fprintf(stderr, "Error: Too many PIDs (max 16)\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int validate_tgid_list(const char *tgid_list)
+{
+	return validate_pid_list(tgid_list);
+}
+
+static int validate_comm_list(const char *comm_list)
+{
+	const char *p;
+	const char *comm_start;
+	int count = 0;
+	int comm_len = 0;
+
+	if (!comm_list || strlen(comm_list) == 0) {
+		fprintf(stderr, "Error: Empty comm list\n");
+		return -1;
+	}
+
+	comm_start = comm_list;
+	for (p = comm_list; *p; p++) {
+		if (*p == ',') {
+			/* Check COMM length before separator */
+			if (comm_len == 0) {
+				fprintf(stderr, "Error: Empty COMM in list\n");
+				return -1;
+			}
+			if (comm_len >= TASK_COMM_LEN) {
+				fprintf(stderr,
+					"Error: COMM too long (max %d chars)\n",
+					TASK_COMM_LEN - 1);
+				fprintf(stderr, "  Near: %.15s...\n", comm_start);
+				return -1;
+			}
+			count++;
+			comm_len = 0;
+			comm_start = p + 1;
+			continue;
+		}
+		comm_len++;
+	}
+
+	/* Check last COMM */
+	if (comm_len == 0) {
+		fprintf(stderr, "Error: Empty COMM at end of list\n");
+		return -1;
+	}
+	if (comm_len >= TASK_COMM_LEN) {
+		fprintf(stderr, "Error: COMM too long (max %d chars)\n",
+			TASK_COMM_LEN - 1);
+		fprintf(stderr, "  Near: %.15s...\n", comm_start);
+		return -1;
+	}
+
+	if (++count > 8) {
+		fprintf(stderr, "Error: Too many COMMs (max 8)\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int validate_cgroup_path(const char *path)
+{
+	char cgroup_path[512];
+	const char *input_path = path;
+	int is_cgroup_v2 = 0;
+
+	if (!path || strlen(path) == 0) {
+		fprintf(stderr, "Error: Empty cgroup path\n");
+		return -1;
+	}
+
+	if (path[0] == '/')
+		input_path++;
+
+	/* Check if v1 memory controller exists */
+	if (access("/sys/fs/cgroup/memory", F_OK) != 0)
+		is_cgroup_v2 = 1;
+
+	if (is_cgroup_v2)
+		snprintf(cgroup_path, sizeof(cgroup_path),
+			"/sys/fs/cgroup/%s/memory.stat", input_path);
+	else
+		snprintf(cgroup_path, sizeof(cgroup_path),
+			"/sys/fs/cgroup/memory/%s/memory.stat", input_path);
+
+	if (access(cgroup_path, F_OK) != 0) {
+		fprintf(stderr, "Error: Cgroup path '%s': not found or no memory controller\n",
+			path);
+		return -1;
+	}
+
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	const char *output_file = NULL;
@@ -148,6 +276,10 @@ int main(int argc, char *argv[])
 	static struct option long_options[] = {
 		{"mode",	required_argument, 0, 'm'},
 		{"nid",		required_argument, 0, 'n'},
+		{"pid",		required_argument, 0, 'p'},
+		{"tgid",	required_argument, 0, 't'},
+		{"comm",	required_argument, 0, 'c'},
+		{"cgroup",	required_argument, 0, 'g'},
 		{"output",	required_argument, 0, 'o'},
 		{"help",	no_argument,	   0, 'h'},
 		{0, 0, 0, 0}
@@ -174,7 +306,7 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
-	while ((opt = getopt_long(argc, argv, "m:n:o:h", long_options, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "m:n:p:t:c:g:o:h", long_options, NULL)) != -1) {
 		int len;
 
 		switch (opt) {
@@ -206,6 +338,64 @@ int main(int argc, char *argv[])
 			cmd_len += len;
 			break;
 		}
+		case 'p': {
+			const char *pid_list = optarg;
+
+			if (validate_pid_list(pid_list) < 0)
+				return 1;
+			len = snprintf(filter_cmd + cmd_len, MAX_CMD_LEN - cmd_len,
+				       "%spid=%s", cmd_len > 0 ? " " : "", pid_list);
+			if (len < 0 || cmd_len + len >= MAX_CMD_LEN) {
+				fprintf(stderr, "Error: Command too long\n");
+				return 1;
+			}
+			cmd_len += len;
+			break;
+		}
+		case 't': {
+			const char *tgid_list = optarg;
+
+			if (validate_tgid_list(tgid_list) < 0)
+				return 1;
+			len = snprintf(filter_cmd + cmd_len, MAX_CMD_LEN - cmd_len,
+				       "%stgid=%s", cmd_len > 0 ? " " : "", tgid_list);
+			if (len < 0 || cmd_len + len >= MAX_CMD_LEN) {
+				fprintf(stderr, "Error: Command too long\n");
+				return 1;
+			}
+			cmd_len += len;
+			break;
+		}
+		case 'c': {
+			const char *comm_list = optarg;
+
+			if (validate_comm_list(comm_list) < 0)
+				return 1;
+			len = snprintf(filter_cmd + cmd_len, MAX_CMD_LEN - cmd_len,
+				       "%scomm=%s", cmd_len > 0 ? " " : "", comm_list);
+			if (len < 0 || cmd_len + len >= MAX_CMD_LEN) {
+				fprintf(stderr, "Error: Command too long\n");
+				return 1;
+			}
+			cmd_len += len;
+			break;
+		}
+		case 'g': {
+			const char *cgroup_path = optarg;
+
+			if (validate_cgroup_path(cgroup_path) < 0)
+				return 1;
+			const char *path = (cgroup_path[0] == '/') ? cgroup_path + 1 : cgroup_path;
+
+			len = snprintf(filter_cmd + cmd_len, MAX_CMD_LEN - cmd_len,
+				       "%smemcg=/%s", cmd_len > 0 ? " " : "", path);
+			if (len < 0 || cmd_len + len >= MAX_CMD_LEN) {
+				fprintf(stderr, "Error: Command too long\n");
+				return 1;
+			}
+			cmd_len += len;
+			break;
+		}
 		case 'o':
 			output_file = optarg;
 			break;
@@ -220,7 +410,7 @@ int main(int argc, char *argv[])
 
 	/* At least one filter must be specified */
 	if (cmd_len == 0) {
-		fprintf(stderr, "Error: At least one filter (-m or -n) must be specified\n\n");
+		fprintf(stderr, "Error: At least one filter must be specified\n\n");
 		usage(argv[0]);
 		return 1;
 	}
@@ -255,15 +445,7 @@ int main(int argc, char *argv[])
 	ret = write(fd, filter_cmd, strlen(filter_cmd));
 
 	if (ret < 0) {
-		if (errno == EINVAL) {
-			fprintf(stderr, "Error: Kernel rejected the filter command.\n");
-			fprintf(stderr, "Possible causes:\n");
-			fprintf(stderr, "  - Kernel does not support per-fd filtering\n");
-			fprintf(stderr, "  - NUMA node has no memory\n");
-			fprintf(stderr, "  - Unknown reason\n");
-		} else {
-			perror("write filter command");
-		}
+		perror("write filter command");
 		goto out;
 	}
 
