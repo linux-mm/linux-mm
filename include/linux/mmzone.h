@@ -598,6 +598,10 @@ enum {
 	MM_LEAF_YOUNG,		/* young leaf entries */
 	MM_NONLEAF_FOUND,	/* non-leaf entries found in Bloom filters */
 	MM_NONLEAF_ADDED,	/* non-leaf entries added to Bloom filters */
+	MM_LEAF_ELIGIBLE,	/* folios belonging to this lruvec (node+memcg) */
+	MM_WALK_TOTAL,		/* page-table walks completed */
+	MM_WALK_EMPTY,		/* walks that found no eligible folio */
+	MM_LEAF_TOTAL_EMPTY,	/* leaf entries scanned by empty walks */
 	NR_MM_STATS
 };
 
@@ -611,8 +615,16 @@ struct lru_gen_mm_state {
 	struct list_head *head;
 	/* where the last iteration ended before */
 	struct list_head *tail;
-	/* Bloom filters flip after each iteration */
+	/* PMD-level Bloom filters flip after each iteration */
 	unsigned long *filters[NR_BLOOM_FILTERS];
+	/*
+	 * PUD-level Bloom filters flip after each iteration. Same double
+	 * buffering as the PMD-level filters, but coarser: they remember
+	 * which 1GB PUD subtrees had young leaf entries last generation,
+	 * so walk_pud_range() can skip whole subtrees whose PMD iteration
+	 * would find nothing worth scanning (e.g. cross-node empty walks).
+	 */
+	unsigned long *pud_filters[NR_BLOOM_FILTERS];
 	/* the mm stats for debugging */
 	unsigned long stats[NR_HIST_GENS][NR_MM_STATS];
 };
