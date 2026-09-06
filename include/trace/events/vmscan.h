@@ -645,6 +645,36 @@ TRACE_EVENT(mm_vmscan_kswapd_clear_hopeless,
 		__entry->nid,
 		__print_symbolic(__entry->reason, kswapd_clear_hopeless_reason_ops))
 );
+TRACE_EVENT(mm_vmscan_lru_gen_walk,
+
+	TP_PROTO(int nid, unsigned long seq, int leaf_total,
+		 int leaf_eligible, bool empty, int pud_skipped),
+
+	TP_ARGS(nid, seq, leaf_total, leaf_eligible, empty, pud_skipped),
+
+	TP_STRUCT__entry(
+		__field(int, nid)
+		__field(unsigned long, seq)
+		__field(int, leaf_total)
+		__field(int, leaf_eligible)
+		__field(bool, empty)
+		__field(int, pud_skipped)
+	),
+
+	TP_fast_assign(
+		__entry->nid = nid;
+		__entry->seq = seq;
+		__entry->leaf_total = leaf_total;
+		__entry->leaf_eligible = leaf_eligible;
+		__entry->empty = empty;
+		__entry->pud_skipped = pud_skipped;
+	),
+
+	TP_printk("nid=%d seq=%lu leaf_total=%d leaf_eligible=%d empty=%d pud_skipped=%d",
+		__entry->nid, __entry->seq, __entry->leaf_total,
+		__entry->leaf_eligible, __entry->empty, __entry->pud_skipped)
+);
+
 #endif /* _TRACE_VMSCAN_H */
 
 /* This part must be outside protection */
