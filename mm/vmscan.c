@@ -123,6 +123,12 @@ struct scan_control {
 	/* Proactive reclaim invoked by userspace */
 	unsigned int proactive:1;
 
+	/* Eviction-oriented proactive reclaim goal */
+	unsigned int evict_goal:1;
+
+	/* Demotion-only proactive reclaim goal */
+	unsigned int demote_goal:1;
+
 	/*
 	 * Cgroup memory below memory.low is protected as long as we
 	 * don't threaten to OOM. If any cgroup is reclaimed at
@@ -166,8 +172,11 @@ struct scan_control {
 	/* Incremented by the number of inactive pages that were scanned */
 	unsigned long nr_scanned;
 
-	/* Number of pages freed so far during a call to shrink_zones() */
+	/* Number of pages reclaimed, including demotions */
 	unsigned long nr_reclaimed;
+
+	/* Number of reclaimed pages that were demoted */
+	unsigned long nr_demoted;
 
 	struct {
 		unsigned int dirty;
@@ -180,6 +189,20 @@ struct scan_control {
 	/* for recording the reclaimed slab by now */
 	struct reclaim_state reclaim_state;
 };
+
+static unsigned long reclaim_progress(struct scan_control *sc)
+{
+	if (sc->demote_goal)
+		return sc->nr_demoted;
+
+	if (!sc->evict_goal)
+		return sc->nr_reclaimed;
+
+	if (WARN_ON_ONCE(sc->nr_demoted > sc->nr_reclaimed))
+		return 0;
+
+	return sc->nr_reclaimed - sc->nr_demoted;
+}
 
 #ifdef ARCH_HAS_PREFETCHW
 static inline void prefetchw_prev_lru_folio(struct folio *folio,
@@ -360,6 +383,59 @@ static bool can_demote(int nid, struct scan_control *sc,
 	/* Filter out nodes that are not in cgroup's mems_allowed. */
 	mem_cgroup_node_filter_allowed(memcg, &allowed_mask);
 	return !nodes_empty(allowed_mask);
+}
+
+static bool memcg_has_demotion_target(struct mem_cgroup *memcg)
+{
+	int nid;
+
+	for_each_node_state(nid, N_MEMORY) {
+		if (can_demote(nid, NULL, memcg))
+			return true;
+	}
+
+	return false;
+}
+
+static bool memcg_node_is_demotion_target(int target_nid,
+					  struct mem_cgroup *memcg)
+{
+	struct pglist_data *pgdat = NODE_DATA(target_nid);
+	nodemask_t source_mask, target_mask;
+
+	if (!pgdat || !numa_demotion_enabled)
+		return false;
+
+	target_mask = nodemask_of_node(target_nid);
+	mem_cgroup_node_filter_allowed(memcg, &target_mask);
+	if (nodes_empty(target_mask))
+		return false;
+
+	node_get_allowed_sources(pgdat, &source_mask);
+	mem_cgroup_node_filter_allowed(memcg, &source_mask);
+	return !nodes_empty(source_mask);
+}
+
+static bool reclaim_skip_node(pg_data_t *pgdat, struct scan_control *sc)
+{
+	if (sc->demote_goal) {
+		if (sc->nr_demoted >= sc->nr_to_reclaim)
+			return true;
+		return !can_demote(pgdat->node_id, sc, sc->target_mem_cgroup);
+	}
+
+	if (!sc->evict_goal || sc->nr_demoted < sc->nr_to_reclaim)
+		return false;
+	if (!can_demote(pgdat->node_id, sc, sc->target_mem_cgroup))
+		return false;
+
+	/*
+	 * Skip tiers that can demote but are not demotion targets from any
+	 * higher tier allowed to the cgroup once this batch's demotion work is
+	 * done. Other tiers keep aging toward lower tiers or eviction.
+	 */
+	return !memcg_node_is_demotion_target(pgdat->node_id,
+					      sc->target_mem_cgroup);
 }
 
 static inline bool can_reclaim_anon_pages(struct mem_cgroup *memcg,
@@ -1272,6 +1348,9 @@ retry:
 			continue;
 		}
 
+		if (sc->demote_goal)
+			goto keep_locked;
+
 		/*
 		 * Anonymous process memory has backing store?
 		 * Try to allocate it some swap space here.
@@ -1571,6 +1650,7 @@ keep:
 	nr_demoted = demote_folio_list(&demote_folios, pgdat, memcg);
 	nr_reclaimed += nr_demoted;
 	stat->nr_demoted += nr_demoted;
+	sc->nr_demoted += nr_demoted;
 	/* Folios that could not be demoted are still in @demote_folios */
 	if (!list_empty(&demote_folios)) {
 		/* Folios which weren't demoted go back on @folio_list */
@@ -5107,7 +5187,11 @@ static bool should_abort_scan(struct lruvec *lruvec, struct scan_control *sc)
 	if (unlikely(sc->proactive && signal_pending(current)))
 		return true;
 
-	if (sc->nr_reclaimed >= max(sc->nr_to_reclaim, compact_gap(sc->order)))
+	if (reclaim_progress(sc) >=
+	    max(sc->nr_to_reclaim, compact_gap(sc->order)))
+		return true;
+
+	if (reclaim_skip_node(lruvec_pgdat(lruvec), sc))
 		return true;
 
 	/* check the order to exclude compaction-induced reclaim */
@@ -5201,7 +5285,8 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 
 	need_rotate = try_to_shrink_lruvec(lruvec, sc);
 
-	shrink_slab(sc->gfp_mask, pgdat->node_id, memcg, sc->priority);
+	if (!sc->demote_goal)
+		shrink_slab(sc->gfp_mask, pgdat->node_id, memcg, sc->priority);
 
 	if (!sc->proactive)
 		vmpressure(sc->gfp_mask, sc->order, memcg, false,
@@ -6318,8 +6403,9 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 
 		shrink_lruvec(lruvec, sc);
 
-		shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
-			    sc->priority);
+		if (!sc->demote_goal)
+			shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
+				    sc->priority);
 
 		/* Record the group's reclaim efficiency */
 		if (!sc->proactive)
@@ -6327,8 +6413,13 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 				   sc->nr_scanned - scanned,
 				   sc->nr_reclaimed - reclaimed);
 
+		if (reclaim_skip_node(pgdat, sc)) {
+			mem_cgroup_iter_break(target_memcg, memcg);
+			break;
+		}
+
 		/* If partial walks are allowed, bail once goal is reached */
-		if (partial && sc->nr_reclaimed >= sc->nr_to_reclaim) {
+		if (partial && reclaim_progress(sc) >= sc->nr_to_reclaim) {
 			mem_cgroup_iter_break(target_memcg, memcg);
 			break;
 		}
@@ -6579,6 +6670,8 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
 		if (zone->zone_pgdat == last_pgdat)
 			continue;
 		last_pgdat = zone->zone_pgdat;
+		if (reclaim_skip_node(last_pgdat, sc))
+			continue;
 		shrink_node(zone->zone_pgdat, sc);
 	}
 
@@ -6643,7 +6736,7 @@ retry:
 		sc->nr_scanned = 0;
 		shrink_zones(zonelist, sc);
 
-		if (sc->nr_reclaimed >= sc->nr_to_reclaim)
+		if (reclaim_progress(sc) >= sc->nr_to_reclaim)
 			break;
 
 		if (sc->compaction_ready)
@@ -6670,8 +6763,8 @@ retry:
 
 	delayacct_freepages_end();
 
-	if (sc->nr_reclaimed)
-		return sc->nr_reclaimed;
+	if (reclaim_progress(sc))
+		return reclaim_progress(sc);
 
 	/* Aborted reclaim to try compaction? don't OOM, then */
 	if (sc->compaction_ready)
@@ -6910,6 +7003,9 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 		.may_unmap = 1,
 		.may_swap = !!(reclaim_options & MEMCG_RECLAIM_MAY_SWAP),
 		.proactive = !!(reclaim_options & MEMCG_RECLAIM_PROACTIVE),
+		.evict_goal = !!(reclaim_options &
+					MEMCG_RECLAIM_GOAL_EVICT),
+		.demote_goal = !!(reclaim_options & MEMCG_RECLAIM_GOAL_DEMOTE),
 	};
 	/*
 	 * Traverse the ZONELIST_FALLBACK zonelist of the current node to put
@@ -7977,11 +8073,17 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat,
 enum {
 	MEMORY_RECLAIM_SWAPPINESS = 0,
 	MEMORY_RECLAIM_SWAPPINESS_MAX,
+	MEMORY_RECLAIM_GOAL_PROGRESS,
+	MEMORY_RECLAIM_GOAL_EVICT,
+	MEMORY_RECLAIM_GOAL_DEMOTE,
 	MEMORY_RECLAIM_NULL,
 };
 static const match_table_t tokens = {
 	{ MEMORY_RECLAIM_SWAPPINESS, "swappiness=%d"},
 	{ MEMORY_RECLAIM_SWAPPINESS_MAX, "swappiness=max"},
+	{ MEMORY_RECLAIM_GOAL_PROGRESS, "goal=progress"},
+	{ MEMORY_RECLAIM_GOAL_EVICT, "goal=evict"},
+	{ MEMORY_RECLAIM_GOAL_DEMOTE, "goal=demote"},
 	{ MEMORY_RECLAIM_NULL, NULL },
 };
 
@@ -7990,6 +8092,8 @@ int user_proactive_reclaim(char *buf,
 {
 	unsigned int nr_retries = MAX_RECLAIM_RETRIES;
 	unsigned long nr_to_reclaim, nr_reclaimed = 0;
+	bool evict_goal = false;
+	bool demote_goal = false;
 	int swappiness = -1;
 	char *old_buf, *start;
 	substring_t args[MAX_OPT_ARGS];
@@ -8021,9 +8125,37 @@ int user_proactive_reclaim(char *buf,
 		case MEMORY_RECLAIM_SWAPPINESS_MAX:
 			swappiness = SWAPPINESS_ANON_ONLY;
 			break;
+		case MEMORY_RECLAIM_GOAL_PROGRESS:
+			if (!memcg)
+				return -EINVAL;
+			evict_goal = false;
+			demote_goal = false;
+			break;
+		case MEMORY_RECLAIM_GOAL_EVICT:
+			if (!memcg)
+				return -EINVAL;
+			evict_goal = true;
+			break;
+		case MEMORY_RECLAIM_GOAL_DEMOTE:
+			if (!memcg)
+				return -EINVAL;
+			demote_goal = true;
+			break;
 		default:
 			return -EINVAL;
 		}
+	}
+
+	if (evict_goal && demote_goal)
+		return -EINVAL;
+
+	if (nr_to_reclaim && (evict_goal || demote_goal)) {
+		bool has_demotion_target = memcg_has_demotion_target(memcg);
+
+		if (demote_goal && !has_demotion_target)
+			return -EAGAIN;
+		if (evict_goal && !has_demotion_target)
+			evict_goal = false;
 	}
 
 	while (nr_reclaimed < nr_to_reclaim) {
@@ -8057,6 +8189,10 @@ int user_proactive_reclaim(char *buf,
 
 			reclaim_options = MEMCG_RECLAIM_MAY_SWAP |
 					  MEMCG_RECLAIM_PROACTIVE;
+			if (evict_goal)
+				reclaim_options |= MEMCG_RECLAIM_GOAL_EVICT;
+			if (demote_goal)
+				reclaim_options |= MEMCG_RECLAIM_GOAL_DEMOTE;
 			reclaimed = try_to_free_mem_cgroup_pages(memcg,
 						 batch_size, gfp_mask,
 						 reclaim_options,
