@@ -4284,6 +4284,16 @@ static bool lruvec_is_reclaimable(struct lruvec *lruvec, struct scan_control *sc
 	return time_is_before_jiffies(birth + min_ttl);
 }
 
+static void update_memcg_protection(void)
+{
+	struct mem_cgroup *memcg;
+
+	memcg = mem_cgroup_iter(NULL, NULL, NULL);
+	do {
+		mem_cgroup_calculate_protection(NULL, memcg);
+	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)));
+}
+
 /* to protect the working set of the last N jiffies */
 static unsigned long lru_gen_min_ttl __read_mostly;
 
@@ -4297,15 +4307,19 @@ static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 
 	set_initial_priority(pgdat, sc);
 
-	memcg = mem_cgroup_iter(NULL, NULL, NULL);
-	do {
-		struct lruvec *lruvec = mem_cgroup_lruvec(memcg, pgdat);
+	update_memcg_protection();
 
-		mem_cgroup_calculate_protection(NULL, memcg);
+	if (min_ttl) {
+		memcg = mem_cgroup_iter(NULL, NULL, NULL);
+		do {
+			struct lruvec *lruvec = mem_cgroup_lruvec(memcg, pgdat);
 
-		if (!reclaimable)
-			reclaimable = lruvec_is_reclaimable(lruvec, sc, min_ttl);
-	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)));
+			if (lruvec_is_reclaimable(lruvec, sc, min_ttl)) {
+				reclaimable = true;
+				break;
+			}
+		} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)));
+	}
 
 	/*
 	 * The main goal is to OOM kill if every generation from all memcgs is
@@ -5187,7 +5201,7 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 
-	/* lru_gen_age_node() called mem_cgroup_calculate_protection() */
+	/* update_memcg_protection() computed the protection */
 	if (mem_cgroup_below_min(NULL, memcg))
 		return MEMCG_LRU_YOUNG;
 
@@ -5334,8 +5348,11 @@ static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *
 
 	set_initial_priority(pgdat, sc);
 
+	/* kswapd called update_memcg_protection in lru_gen_age_node */
 	if (current_is_kswapd())
 		sc->nr_reclaimed = 0;
+	else
+		update_memcg_protection();
 
 	if (mem_cgroup_disabled())
 		shrink_one(&pgdat->__lruvec, sc);
