@@ -240,6 +240,8 @@ Code  Seq#    Include File                                             Comments
 'd'   00-FF  linux/char/drm/drm.h                                      conflict!
 'd'   02-40  pcmcia/ds.h                                               conflict!
 'd'   F0-FF  linux/digi1.h
+'d'   01     uapi/linux/kcov_dataflow.h                                conflict!
+'d'   64-67  uapi/linux/kcov_dataflow.h                                conflict!
 'e'   all    linux/digi1.h                                             conflict!
 'f'   00-1F  linux/ext2_fs.h                                           conflict!
 'f'   00-1F  linux/ext3_fs.h                                           conflict!
