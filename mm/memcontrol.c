@@ -2339,12 +2339,18 @@ static bool schedule_drain_work(int cpu, struct work_struct *work)
  * Drains all per-CPU charge caches for given root_memcg resp. subtree
  * of the hierarchy under it.
  */
-void drain_all_stock(struct mem_cgroup *root_memcg)
+static void __drain_all_stock(struct mem_cgroup *root_memcg, bool sync)
 {
 	int cpu, curcpu;
 
-	/* If someone's already draining, avoid adding running more workers. */
-	if (!mutex_trylock(&percpu_charge_mutex))
+	/*
+	 *  If someone's already draining, avoid starting more workers.
+	 *  Synchronous callers need to guarantee all the last things
+	 *  are flushed, e.g. before a memcg is removed.
+	 */
+	if (sync)
+		mutex_lock(&percpu_charge_mutex);
+	else if (!mutex_trylock(&percpu_charge_mutex))
 		return;
 	/*
 	 * Notify other cpus that system-wide "drain" is running
@@ -2382,6 +2388,21 @@ void drain_all_stock(struct mem_cgroup *root_memcg)
 	}
 	migrate_enable();
 	mutex_unlock(&percpu_charge_mutex);
+}
+
+void drain_all_stock(struct mem_cgroup *root_memcg)
+{
+	__drain_all_stock(root_memcg, false);
+}
+
+void drain_all_stock_sync(struct mem_cgroup *root_memcg)
+{
+	/*
+	 * Make sure the workqueue is done with this memcg
+	 * before freeing it.
+	 */
+	__drain_all_stock(root_memcg, true);
+	flush_workqueue(memcg_wq);
 }
 
 static int memcg_hotplug_cpu_dead(unsigned int cpu)
@@ -4399,7 +4420,7 @@ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 	wb_memcg_offline(memcg);
 	lru_gen_offline_memcg(memcg);
 
-	drain_all_stock(memcg);
+	drain_all_stock_sync(memcg);
 
 	mem_cgroup_private_id_put(memcg, 1);
 }
