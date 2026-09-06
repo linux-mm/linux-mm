@@ -2670,6 +2670,8 @@ static bool damos_quota_is_full(struct damos_quota *quota,
 {
 	if (!damos_quota_is_set(quota))
 		return false;
+	if (!quota->charged_sz)
+		return false;
 	if (quota->charged_sz >= quota->esz)
 		return true;
 	/*
@@ -2763,6 +2765,9 @@ static void damon_do_apply_schemes(struct damon_ctx *c,
 			continue;
 
 		if (!s->wmarks.activated)
+			continue;
+
+		if (!quota->esz)
 			continue;
 
 		/* Check the quota */
