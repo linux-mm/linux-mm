@@ -50,10 +50,10 @@ struct mfill_state {
 	pmd_t *pmd;
 };
 
-static bool anon_can_userfault(struct vm_area_struct *vma, vm_flags_t vm_flags)
+static bool anon_can_userfault(struct vm_area_struct *vma, unsigned int mode)
 {
 	/* anonymous memory does not support MINOR mode */
-	if (vm_flags & VM_UFFD_MINOR)
+	if (mode & UFFD_MODE_MINOR)
 		return false;
 	return true;
 }
@@ -99,7 +99,7 @@ bool validate_dst_vma(struct vm_area_struct *dst_vma, unsigned long dst_end)
 	 * enforce the VM_MAYWRITE check done at uffd registration
 	 * time.
 	 */
-	if (!dst_vma->vm_userfaultfd_ctx.ctx)
+	if (!dst_vma->vm_uffd_state.ctx)
 		return false;
 
 	return true;
@@ -234,7 +234,7 @@ static int mfill_get_vma(struct mfill_state *state)
 	 * validate 'mode' now that we know the dst_vma: don't allow
 	 * a wrprotect copy if the userfaultfd didn't register as WP.
 	 */
-	if ((flags & MFILL_ATOMIC_WP) && !(dst_vma->vm_flags & VM_UFFD_WP))
+	if ((flags & MFILL_ATOMIC_WP) && !userfaultfd_wp(dst_vma))
 		goto out_unlock;
 
 	if (is_vm_hugetlb_page(dst_vma))
@@ -435,7 +435,7 @@ static int mfill_copy_folio_locked(struct folio *folio, unsigned long src_addr)
 }
 
 #define MFILL_RETRY_STATE_VMA_FLAGS \
-	append_vma_flags(__VMA_UFFD_FLAGS, VMA_SHARED_BIT)
+	append_vma_flags(VMA_UFFD, VMA_SHARED_BIT)
 
 /*
  * VMA state saved before dropping the locks in mfill_copy_folio_retry().
@@ -1785,8 +1785,8 @@ static int validate_move_areas(struct userfaultfd_ctx *ctx,
 		return -EINVAL;
 
 	/* Ensure dst_vma is registered in uffd we are operating on */
-	if (!dst_vma->vm_userfaultfd_ctx.ctx ||
-	    dst_vma->vm_userfaultfd_ctx.ctx != ctx)
+	if (!dst_vma->vm_uffd_state.ctx ||
+	    dst_vma->vm_uffd_state.ctx != ctx)
 		return -EINVAL;
 
 	/* Only allow moving across anonymous vmas */
@@ -2141,7 +2141,7 @@ out:
 	return moved ? moved : err;
 }
 
-static bool vma_can_userfault(struct vm_area_struct *vma, vm_flags_t vm_flags,
+static bool vma_can_userfault(struct vm_area_struct *vma, unsigned int mode,
 		       bool wp_async)
 {
 	const struct vm_uffd_ops *ops = vma_uffd_ops(vma);
@@ -2152,13 +2152,11 @@ static bool vma_can_userfault(struct vm_area_struct *vma, vm_flags_t vm_flags,
 	if (!is_vm_hugetlb_page(vma) && (vma->vm_flags & VM_SPECIAL))
 		return false;
 
-	vm_flags &= __VM_UFFD_FLAGS;
-
 	/*
 	 * If WP is the only mode enabled and context is wp async, allow any
 	 * memory type.
 	 */
-	if (wp_async && (vm_flags == VM_UFFD_WP))
+	if (wp_async && (mode == UFFD_MODE_WP))
 		return true;
 
 	/* For any other mode reject VMAs that don't implement vm_uffd_ops */
@@ -2169,19 +2167,31 @@ static bool vma_can_userfault(struct vm_area_struct *vma, vm_flags_t vm_flags,
 	 * If user requested uffd-wp but not enabled pte markers for
 	 * uffd-wp, then only anonymous memory is supported
 	 */
-	if (!uffd_supports_wp_marker() && (vm_flags & VM_UFFD_WP) &&
+	if (!uffd_supports_wp_marker() && (mode & UFFD_MODE_WP) &&
 	    !vma_is_anonymous(vma))
 		return false;
 
-	return ops->can_userfault(vma, vm_flags);
+	return ops->can_userfault(vma, mode);
 }
 
-static void userfaultfd_set_vm_flags(struct vm_area_struct *vma,
-				     vm_flags_t vm_flags)
+static void userfaultfd_set_ctx(struct vm_area_struct *vma,
+				struct userfaultfd_ctx *ctx,
+				unsigned int mode)
 {
-	const bool uffd_wp_changed = (vma->vm_flags ^ vm_flags) & VM_UFFD_WP;
+	const bool uffd_wp_changed = (uffd_mode(vma) ^ mode) & UFFD_MODE_WP;
 
-	vm_flags_reset(vma, vm_flags);
+	vma_start_write(vma);
+
+	vma->vm_uffd_state = (struct vm_uffd_state){
+		.ctx = ctx,
+		.mode = mode,
+	};
+
+	if (mode)
+		vma_set_flags(vma, VMA_UFFD_BIT);
+	else
+		vma_clear_flags(vma, VMA_UFFD_BIT);
+
 	/*
 	 * For shared mappings, we want to enable writenotify while
 	 * userfaultfd-wp is enabled (see vma_wants_writenotify()). We'll simply
@@ -2189,16 +2199,6 @@ static void userfaultfd_set_vm_flags(struct vm_area_struct *vma,
 	 */
 	if ((vma->vm_flags & VM_SHARED) && uffd_wp_changed)
 		vma_set_page_prot(vma);
-}
-
-static void userfaultfd_set_ctx(struct vm_area_struct *vma,
-				struct userfaultfd_ctx *ctx,
-				vm_flags_t vm_flags)
-{
-	vma_start_write(vma);
-	vma->vm_userfaultfd_ctx = (struct vm_userfaultfd_ctx){ctx};
-	userfaultfd_set_vm_flags(vma,
-				 (vma->vm_flags & ~__VM_UFFD_FLAGS) | vm_flags);
 }
 
 static void userfaultfd_reset_ctx(struct vm_area_struct *vma)
@@ -2216,7 +2216,7 @@ static struct vm_area_struct *userfaultfd_clear_vma(struct vma_iterator *vmi,
 	bool give_up_on_oom = false;
 	vma_flags_t new_vma_flags = vma->flags;
 
-	vma_flags_clear_mask(&new_vma_flags, __VMA_UFFD_FLAGS);
+	vma_flags_clear_mask(&new_vma_flags, VMA_UFFD);
 
 	/*
 	 * If we are modifying only and not splitting, just give up on the merge
@@ -2243,7 +2243,7 @@ static struct vm_area_struct *userfaultfd_clear_vma(struct vma_iterator *vmi,
 	}
 
 	ret = vma_modify_flags_uffd(vmi, prev, vma, start, end,
-				    &new_vma_flags, NULL_VM_UFFD_CTX,
+				    &new_vma_flags, NULL_VM_UFFD_STATE,
 				    give_up_on_oom);
 
 	/*
@@ -2260,11 +2260,10 @@ static struct vm_area_struct *userfaultfd_clear_vma(struct vma_iterator *vmi,
 /* Assumes mmap write lock taken, and mm_struct pinned. */
 static int userfaultfd_register_range(struct userfaultfd_ctx *ctx,
 			       struct vm_area_struct *vma,
-			       vm_flags_t vm_flags,
+			       unsigned int mode,
 			       unsigned long start, unsigned long end,
 			       bool wp_async)
 {
-	vma_flags_t vma_flags = legacy_to_vma_flags(vm_flags);
 	VMA_ITERATOR(vmi, ctx->mm, start);
 	struct vm_area_struct *prev = vma_prev(&vmi);
 	unsigned long vma_end;
@@ -2276,38 +2275,41 @@ static int userfaultfd_register_range(struct userfaultfd_ctx *ctx,
 	for_each_vma_range(vmi, vma, end) {
 		cond_resched();
 
-		VM_WARN_ON_ONCE(!vma_can_userfault(vma, vm_flags, wp_async));
-		VM_WARN_ON_ONCE(vma->vm_userfaultfd_ctx.ctx &&
-				vma->vm_userfaultfd_ctx.ctx != ctx);
+		VM_WARN_ON_ONCE(!vma_can_userfault(vma, mode, wp_async));
+		VM_WARN_ON_ONCE(vma->vm_uffd_state.ctx &&
+				vma->vm_uffd_state.ctx != ctx);
 		VM_WARN_ON_ONCE(!vma_test(vma, VMA_MAYWRITE_BIT));
 
 		/*
 		 * Nothing to do: this vma is already registered into this
 		 * userfaultfd and with the right tracking mode too.
 		 */
-		if (vma->vm_userfaultfd_ctx.ctx == ctx &&
-		    vma_test_all_mask(vma, vma_flags))
+		if (vma->vm_uffd_state.ctx == ctx &&
+		    (uffd_mode(vma) & mode) == mode)
 			goto skip;
 
 		/*
 		 * Pre-scan in userfaultfd_register() already rejected mode
-		 * switches that would drop VM_UFFD_WP or VM_UFFD_RWP, so a
-		 * stray bit here is a bug.
+		 * switches that would drop WP or RWP, so a stray bit here
+		 * is a bug.
 		 */
-		VM_WARN_ON_ONCE(vma->vm_userfaultfd_ctx.ctx == ctx &&
-				vma->vm_flags & (VM_UFFD_WP | VM_UFFD_RWP) & ~vm_flags);
+		VM_WARN_ON_ONCE(vma->vm_uffd_state.ctx == ctx &&
+				uffd_mode(vma) &
+				(UFFD_MODE_WP | UFFD_MODE_RWP) & ~mode);
 
 		if (vma->vm_start > start)
 			start = vma->vm_start;
 		vma_end = min(end, vma->vm_end);
 
 		new_vma_flags = vma->flags;
-		vma_flags_clear_mask(&new_vma_flags, __VMA_UFFD_FLAGS);
-		vma_flags_set_mask(&new_vma_flags, vma_flags);
+		vma_flags_set_mask(&new_vma_flags, VMA_UFFD);
 
 		vma = vma_modify_flags_uffd(&vmi, prev, vma, start, vma_end,
 					    &new_vma_flags,
-					    (struct vm_userfaultfd_ctx){ctx},
+					    (struct vm_uffd_state){
+						.ctx = ctx,
+						.mode = mode,
+					    },
 					    /* give_up_on_oom = */false);
 		if (IS_ERR(vma))
 			return PTR_ERR(vma);
@@ -2317,7 +2319,7 @@ static int userfaultfd_register_range(struct userfaultfd_ctx *ctx,
 		 * the next vma was merged into the current one and
 		 * the current one has not been updated yet.
 		 */
-		userfaultfd_set_ctx(vma, ctx, vm_flags);
+		userfaultfd_set_ctx(vma, ctx, mode);
 
 		if (is_vm_hugetlb_page(vma) && uffd_disable_huge_pmd_share(vma))
 			hugetlb_unshare_all_pmds(vma);
@@ -2336,10 +2338,10 @@ static void userfaultfd_release_new(struct userfaultfd_ctx *ctx)
 	struct vm_area_struct *vma;
 	VMA_ITERATOR(vmi, mm, 0);
 
-	/* the various vma->vm_userfaultfd_ctx still points to it */
+	/* the various vma->vm_uffd_state still points to it */
 	mmap_write_lock(mm);
 	for_each_vma(vmi, vma) {
-		if (vma->vm_userfaultfd_ctx.ctx == ctx)
+		if (vma->vm_uffd_state.ctx == ctx)
 			userfaultfd_reset_ctx(vma);
 	}
 	mmap_write_unlock(mm);
@@ -2366,9 +2368,9 @@ static void userfaultfd_release_all(struct mm_struct *mm,
 	prev = NULL;
 	for_each_vma(vmi, vma) {
 		cond_resched();
-		VM_WARN_ON_ONCE(!!vma->vm_userfaultfd_ctx.ctx ^
-				!!(vma->vm_flags & __VM_UFFD_FLAGS));
-		if (vma->vm_userfaultfd_ctx.ctx != ctx) {
+		VM_WARN_ON_ONCE(!!vma->vm_uffd_state.ctx ^
+				vma_test(vma, VMA_UFFD_BIT));
+		if (vma->vm_uffd_state.ctx != ctx) {
 			prev = vma;
 			continue;
 		}
@@ -2459,7 +2461,7 @@ static bool userfaultfd_rwp_async_ctx(struct userfaultfd_ctx *ctx)
  */
 bool userfaultfd_wp_unpopulated(struct vm_area_struct *vma)
 {
-	struct userfaultfd_ctx *ctx = vma->vm_userfaultfd_ctx.ctx;
+	struct userfaultfd_ctx *ctx = vma->vm_uffd_state.ctx;
 
 	if (!ctx)
 		return false;
@@ -2554,7 +2556,7 @@ static inline void msg_init(struct uffd_msg *msg)
 static inline struct uffd_msg userfault_msg(unsigned long address,
 					    unsigned long real_address,
 					    unsigned int flags,
-					    unsigned long reason,
+					    enum uf_reason reason,
 					    unsigned int features)
 {
 	struct uffd_msg msg;
@@ -2576,11 +2578,11 @@ static inline struct uffd_msg userfault_msg(unsigned long address,
 	 */
 	if (flags & FAULT_FLAG_WRITE)
 		msg.arg.pagefault.flags |= UFFD_PAGEFAULT_FLAG_WRITE;
-	if (reason & VM_UFFD_WP)
+	if (reason & USERFAULT_WP)
 		msg.arg.pagefault.flags |= UFFD_PAGEFAULT_FLAG_WP;
-	if (reason & VM_UFFD_RWP)
+	if (reason & USERFAULT_RWP)
 		msg.arg.pagefault.flags |= UFFD_PAGEFAULT_FLAG_RWP;
-	if (reason & VM_UFFD_MINOR)
+	if (reason & USERFAULT_MINOR)
 		msg.arg.pagefault.flags |= UFFD_PAGEFAULT_FLAG_MINOR;
 	if (features & UFFD_FEATURE_THREAD_ID)
 		msg.arg.pagefault.feat.ptid = task_pid_vnr(current);
@@ -2594,7 +2596,7 @@ static inline struct uffd_msg userfault_msg(unsigned long address,
  */
 static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 					      struct vm_fault *vmf,
-					      unsigned long reason)
+					      enum uf_reason reason)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	pte_t *ptep, pte;
@@ -2631,13 +2633,13 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 	 * If VMA has UFFD WP faults enabled and WP fault, wait for userspace to
 	 * resolve the fault.
 	 */
-	if (!huge_pte_write(pte) && (reason & VM_UFFD_WP))
+	if (!huge_pte_write(pte) && (reason & USERFAULT_WP))
 		return true;
 	/*
 	 * PTE is still RW-protected (protnone with uffd bit), wait for
 	 * resolution. Plain PROT_NONE without the marker is not an RWP fault.
 	 */
-	if (pte_protnone(pte) && huge_pte_uffd(pte) && (reason & VM_UFFD_RWP))
+	if (pte_protnone(pte) && huge_pte_uffd(pte) && (reason & USERFAULT_RWP))
 		return true;
 
 	return false;
@@ -2645,7 +2647,7 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 #else
 static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
 					      struct vm_fault *vmf,
-					      unsigned long reason)
+					      enum uf_reason reason)
 {
 	/* Should never get here. */
 	VM_WARN_ON_ONCE(1);
@@ -2662,7 +2664,7 @@ static inline bool userfaultfd_huge_must_wait(struct userfaultfd_ctx *ctx,
  */
 static inline bool userfaultfd_must_wait(struct userfaultfd_ctx *ctx,
 					 struct vm_fault *vmf,
-					 unsigned long reason)
+					 enum uf_reason reason)
 {
 	struct mm_struct *mm = ctx->mm;
 	unsigned long address = vmf->address;
@@ -2700,10 +2702,10 @@ again:
 		return false;
 
 	if (pmd_trans_huge(_pmd)) {
-		if (!pmd_write(_pmd) && (reason & VM_UFFD_WP))
+		if (!pmd_write(_pmd) && (reason & USERFAULT_WP))
 			return true;
 		if (pmd_protnone(_pmd) && pmd_uffd(_pmd) &&
-		    (reason & VM_UFFD_RWP))
+		    (reason & USERFAULT_RWP))
 			return true;
 		return false;
 	}
@@ -2740,14 +2742,14 @@ again:
 	 * If VMA has UFFD WP faults enabled and WP fault, wait for userspace to
 	 * resolve the fault.
 	 */
-	if (!pte_write(ptent) && (reason & VM_UFFD_WP))
+	if (!pte_write(ptent) && (reason & USERFAULT_WP))
 		goto out;
 	/*
 	 * PTE is still RW-protected (protnone with uffd bit), wait for
 	 * userspace to resolve. Plain PROT_NONE without the marker is not
 	 * an RWP fault.
 	 */
-	if (pte_protnone(ptent) && pte_uffd(ptent) && (reason & VM_UFFD_RWP))
+	if (pte_protnone(ptent) && pte_uffd(ptent) && (reason & USERFAULT_RWP))
 		goto out;
 
 	ret = false;
@@ -2782,7 +2784,7 @@ static inline unsigned int userfaultfd_get_blocking_state(unsigned int flags)
  * fatal_signal_pending()s, and the mmap_lock must be released before
  * returning it.
  */
-vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
+vm_fault_t handle_userfault(struct vm_fault *vmf, enum uf_reason reason)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	struct mm_struct *mm = vma->vm_mm;
@@ -2801,14 +2803,14 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 
 	assert_fault_locked(vmf);
 
-	ctx = vma->vm_userfaultfd_ctx.ctx;
+	ctx = vma->vm_uffd_state.ctx;
 	if (!ctx)
 		goto out;
 
 	VM_WARN_ON_ONCE(ctx->mm != mm);
 
 	/* Any unrecognized flag is a bug. */
-	VM_WARN_ON_ONCE(reason & ~__VM_UFFD_FLAGS);
+	VM_WARN_ON_ONCE(reason & ~USERFAULT_ANY);
 	/* 0 or > 1 flags set is a bug; we expect exactly 1. */
 	VM_WARN_ON_ONCE(!reason || (reason & (reason - 1)));
 
@@ -2823,9 +2825,9 @@ vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason)
 	 * NOTE: it should become possible to return VM_FAULT_RETRY
 	 * even if FAULT_FLAG_TRIED is set without leading to gup()
 	 * -EBUSY failures, if the userfaultfd is to be extended for
-	 * VM_UFFD_WP tracking and we intend to arm the userfault
+	 * WP tracking and we intend to arm the userfault
 	 * without first stopping userland access to the memory. For
-	 * VM_UFFD_MISSING userfaults this is enough for now.
+	 * MISSING userfaults this is enough for now.
 	 */
 	if (unlikely(!(vmf->flags & FAULT_FLAG_ALLOW_RETRY))) {
 		/*
@@ -3041,7 +3043,7 @@ int dup_userfaultfd(struct vm_area_struct *vma, struct list_head *fcs)
 	struct userfaultfd_ctx *ctx = NULL, *octx;
 	struct userfaultfd_fork_ctx *fctx;
 
-	octx = vma->vm_userfaultfd_ctx.ctx;
+	octx = vma->vm_uffd_state.ctx;
 	if (!octx)
 		return 0;
 
@@ -3085,7 +3087,7 @@ int dup_userfaultfd(struct vm_area_struct *vma, struct list_head *fcs)
 		list_add_tail(&fctx->list, fcs);
 	}
 
-	vma->vm_userfaultfd_ctx.ctx = ctx;
+	vma->vm_uffd_state.ctx = ctx;
 	return 0;
 }
 
@@ -3142,11 +3144,11 @@ void dup_userfaultfd_fail(struct list_head *fcs)
 }
 
 void mremap_userfaultfd_prep(struct vm_area_struct *vma,
-			     struct vm_userfaultfd_ctx *vm_ctx)
+			     struct vm_uffd_state *vm_ctx)
 {
 	struct userfaultfd_ctx *ctx;
 
-	ctx = vma->vm_userfaultfd_ctx.ctx;
+	ctx = vma->vm_uffd_state.ctx;
 
 	if (!ctx)
 		return;
@@ -3163,7 +3165,7 @@ void mremap_userfaultfd_prep(struct vm_area_struct *vma,
 	}
 }
 
-void mremap_userfaultfd_complete(struct vm_userfaultfd_ctx *vm_ctx,
+void mremap_userfaultfd_complete(struct vm_uffd_state *vm_ctx,
 				 unsigned long from, unsigned long to,
 				 unsigned long len)
 {
@@ -3183,7 +3185,7 @@ void mremap_userfaultfd_complete(struct vm_userfaultfd_ctx *vm_ctx,
 	userfaultfd_event_wait_completion(ctx, &ewq);
 }
 
-void mremap_userfaultfd_fail(struct vm_userfaultfd_ctx *vm_ctx)
+void mremap_userfaultfd_fail(struct vm_uffd_state *vm_ctx)
 {
 	struct userfaultfd_ctx *ctx = vm_ctx->ctx;
 
@@ -3202,7 +3204,7 @@ bool userfaultfd_remove(struct vm_area_struct *vma,
 	struct userfaultfd_ctx *ctx;
 	struct userfaultfd_wait_queue ewq;
 
-	ctx = vma->vm_userfaultfd_ctx.ctx;
+	ctx = vma->vm_uffd_state.ctx;
 	if (!ctx || !(ctx->features & UFFD_FEATURE_EVENT_REMOVE))
 		return true;
 
@@ -3240,7 +3242,7 @@ int userfaultfd_unmap_prep(struct vm_area_struct *vma, unsigned long start,
 			   unsigned long end, struct list_head *unmaps)
 {
 	struct userfaultfd_unmap_ctx *unmap_ctx;
-	struct userfaultfd_ctx *ctx = vma->vm_userfaultfd_ctx.ctx;
+	struct userfaultfd_ctx *ctx = vma->vm_uffd_state.ctx;
 
 	if (!ctx || !(ctx->features & UFFD_FEATURE_EVENT_UNMAP) ||
 	    has_unmap_ctx(ctx, unmaps, start, end))
@@ -3670,7 +3672,7 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 	int ret;
 	struct uffdio_register uffdio_register;
 	struct uffdio_register __user *user_uffdio_register;
-	vm_flags_t vm_flags;
+	unsigned int mode;
 	bool found;
 	bool basic_ioctls;
 	unsigned long start, end;
@@ -3689,21 +3691,22 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 		goto out;
 	if (uffdio_register.mode & ~UFFD_API_REGISTER_MODES)
 		goto out;
-	vm_flags = 0;
+	mode = 0;
 	if (uffdio_register.mode & UFFDIO_REGISTER_MODE_MISSING)
-		vm_flags |= VM_UFFD_MISSING;
+		mode |= UFFD_MODE_MISSING;
 	if (uffdio_register.mode & UFFDIO_REGISTER_MODE_WP) {
 		if (!pgtable_supports_uffd())
 			goto out;
 
-		vm_flags |= VM_UFFD_WP;
+		mode |= UFFD_MODE_WP;
 	}
 	if (uffdio_register.mode & UFFDIO_REGISTER_MODE_RWP) {
-		if (!pgtable_supports_uffd() || VM_UFFD_RWP == VM_NONE)
+		if (!pgtable_supports_uffd() ||
+		    !IS_ENABLED(CONFIG_USERFAULTFD_RWP))
 			goto out;
 		if (!(userfaultfd_features(ctx) & UFFD_FEATURE_RWP))
 			goto out;
-		vm_flags |= VM_UFFD_RWP;
+		mode |= UFFD_MODE_RWP;
 	}
 
 	/*
@@ -3711,14 +3714,14 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 	 * cannot coexist in the same VMA — the bit would carry ambiguous
 	 * semantics. Reject the combination up front.
 	 */
-	if ((vm_flags & VM_UFFD_WP) && (vm_flags & VM_UFFD_RWP))
+	if ((mode & UFFD_MODE_WP) && (mode & UFFD_MODE_RWP))
 		goto out;
 
 	if (uffdio_register.mode & UFFDIO_REGISTER_MODE_MINOR) {
 #ifndef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
 		goto out;
 #endif
-		vm_flags |= VM_UFFD_MINOR;
+		mode |= UFFD_MODE_MINOR;
 	}
 
 	ret = validate_range(mm, uffdio_register.range.start,
@@ -3760,12 +3763,12 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 	do {
 		cond_resched();
 
-		VM_WARN_ON_ONCE(!!cur->vm_userfaultfd_ctx.ctx ^
-				!!(cur->vm_flags & __VM_UFFD_FLAGS));
+		VM_WARN_ON_ONCE(!!cur->vm_uffd_state.ctx ^
+				vma_test(cur, VMA_UFFD_BIT));
 
 		/* check not compatible vmas */
 		ret = -EINVAL;
-		if (!vma_can_userfault(cur, vm_flags, wp_async))
+		if (!vma_can_userfault(cur, mode, wp_async))
 			goto out_unlock;
 
 		/*
@@ -3776,7 +3779,7 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 		 * mprotect() must still be unregisterable, so this is not
 		 * part of vma_can_userfault().
 		 */
-		if ((vm_flags & VM_UFFD_RWP) && !vma_is_accessible(cur))
+		if ((mode & UFFD_MODE_RWP) && !vma_is_accessible(cur))
 			goto out_unlock;
 
 		/*
@@ -3804,7 +3807,8 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 			if (end & (vma_hpagesize - 1))
 				goto out_unlock;
 		}
-		if ((vm_flags & VM_UFFD_WP) && !(cur->vm_flags & VM_MAYWRITE))
+		if ((mode & UFFD_MODE_WP) &&
+		    !vma_test(cur, VMA_MAYWRITE_BIT))
 			goto out_unlock;
 
 		/*
@@ -3814,18 +3818,18 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 		 * wouldn't know which one to deliver the userfaults to.
 		 */
 		ret = -EBUSY;
-		if (cur->vm_userfaultfd_ctx.ctx &&
-		    cur->vm_userfaultfd_ctx.ctx != ctx)
+		if (cur->vm_uffd_state.ctx &&
+		    cur->vm_uffd_state.ctx != ctx)
 			goto out_unlock;
 
 		/*
-		 * Mode switches that drop VM_UFFD_WP or VM_UFFD_RWP would
-		 * leave PTE markers without the flag that describes them;
+		 * Mode switches that drop WP or RWP would leave PTE markers
+		 * without the mode that describes them;
 		 * subsequent mprotect() would then promote stale markers
 		 * into the other mode. Require an unregister first.
 		 */
-		if (cur->vm_userfaultfd_ctx.ctx == ctx &&
-		    cur->vm_flags & (VM_UFFD_WP | VM_UFFD_RWP) & ~vm_flags)
+		if (cur->vm_uffd_state.ctx == ctx &&
+		    uffd_mode(cur) & (UFFD_MODE_WP | UFFD_MODE_RWP) & ~mode)
 			goto out_unlock;
 
 		/*
@@ -3838,7 +3842,7 @@ static int userfaultfd_register(struct userfaultfd_ctx *ctx,
 	} for_each_vma_range(vmi, cur, end);
 	VM_WARN_ON_ONCE(!found);
 
-	ret = userfaultfd_register_range(ctx, vma, vm_flags, start, end,
+	ret = userfaultfd_register_range(ctx, vma, mode, start, end,
 					 wp_async);
 
 out_unlock:
@@ -3932,15 +3936,15 @@ static int userfaultfd_unregister(struct userfaultfd_ctx *ctx,
 	do {
 		cond_resched();
 
-		VM_WARN_ON_ONCE(!!cur->vm_userfaultfd_ctx.ctx ^
-				!!(cur->vm_flags & __VM_UFFD_FLAGS));
+		VM_WARN_ON_ONCE(!!cur->vm_uffd_state.ctx ^
+				vma_test(cur, VMA_UFFD_BIT));
 
 		/*
 		 * Prevent unregistering through a different userfaultfd than
 		 * the one used for registration.
 		 */
-		if (cur->vm_userfaultfd_ctx.ctx &&
-		    cur->vm_userfaultfd_ctx.ctx != ctx)
+		if (cur->vm_uffd_state.ctx &&
+		    cur->vm_uffd_state.ctx != ctx)
 			goto out_unlock;
 
 		/*
@@ -3950,7 +3954,7 @@ static int userfaultfd_unregister(struct userfaultfd_ctx *ctx,
 		 * provides for more strict behavior to notice
 		 * unregistration errors.
 		 */
-		if (!vma_can_userfault(cur, cur->vm_flags, wp_async))
+		if (!vma_can_userfault(cur, uffd_mode(cur), wp_async))
 			goto out_unlock;
 
 		found = true;
@@ -3967,11 +3971,12 @@ static int userfaultfd_unregister(struct userfaultfd_ctx *ctx,
 		cond_resched();
 
 		/* VMA not registered with userfaultfd. */
-		if (!vma->vm_userfaultfd_ctx.ctx)
+		if (!vma->vm_uffd_state.ctx)
 			goto skip;
 
-		VM_WARN_ON_ONCE(vma->vm_userfaultfd_ctx.ctx != ctx);
-		VM_WARN_ON_ONCE(!vma_can_userfault(vma, vma->vm_flags, wp_async));
+		VM_WARN_ON_ONCE(vma->vm_uffd_state.ctx != ctx);
+		VM_WARN_ON_ONCE(!vma_can_userfault(vma, uffd_mode(vma),
+						   wp_async));
 		VM_WARN_ON_ONCE(!(vma->vm_flags & VM_MAYWRITE));
 
 		if (vma->vm_start > start)
@@ -3988,7 +3993,7 @@ static int userfaultfd_unregister(struct userfaultfd_ctx *ctx,
 			struct userfaultfd_wake_range range;
 			range.start = start;
 			range.len = vma_end - start;
-			wake_userfault(vma->vm_userfaultfd_ctx.ctx, &range);
+			wake_userfault(vma->vm_uffd_state.ctx, &range);
 		}
 
 		vma = userfaultfd_clear_vma(&vmi, prev, vma,
@@ -4276,12 +4281,12 @@ static __u64 uffd_api_available_features(void)
 		       UFFD_FEATURE_WP_ASYNC);
 	/*
 	 * RWP needs both PROT_NONE support and the uffd PTE bit. The
-	 * VM_UFFD_RWP check covers compile-time unavailability; the
+	 * IS_ENABLED check covers compile-time unavailability; the
 	 * pgtable_supports_uffd() check covers runtime (e.g. riscv
 	 * without the SVRSW60T59B extension) where the PTE bit is declared
 	 * but not actually usable.
 	 */
-	if (VM_UFFD_RWP == VM_NONE || !pgtable_supports_uffd())
+	if (!IS_ENABLED(CONFIG_USERFAULTFD_RWP) || !pgtable_supports_uffd())
 		f &= ~(UFFD_FEATURE_RWP | UFFD_FEATURE_RWP_ASYNC);
 	return f;
 }
@@ -4329,7 +4334,7 @@ static int userfaultfd_set_mode(struct userfaultfd_ctx *ctx,
 		VMA_ITERATOR(vmi, mm, 0);
 
 		for_each_vma(vmi, vma) {
-			if (vma->vm_userfaultfd_ctx.ctx == ctx)
+			if (vma->vm_uffd_state.ctx == ctx)
 				vma_start_write(vma);
 		}
 	}
@@ -4484,12 +4489,12 @@ out:
 
 bool userfaultfd_wp_async(struct vm_area_struct *vma)
 {
-	return userfaultfd_wp_async_ctx(vma->vm_userfaultfd_ctx.ctx);
+	return userfaultfd_wp_async_ctx(vma->vm_uffd_state.ctx);
 }
 
 bool userfaultfd_rwp_async(struct vm_area_struct *vma)
 {
-	return userfaultfd_rwp_async_ctx(vma->vm_userfaultfd_ctx.ctx);
+	return userfaultfd_rwp_async_ctx(vma->vm_uffd_state.ctx);
 }
 
 static inline unsigned int uffd_ctx_features(__u64 user_features)

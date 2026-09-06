@@ -9,6 +9,18 @@
 #ifndef _LINUX_USERFAULTFD_K_H
 #define _LINUX_USERFAULTFD_K_H
 
+#include <linux/bits.h>
+
+/* Fault reason #PF handler passes to handle_userfault() */
+enum uf_reason {
+	USERFAULT_MISSING	= BIT(0),
+	USERFAULT_MINOR		= BIT(1),
+	USERFAULT_RWP		= BIT(2),
+	USERFAULT_WP		= BIT(3),
+};
+#define USERFAULT_ANY	(USERFAULT_MISSING | USERFAULT_MINOR | \
+			 USERFAULT_RWP | USERFAULT_WP)
+
 #ifdef CONFIG_USERFAULTFD
 
 #include <linux/userfaultfd.h> /* linux/include/uapi/linux/userfaultfd.h */
@@ -20,12 +32,13 @@
 #include <asm-generic/pgtable_uffd.h>
 #include <linux/hugetlb_inline.h>
 
-/* The set of all possible UFFD-related VM flags. */
-#define __VM_UFFD_FLAGS (VM_UFFD_MISSING | VM_UFFD_MINOR | \
-			 VM_UFFD_WP | VM_UFFD_RWP)
-
-#define __VMA_UFFD_FLAGS mk_vma_flags_from_masks(VMA_UFFD_MISSING, VMA_UFFD_WP, \
-						 VMA_UFFD_MINOR, VMA_UFFD_RWP)
+/* Per-VMA uffd modes */
+#define UFFD_MODE_MISSING	BIT(0)
+#define UFFD_MODE_MINOR		BIT(1)
+#define UFFD_MODE_RWP		BIT(2)
+#define UFFD_MODE_WP		BIT(3)
+#define UFFD_MODE_ALL		(UFFD_MODE_MISSING | UFFD_MODE_MINOR | \
+				 UFFD_MODE_RWP | UFFD_MODE_WP)
 
 /*
  * CAREFUL: Check include/uapi/asm-generic/fcntl.h when defining
@@ -82,12 +95,12 @@ struct userfaultfd_ctx {
 	struct mm_struct *mm;
 };
 
-extern vm_fault_t handle_userfault(struct vm_fault *vmf, unsigned long reason);
+vm_fault_t handle_userfault(struct vm_fault *vmf, enum uf_reason reason);
 
 /* VMA userfaultfd operations */
 struct vm_uffd_ops {
 	/* Checks if a VMA can support userfaultfd */
-	bool (*can_userfault)(struct vm_area_struct *vma, vm_flags_t vm_flags);
+	bool (*can_userfault)(struct vm_area_struct *vma, unsigned int mode);
 	/*
 	 * Called to resolve UFFDIO_CONTINUE request.
 	 * Should return the folio found at pgoff in the VMA's pagecache if it
@@ -162,19 +175,60 @@ int move_pages_huge_pmd(struct mm_struct *mm, pmd_t *dst_pmd, pmd_t *src_pmd, pm
 			unsigned long dst_addr, unsigned long src_addr);
 
 /* mm helpers */
-static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
-					struct vm_userfaultfd_ctx vm_ctx)
+static inline unsigned int uffd_mode(const struct vm_area_struct *vma)
 {
-	return vma->vm_userfaultfd_ctx.ctx == vm_ctx.ctx;
+	return vma->vm_uffd_state.mode;
+}
+
+static inline bool is_mergeable_vm_uffd_state(struct vm_area_struct *vma,
+					struct vm_uffd_state vm_ctx)
+{
+	return vma->vm_uffd_state.ctx == vm_ctx.ctx &&
+	       uffd_mode(vma) == vm_ctx.mode;
+}
+
+static inline bool userfaultfd_missing(const struct vm_area_struct *vma)
+{
+	return vma_test(vma, VMA_UFFD_BIT) &&
+	       (uffd_mode(vma) & UFFD_MODE_MISSING);
+}
+
+static inline bool userfaultfd_wp(const struct vm_area_struct *vma)
+{
+	return vma_test(vma, VMA_UFFD_BIT) &&
+	       (uffd_mode(vma) & UFFD_MODE_WP);
+}
+
+static inline bool userfaultfd_minor(const struct vm_area_struct *vma)
+{
+	return vma_test(vma, VMA_UFFD_BIT) &&
+	       (uffd_mode(vma) & UFFD_MODE_MINOR);
+}
+
+static inline bool userfaultfd_rwp(const struct vm_area_struct *vma)
+{
+	/*
+	 * Callers gate PAGE_NONE usage on this; PAGE_NONE is a BUILD_BUG()
+	 * without CONFIG_ARCH_HAS_PTE_PROTNONE, so fold to false.
+	 */
+	if (!IS_ENABLED(CONFIG_ARCH_HAS_PTE_PROTNONE))
+		return false;
+	return vma_test(vma, VMA_UFFD_BIT) &&
+	       (uffd_mode(vma) & UFFD_MODE_RWP);
+}
+
+static inline bool userfaultfd_protected(const struct vm_area_struct *vma)
+{
+	return userfaultfd_wp(vma) || userfaultfd_rwp(vma);
 }
 
 /*
  * Never enable huge pmd sharing on some uffd registered vmas:
  *
- * - VM_UFFD_WP and VM_UFFD_RWP VMAs, because the write protect / access
- *   tracking information is per pgtable entry.
+ * - uffd-WP and uffd-RWP VMAs, because the write protect / access tracking
+ *   information is per pgtable entry.
  *
- * - VM_UFFD_MINOR VMAs, because otherwise we would never get minor faults for
+ * - uffd-MINOR VMAs, because otherwise we would never get minor faults for
  *   VMAs which share huge pmds. (If you have two mappings to the same
  *   underlying pages, and fault in the non-UFFD-registered one with a write,
  *   with huge pmd sharing this would *also* setup the second UFFD-registered
@@ -182,9 +236,8 @@ static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
  */
 static inline bool uffd_disable_huge_pmd_share(struct vm_area_struct *vma)
 {
-	return vma_test_any_mask(vma,
-		mk_vma_flags_from_masks(VMA_UFFD_WP, VMA_UFFD_RWP,
-					VMA_UFFD_MINOR));
+	return userfaultfd_minor(vma) || userfaultfd_wp(vma) ||
+	       userfaultfd_rwp(vma);
 }
 
 /*
@@ -199,40 +252,8 @@ static inline bool uffd_disable_huge_pmd_share(struct vm_area_struct *vma)
  */
 static inline bool uffd_disable_fault_around(struct vm_area_struct *vma)
 {
-	return vma_test_any_mask(vma,
-		mk_vma_flags_from_masks(VMA_UFFD_WP, VMA_UFFD_RWP,
-					VMA_UFFD_MINOR));
-}
-
-static inline bool userfaultfd_missing(struct vm_area_struct *vma)
-{
-	return vma_test_any_mask(vma, VMA_UFFD_MISSING);
-}
-
-static inline bool userfaultfd_wp(struct vm_area_struct *vma)
-{
-	return vma_test_any_mask(vma, VMA_UFFD_WP);
-}
-
-static inline bool userfaultfd_minor(struct vm_area_struct *vma)
-{
-	return vma_test_any_mask(vma, VMA_UFFD_MINOR);
-}
-
-static inline bool userfaultfd_rwp(struct vm_area_struct *vma)
-{
-	/*
-	 * Callers gate PAGE_NONE usage on this; PAGE_NONE is a BUILD_BUG()
-	 * without CONFIG_ARCH_HAS_PTE_PROTNONE, so fold to false.
-	 */
-	if (!IS_ENABLED(CONFIG_ARCH_HAS_PTE_PROTNONE))
-		return false;
-	return vma_test_single_mask(vma, VMA_UFFD_RWP);
-}
-
-static inline bool userfaultfd_protected(struct vm_area_struct *vma)
-{
-	return userfaultfd_wp(vma) || userfaultfd_rwp(vma);
+	return userfaultfd_minor(vma) || userfaultfd_wp(vma) ||
+	       userfaultfd_rwp(vma);
 }
 
 static inline bool userfaultfd_pte_wp(struct vm_area_struct *vma,
@@ -261,12 +282,12 @@ static inline bool userfaultfd_huge_pmd_rwp(struct vm_area_struct *vma,
 
 static inline bool userfaultfd_armed(struct vm_area_struct *vma)
 {
-	return vma_test_any_mask(vma, __VMA_UFFD_FLAGS);
+	return vma_test(vma, VMA_UFFD_BIT);
 }
 
 static inline bool vma_has_uffd_without_event_remap(struct vm_area_struct *vma)
 {
-	struct userfaultfd_ctx *uffd_ctx = vma->vm_userfaultfd_ctx.ctx;
+	struct userfaultfd_ctx *uffd_ctx = vma->vm_uffd_state.ctx;
 
 	return uffd_ctx && (uffd_ctx->features & UFFD_FEATURE_EVENT_REMAP) == 0;
 }
@@ -276,11 +297,11 @@ extern void dup_userfaultfd_complete(struct list_head *);
 void dup_userfaultfd_fail(struct list_head *);
 
 extern void mremap_userfaultfd_prep(struct vm_area_struct *,
-				    struct vm_userfaultfd_ctx *);
-extern void mremap_userfaultfd_complete(struct vm_userfaultfd_ctx *,
+				    struct vm_uffd_state *);
+extern void mremap_userfaultfd_complete(struct vm_uffd_state *,
 					unsigned long from, unsigned long to,
 					unsigned long len);
-void mremap_userfaultfd_fail(struct vm_userfaultfd_ctx *);
+void mremap_userfaultfd_fail(struct vm_uffd_state *);
 
 extern bool userfaultfd_remove(struct vm_area_struct *vma,
 			       unsigned long start,
@@ -335,7 +356,7 @@ static inline bool pte_swp_uffd_any(pte_t pte)
 
 /* mm helpers */
 static inline vm_fault_t handle_userfault(struct vm_fault *vmf,
-				unsigned long reason)
+				enum uf_reason reason)
 {
 	return VM_FAULT_SIGBUS;
 }
@@ -347,33 +368,33 @@ static inline long uffd_wp_range(struct vm_area_struct *vma,
 	return false;
 }
 
-static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
-					struct vm_userfaultfd_ctx vm_ctx)
+static inline bool is_mergeable_vm_uffd_state(struct vm_area_struct *vma,
+					struct vm_uffd_state vm_ctx)
 {
 	return true;
 }
 
-static inline bool userfaultfd_missing(struct vm_area_struct *vma)
+static inline bool userfaultfd_missing(const struct vm_area_struct *vma)
 {
 	return false;
 }
 
-static inline bool userfaultfd_wp(struct vm_area_struct *vma)
+static inline bool userfaultfd_wp(const struct vm_area_struct *vma)
 {
 	return false;
 }
 
-static inline bool userfaultfd_minor(struct vm_area_struct *vma)
+static inline bool userfaultfd_minor(const struct vm_area_struct *vma)
 {
 	return false;
 }
 
-static inline bool userfaultfd_rwp(struct vm_area_struct *vma)
+static inline bool userfaultfd_rwp(const struct vm_area_struct *vma)
 {
 	return false;
 }
 
-static inline bool userfaultfd_protected(struct vm_area_struct *vma)
+static inline bool userfaultfd_protected(const struct vm_area_struct *vma)
 {
 	return false;
 }
@@ -422,18 +443,18 @@ static inline void dup_userfaultfd_fail(struct list_head *l)
 }
 
 static inline void mremap_userfaultfd_prep(struct vm_area_struct *vma,
-					   struct vm_userfaultfd_ctx *ctx)
+					   struct vm_uffd_state *ctx)
 {
 }
 
-static inline void mremap_userfaultfd_complete(struct vm_userfaultfd_ctx *ctx,
+static inline void mremap_userfaultfd_complete(struct vm_uffd_state *ctx,
 					       unsigned long from,
 					       unsigned long to,
 					       unsigned long len)
 {
 }
 
-static inline void mremap_userfaultfd_fail(struct vm_userfaultfd_ctx *ctx)
+static inline void mremap_userfaultfd_fail(struct vm_uffd_state *ctx)
 {
 }
 

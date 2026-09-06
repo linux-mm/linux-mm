@@ -1453,7 +1453,7 @@ static vm_fault_t __do_huge_pmd_anonymous_page(struct vm_fault *vmf)
 			spin_unlock(vmf->ptl);
 			folio_put(folio);
 			pte_free(vma->vm_mm, pgtable);
-			ret = handle_userfault(vmf, VM_UFFD_MISSING);
+			ret = handle_userfault(vmf, USERFAULT_MISSING);
 			VM_BUG_ON(ret & VM_FAULT_FALLBACK);
 			return ret;
 		}
@@ -1600,7 +1600,7 @@ vm_fault_t do_huge_pmd_anonymous_page(struct vm_fault *vmf)
 			} else if (userfaultfd_missing(vma)) {
 				spin_unlock(vmf->ptl);
 				pte_free(vma->vm_mm, pgtable);
-				ret = handle_userfault(vmf, VM_UFFD_MISSING);
+				ret = handle_userfault(vmf, USERFAULT_MISSING);
 				VM_BUG_ON(ret & VM_FAULT_FALLBACK);
 			} else {
 				set_huge_zero_folio(pgtable, vma->vm_mm, vma,
@@ -2296,7 +2296,7 @@ vm_fault_t do_huge_pmd_uffd_rwp(struct vm_fault *vmf)
 	pmd_t pmd;
 
 	if (!userfaultfd_rwp_async(vma))
-		return handle_userfault(vmf, VM_UFFD_RWP);
+		return handle_userfault(vmf, USERFAULT_RWP);
 
 	vmf->ptl = pmd_lock(vma->vm_mm, vmf->pmd);
 	if (unlikely(!pmd_same(pmdp_get(vmf->pmd), vmf->orig_pmd))) {

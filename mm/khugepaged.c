@@ -2124,7 +2124,7 @@ static bool file_backed_vma_is_retractable(struct vm_area_struct *vma)
 	/*
 	 * When a vma is registered with uffd-wp or RWP, we cannot recycle
 	 * the page table because there may be pte markers installed.
-	 * VM_UFFD_RWP ranges similarly rely on per-PTE uffd state
+	 * uffd-RWP ranges similarly rely on per-PTE uffd state
 	 * and cannot be recycled to a shared PMD. Other vmas can still
 	 * have the same file mapped hugely, but skip this one: it will
 	 * always be mapped in small page size for these registrations.

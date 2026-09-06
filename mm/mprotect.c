@@ -297,7 +297,7 @@ static __always_inline void change_present_ptes(struct mmu_gather *tlb,
 		ptent = pte_clear_uffd(ptent);
 
 	/*
-	 * The uffd bit on a VM_UFFD_RWP VMA carries PROT_NONE
+	 * The uffd bit on a uffd-RWP VMA carries PROT_NONE
 	 * semantics. If mprotect() or NUMA hinting changed the
 	 * base protection, restore PAGE_NONE so the PTE still
 	 * traps on any access. pte_modify() preserves
