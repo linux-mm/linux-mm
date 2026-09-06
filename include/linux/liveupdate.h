@@ -88,10 +88,10 @@ struct liveupdate_file_ops {
 /**
  * struct liveupdate_file_handler - Represents a handler for a live-updatable file type.
  * @ops:                Callback functions
- * @compatible:         The compatibility string (e.g., "memfd-v1", "vfiofd-v1")
- *                      that uniquely identifies the file type this handler
- *                      supports. This is matched against the compatible string
- *                      associated with individual &struct file instances.
+ * @name:               The name (e.g., "memfd", "vfiofd") that uniquely
+ *                      identifies the file type this handler supports. This
+ *                      is matched against the name associated with individual
+ *                      &struct file instances.
  *
  * Modules that want to support live update for specific file types should
  * register an instance of this structure. LUO uses this registration to
@@ -100,7 +100,7 @@ struct liveupdate_file_ops {
  */
 struct liveupdate_file_handler {
 	const struct liveupdate_file_ops *ops;
-	const char compatible[LIVEUPDATE_HNDL_COMPAT_LENGTH];
+	const char name[LIVEUPDATE_HNDL_NAME_LENGTH];
 
 	/* private: */
 
@@ -227,6 +227,16 @@ struct liveupdate_flb {
 
 #ifdef CONFIG_LIVEUPDATE
 
+#define LIVEUPDATE_FEATURE_ENTRY(_id, _name, _supp, _req, _active)	\
+	static const struct liveupdate_feature_entry __lu_feat_##_id	\
+	__used __section(".liveupdate_features") __aligned(8) = {	\
+		.name       = _name,					\
+		.feat_bytes = sizeof(u64),				\
+		.supp       = (_supp),					\
+		.req        = (_req),					\
+		.active     = (_active),				\
+	}
+
 /* Return true if live update orchestrator is enabled */
 bool liveupdate_enabled(void);
 
@@ -248,6 +258,8 @@ int liveupdate_flb_get_outgoing(struct liveupdate_flb *flb, void **objp);
 void liveupdate_flb_put_outgoing(struct liveupdate_flb *flb);
 
 #else /* CONFIG_LIVEUPDATE */
+
+#define LIVEUPDATE_FEATURE_ENTRY(_id, _name, _supp, _req, _active)
 
 static inline bool liveupdate_enabled(void)
 {
