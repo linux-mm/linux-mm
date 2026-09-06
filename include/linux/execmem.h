@@ -48,10 +48,12 @@ enum execmem_type {
  * enum execmem_range_flags - options for executable memory allocations
  * @EXECMEM_KASAN_SHADOW:	allocate kasan shadow
  * @EXECMEM_ROX_CACHE:		allocations should use ROX cache of huge pages
+ * @EXECMEM_NO_HUGE_VMAP:	cache allocations must avoid huge vmappings
  */
 enum execmem_range_flags {
 	EXECMEM_KASAN_SHADOW	= (1 << 0),
 	EXECMEM_ROX_CACHE	= (1 << 1),
+	EXECMEM_NO_HUGE_VMAP	= (1 << 2),
 };
 
 #ifdef CONFIG_ARCH_HAS_EXECMEM_ROX
@@ -177,6 +179,15 @@ void *execmem_alloc_rw(enum execmem_type type, size_t size);
 void execmem_free(void *ptr);
 
 DEFINE_FREE(execmem, void *, if (_T) execmem_free(_T));
+
+/**
+ * execmem_split - allocate space from an existing execmem cache allocation
+ * @ptr  - the existing execmem cache allocation
+ * @size - the size to carve out from the existing allocation
+ *
+ * Return: the address of the carved out allocation, or %NULL on failure.
+ */
+void *execmem_split(void *ptr, size_t size);
 
 #ifdef CONFIG_MMU
 /**
