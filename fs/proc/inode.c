@@ -239,6 +239,8 @@ static void close_pdeo(struct proc_dir_entry *pde, struct pde_opener *pdeo)
 		spin_unlock(&pde->pde_unload_lock);
 
 		file = pdeo->file;
+		if (pde_is_removed(pde))
+			unmap_mapping_file(file);
 		pde->proc_ops->proc_release(file_inode(file), file);
 
 		spin_lock(&pde->pde_unload_lock);

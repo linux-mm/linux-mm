@@ -224,14 +224,14 @@ static int proc_misc_d_revalidate(struct inode *dir, const struct qstr *name,
 	if (flags & LOOKUP_RCU)
 		return -ECHILD;
 
-	if (atomic_read(&PDE(d_inode(dentry))->in_use) < 0)
+	if (pde_is_removed(PDE(d_inode(dentry))))
 		return 0; /* revalidate */
 	return 1;
 }
 
 static int proc_misc_d_delete(const struct dentry *dentry)
 {
-	return atomic_read(&PDE(d_inode(dentry))->in_use) < 0;
+	return pde_is_removed(PDE(d_inode(dentry)));
 }
 
 static const struct dentry_operations proc_misc_dentry_ops = {
