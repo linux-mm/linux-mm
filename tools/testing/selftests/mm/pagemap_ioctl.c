@@ -793,9 +793,9 @@ static void *gethugepage(size_t map_size)
 	int ret;
 	char *map;
 
-	map = memalign(hpage_size, map_size);
+	map = alloc_isolated_mem(hpage_size, map_size);
 	if (!map)
-		ksft_exit_fail_msg("memalign failed %d %s\n", errno, strerror(errno));
+		ksft_exit_fail_msg("alloc_isolated_mem failed %d %s\n", errno, strerror(errno));
 
 	ret = madvise(map, map_size, MADV_HUGEPAGE);
 	if (ret)
@@ -857,7 +857,7 @@ static int hpage_unit_tests(void)
 
 		/* 4. only middle page written */
 		wp_free(map, map_size);
-		free(map);
+		free_isolated_mem(map, map_size);
 		map = gethugepage(map_size);
 		wp_init(map, map_size);
 		wp_addr_range(map, map_size);
@@ -872,7 +872,7 @@ static int hpage_unit_tests(void)
 				 "%s only middle page written\n", __func__);
 
 		wp_free(map, map_size);
-		free(map);
+		free_isolated_mem(map, map_size);
 	} else {
 		ksft_test_result_skip("%s all new huge page must be written\n", __func__);
 		ksft_test_result_skip("%s all the huge page must not be written\n", __func__);
@@ -899,7 +899,7 @@ static int hpage_unit_tests(void)
 				 vec[0].start == (uintptr_t)(map + map_size/2),
 				 "%s clear first half of huge page\n", __func__);
 		wp_free(map, map_size);
-		free(map);
+		free_isolated_mem(map, map_size);
 	} else {
 		ksft_test_result_skip("%s clear first half of huge page\n", __func__);
 	}
@@ -928,7 +928,7 @@ static int hpage_unit_tests(void)
 				 "%s clear first half of huge page with limited buffer\n",
 				 __func__);
 		wp_free(map, map_size);
-		free(map);
+		free_isolated_mem(map, map_size);
 	} else {
 		ksft_test_result_skip("%s clear first half of huge page with limited buffer\n",
 				      __func__);
@@ -956,7 +956,7 @@ static int hpage_unit_tests(void)
 		ksft_test_result(ret == 1 && LEN(vec[0]) == vec_size/2,
 				 "%s clear second half huge page\n", __func__);
 		wp_free(map, map_size);
-		free(map);
+		free_isolated_mem(map, map_size);
 	} else {
 		ksft_test_result_skip("%s clear second half huge page\n", __func__);
 	}
@@ -989,7 +989,7 @@ static int hpage_unit_tests(void)
 				 "%s get half huge page\n", __func__);
 
 		wp_free(map, map_size);
-		free(map);
+		free_isolated_mem(map, map_size);
 	} else {
 		ksft_test_result_skip("%s get half huge page\n", __func__);
 		ksft_test_result_skip("%s get half huge page\n", __func__);
@@ -1704,7 +1704,7 @@ int main(int __attribute__((unused)) argc, char *argv[])
 		wp_addr_range(map, hpage_size);
 		base_tests("Huge page testing:", map, hpage_size, 0);
 		wp_free(map, hpage_size);
-		free(map);
+		free_isolated_mem(map, hpage_size);
 	} else {
 		base_tests("Huge page testing:", NULL, 0, 1);
 	}
