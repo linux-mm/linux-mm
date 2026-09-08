@@ -4847,9 +4847,7 @@ static int split_huge_pages_pid(int pid, unsigned long vaddr_start,
 		 * can be split or not. So skip the check here.
 		 * data_race() is used to read folio->private locklessly.
 		 */
-		if (!(data_race(folio_test_private(folio)) &&
-		      !folio_test_swapbacked(folio) &&
-		      !folio_test_hugetlb(folio)) &&
+		if (!data_race(folio_test_fs_private(folio)) &&
 		    folio_expected_ref_count(folio) != folio_ref_count(folio))
 			goto next;
 

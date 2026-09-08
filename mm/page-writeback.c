@@ -2706,10 +2706,7 @@ bool filemap_dirty_folio(struct address_space *mapping, struct folio *folio)
 		return false;
 
 	/* data_race() is used to read folio->private locklessly */
-	__folio_mark_dirty(folio, mapping,
-			   !(data_race(folio_test_private(folio)) &&
-			     !folio_test_swapbacked(folio) &&
-			     !folio_test_hugetlb(folio)));
+	__folio_mark_dirty(folio, mapping, !data_race(folio_test_fs_private(folio)));
 
 	if (mapping->host) {
 		/* !PageAnon && !swapper_space */
