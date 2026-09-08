@@ -619,7 +619,6 @@ int ocfs2_calc_xattr_init(struct inode *dir,
 			  int *xattr_credits,
 			  int *want_meta)
 {
-	int ret = 0;
 	struct ocfs2_super *osb = OCFS2_SB(dir->i_sb);
 	int s_size = 0, a_size = 0, acl_len = 0, new_clusters;
 
@@ -645,7 +644,7 @@ int ocfs2_calc_xattr_init(struct inode *dir,
 	}
 
 	if (!(s_size + a_size))
-		return ret;
+		return 0;
 
 	/*
 	 * The max space of security xattr taken inline is
@@ -693,7 +692,7 @@ int ocfs2_calc_xattr_init(struct inode *dir,
 		*want_clusters += new_clusters;
 	}
 
-	return ret;
+	return 0;
 }
 
 static int ocfs2_xattr_extend_allocation(struct inode *inode,
