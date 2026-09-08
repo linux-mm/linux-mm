@@ -1030,7 +1030,8 @@ static void folio_check_dirty_writeback(struct folio *folio,
 	*writeback = folio_test_writeback(folio);
 
 	/* Verify dirty/writeback state if the filesystem supports it */
-	if (!folio_test_private(folio))
+	if (!(folio_test_private(folio) && !folio_test_swapbacked(folio) &&
+	      !folio_test_hugetlb(folio)))
 		return;
 
 	mapping = folio_mapping(folio);
