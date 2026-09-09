@@ -7,6 +7,32 @@
 #include <linux/limits.h>
 #include <asm/page.h>
 
+/*
+ * Hierarchical protection (memory.min / memory.low) tracking.
+ *
+ * Only the memory page counter (and dmem pools) participate in protection.
+ * swap/memsw, kmem and tcpmem page counters never do, so the protection
+ * fields are kept out of struct page_counter in this separate structure to
+ * save space in the common case. struct page_counter links to it via ->prot,
+ * which is NULL for counters without protection support.
+ */
+struct page_counter_protection {
+	struct page_counter_protection *parent;
+
+	/* effective memory.min and memory.min usage tracking */
+	unsigned long emin;
+	atomic_long_t min_usage;
+	atomic_long_t children_min_usage;
+
+	/* effective memory.low and memory.low usage tracking */
+	unsigned long elow;
+	atomic_long_t low_usage;
+	atomic_long_t children_low_usage;
+
+	unsigned long min;
+	unsigned long low;
+};
+
 struct page_counter {
 	/*
 	 * Make sure 'usage' does not share cacheline with any other field in
@@ -41,6 +67,12 @@ struct page_counter {
 	unsigned long high;
 	unsigned long max;
 	struct page_counter *parent;
+
+	/*
+	 * Hierarchical protection context, NULL for counters that do not
+	 * support memory.min/memory.low (swap, memsw, kmem, tcpmem, ...).
+	 */
+	struct page_counter_protection *prot;
 } ____cacheline_internodealigned_in_smp;
 
 #if BITS_PER_LONG == 32
@@ -49,18 +81,33 @@ struct page_counter {
 #define PAGE_COUNTER_MAX (LONG_MAX / PAGE_SIZE)
 #endif
 
-/*
- * Protection is supported only for the first counter (with id 0).
- */
 static inline void page_counter_init(struct page_counter *counter,
-				     struct page_counter *parent,
-				     bool protection_support)
+				     struct page_counter *parent)
 {
 	counter->usage = (atomic_long_t)ATOMIC_LONG_INIT(0);
 	counter->max = PAGE_COUNTER_MAX;
 	counter->parent = parent;
-	counter->protection_support = protection_support;
 	counter->track_failcnt = false;
+	counter->prot = NULL;
+}
+
+/*
+ * Enable hierarchical protection (memory.min/memory.low) on @counter.
+ * @prot and @parent are the protection contexts of @counter and its
+ * parent page counter respectively. Only the memory page counter (and
+ * dmem pools) call this.
+ *
+ * The remaining members of @prot (emin, elow and the usage counters) are
+ * expected to be zero already, so @prot must come from zeroed memory.
+ */
+static inline void page_counter_init_protection(struct page_counter *counter,
+						struct page_counter_protection *prot,
+						struct page_counter_protection *parent)
+{
+	counter->prot = prot;
+	prot->parent = parent;
+	prot->min = 0;
+	prot->low = 0;
 }
 
 static inline unsigned long page_counter_read(struct page_counter *counter)
