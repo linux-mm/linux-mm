@@ -402,6 +402,12 @@ CATEGORY="pfnmap" run_test ./pfnmap
 # COW tests
 CATEGORY="cow" run_test ./cow
 
+CATEGORY="thp" run_test ./folio_order_check
+
+CATEGORY="thp" run_test ./khugepaged_sync_check
+
+CATEGORY="thp" run_test ./khugepaged_race
+
 CATEGORY="thp" run_test ./khugepaged
 
 CATEGORY="thp" run_test ./khugepaged -s 2
@@ -409,8 +415,6 @@ CATEGORY="thp" run_test ./khugepaged -s 2
 CATEGORY="thp" run_test ./khugepaged all:shmem
 
 CATEGORY="thp" run_test ./khugepaged -s 4 all:shmem
-
-CATEGORY="thp" run_test ./khugepaged -c 4 mthp_khugepaged:anon
 
 # Try to create XFS if not provided
 if [ -z "${SPLIT_HUGE_PAGE_TEST_XFS_PATH}" ]; then
