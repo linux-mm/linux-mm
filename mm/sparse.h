@@ -97,6 +97,9 @@ static inline void sparse_init_one_section(struct mem_section *ms,
 
 	BUILD_BUG_ON(SECTION_MAP_LAST_BIT > PFN_SECTION_SHIFT);
 
+	if (section_nr > __highest_used_section_nr)
+		__highest_used_section_nr = section_nr;
+
 	/*
 	 * We encode the start PFN of the section into the mem_map such that
 	 * page_to_pfn() on !CONFIG_SPARSEMEM_VMEMMAP can simply subtract it
@@ -114,9 +117,6 @@ static inline void sparse_init_one_section(struct mem_section *ms,
 static inline void __section_mark_present(struct mem_section *ms,
 		unsigned long section_nr)
 {
-	if (section_nr > __highest_used_section_nr)
-		__highest_used_section_nr = section_nr;
-
 	ms->section_mem_map |= SECTION_MARKED_PRESENT;
 }
 
