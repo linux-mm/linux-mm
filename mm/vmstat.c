@@ -1507,6 +1507,16 @@ const char * const vmstat_text[] = {
 	[I(NRSWPIN)]				= "nrswpin",
 	[I(NRSWPOUT)]				= "nrswpout",
 #endif /* CONFIG_SWAP */
+#ifdef CONFIG_DEBUG_VM
+	[I(FOLIO_NOT_GOT)]			= "folio_not_got",
+	[I(FOLIO_OFF_LRU)]			= "folio_off_lru",
+	[I(FOLIO_HOISTED)]			= "folio_hoisted",
+	[I(FOLIO_MATCHED)]			= "folio_matched",
+	[I(FOLIO_SWAPPED)]			= "folio_swapped",
+	[I(FOLIO_CHANGED)]			= "folio_changed",
+	[I(FOLIO_ALREADY)]			= "folio_already",
+	[I(FOLIO_SKIPPED)]			= "folio_skipped",
+#endif /* CONFIG_DEBUG_VM */
 #undef I
 #endif /* CONFIG_VM_EVENT_COUNTERS */
 };

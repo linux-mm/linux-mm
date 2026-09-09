@@ -40,25 +40,92 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/pagemap.h>
 
+#ifdef CONFIG_DEBUG_VM
+#define PARANOID_SIZE FOLIO_BATCH_SIZE
+#else
+#define PARANOID_SIZE 0
+#endif
+
+struct mapix {
+	struct address_space *mapping;
+	pgoff_t index;
+};
+
 struct cpu_fbatches {
 	/*
-	 * The following folio batches are grouped together because they are protected
-	 * by disabling preemption (and interrupts remain enabled).
+	 * The following folio batches are grouped together because they are
+	 * protected by disabling preemption (and interrupts remain enabled).
 	 */
 	local_lock_t lock;
 	struct folio_batch lru_add;
+	struct mapix mapix0[PARANOID_SIZE];
 	struct folio_batch lru_activate;
+	struct mapix mapix1[PARANOID_SIZE];
 	struct folio_batch lru_deactivate_file;
+	struct mapix mapix2[PARANOID_SIZE];
 	struct folio_batch lru_deactivate;
+	struct mapix mapix3[PARANOID_SIZE];
 	/* Protecting the following batches which require disabling interrupts */
 	local_lock_t lock_irq;
 	struct folio_batch lru_move_tail;
+	struct mapix mapix4[PARANOID_SIZE];
 };
 
 static DEFINE_PER_CPU(struct cpu_fbatches, cpu_fbatches) = {
 	.lock = INIT_LOCAL_LOCK(lock),
 	.lock_irq = INIT_LOCAL_LOCK(lock_irq),
 };
+
+#if PARANOID_SIZE
+static void paranoid_count(enum vm_event_item folio_counter)
+{
+	count_vm_event(folio_counter);
+}
+
+static void paranoid_save_mapix(struct folio_batch *fbatch)
+{
+	int i = fbatch->nr - 1;	/* folio has just been added */
+	struct mapix *mapix;
+
+	mapix = (struct mapix *)(fbatch->folios + ARRAY_SIZE(fbatch->folios));
+	mapix += i;
+	mapix->mapping = fbatch->folios[i]->mapping;
+	mapix->index = fbatch->folios[i]->index;
+}
+
+static void paranoid_check_mapix(struct folio_batch *fbatch, int i)
+{
+	struct folio *folio = fbatch->folios[i];
+	enum vm_event_item folio_counter;
+	struct mapix *mapix;
+	unsigned long lru_next = READ_ONCE(folio->lru_next);
+
+	if (lru_next & BIT(LRU_NEXT_BATCHED)) {
+		lru_next ^= (unsigned long)&fbatch->folios[i];
+		if (lru_next & ~(BIT(NR_LRU_NEXT_FLAGS) - 1))
+			paranoid_count(FOLIO_HOISTED);
+	}
+
+	mapix = (struct mapix *)(fbatch->folios + ARRAY_SIZE(fbatch->folios));
+	mapix += i;
+	if (folio->mapping == mapix->mapping && folio->index == mapix->index) {
+		folio_counter = FOLIO_MATCHED;
+	} else if (!folio->mapping || !mapix->mapping) {
+		/* Truncated? Swapcache? Needs more cleverness */
+		if (folio->index == mapix->index)
+			folio_counter = FOLIO_MATCHED;
+		else
+			folio_counter = FOLIO_SWAPPED;
+	} else {
+		folio_counter = FOLIO_CHANGED;
+	}
+	paranoid_count(folio_counter);
+}
+#else
+static void paranoid_count(int event) { }
+static void paranoid_save_mapix(struct folio_batch *fbatch) { }
+static void paranoid_check_mapix(struct folio_batch *fbatch, int i) { }
+#endif
 
 static void __page_cache_release(struct folio *folio, struct lruvec **lruvecp,
 		unsigned long *flagsp)
@@ -135,22 +202,32 @@ static void folio_batch_move_lru(struct folio_batch *fbatch, move_fn_t move_fn)
 	for (i = 0; i < folio_batch_count(fbatch); i++) {
 		struct folio *folio = fbatch->folios[i];
 
-		if (!folio_try_get(folio))
+		if (!folio_try_get(folio)) {
+			paranoid_count(FOLIO_NOT_GOT);
 			continue;
+		}
 
-		if (!folio_test_clear_lru(folio))
+		if (!folio_test_clear_lru(folio)) {
+			paranoid_count(FOLIO_OFF_LRU);
 			goto restored_lru;
+		}
+
+		paranoid_check_mapix(fbatch, i);
 
 		/* Do not add to LRU if it has already been added */
-		if (move_fn == lru_add && !lru_add_del_folio(folio))
+		if (move_fn == lru_add && !lru_add_del_folio(folio)) {
+			paranoid_count(FOLIO_ALREADY);
 			goto restore_lru;
+		}
 
 		folio_lruvec_relock_irqsave(folio, &lruvec, &flags);
 		move_fn(lruvec, folio);
 
 		/* Do add to LRU if not already there (move_fn skipped) */
-		if (lru_add_del_folio(folio))
+		if (lru_add_del_folio(folio)) {
 			lruvec_add_folio(lruvec, folio);
+			paranoid_count(FOLIO_SKIPPED);
+		}
 restore_lru:
 		folio_set_lru(folio);
 		/* See mm/vmscan.c move_folios_to_lru() comment on ordering */
@@ -176,16 +253,21 @@ restored_lru:
 static void __folio_batch_add_and_move(struct folio_batch __percpu *fbatch,
 		struct folio *folio, move_fn_t move_fn, bool disable_irq)
 {
+	struct folio_batch *cpu_fbatch;
 	unsigned long flags;
+	bool full;
 
 	if (disable_irq)
 		local_lock_irqsave(&cpu_fbatches.lock_irq, flags);
 	else
 		local_lock(&cpu_fbatches.lock);
 
-	if (!folio_batch_add(this_cpu_ptr(fbatch), folio) ||
-			!folio_may_be_lru_cached(folio))
-		folio_batch_move_lru(this_cpu_ptr(fbatch), move_fn);
+	cpu_fbatch = this_cpu_ptr(fbatch);
+	full = !folio_batch_add(cpu_fbatch, folio);
+	paranoid_save_mapix(cpu_fbatch);
+
+	if (full || !folio_may_be_lru_cached(folio))
+		folio_batch_move_lru(cpu_fbatch, move_fn);
 
 	if (disable_irq)
 		local_unlock_irqrestore(&cpu_fbatches.lock_irq, flags);
@@ -443,6 +525,7 @@ void __folio_add_lru(struct folio *folio, bool mlockit)
 	}
 
 	full = !folio_batch_add(fbatch, folio);
+	paranoid_save_mapix(fbatch);
 
 	/* Ensure folio->lru_next visible to folio_test_clear_lru() callers */
 	smp_mb__before_atomic();
