@@ -1320,8 +1320,10 @@ static void swap_range_free(struct swap_info_struct *si, unsigned long offset,
 	void (*swap_slot_free_notify)(struct block_device *, unsigned long);
 	unsigned int i;
 
-	for (i = 0; i < nr_entries; i++)
-		zswap_invalidate(si->type, offset + i);
+	if (!zswap_never_enabled()) {
+		for (i = 0; i < nr_entries; i++)
+			zswap_invalidate(si->type, offset + i);
+	}
 
 	if (si->flags & SWP_BLKDEV)
 		swap_slot_free_notify =
