@@ -1686,20 +1686,10 @@ static inline bool zone_is_zone_device(const struct zone *zone)
 {
 	return zone_idx(zone) == ZONE_DEVICE;
 }
-
-static inline struct zone *device_zone(int nid)
-{
-	return &NODE_DATA(nid)->node_zones[ZONE_DEVICE];
-}
 #else
 static inline bool zone_is_zone_device(const struct zone *zone)
 {
 	return false;
-}
-
-static inline struct zone *device_zone(int nid)
-{
-	return NULL;
 }
 #endif
 
@@ -2159,10 +2149,20 @@ static inline int online_device_section(const struct mem_section *section)
 
 	return section && ((section->section_mem_map & flags) == flags);
 }
+
+static inline struct zone *device_zone(int nid)
+{
+	return &NODE_DATA(nid)->node_zones[ZONE_DEVICE];
+}
 #else
 static inline int online_device_section(const struct mem_section *section)
 {
 	return 0;
+}
+
+static inline struct zone *device_zone(int nid)
+{
+	return NULL;
 }
 #endif
 
