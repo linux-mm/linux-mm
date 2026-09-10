@@ -1489,6 +1489,9 @@ bool zswap_store(struct folio *folio)
 	VM_WARN_ON_ONCE(!folio_test_locked(folio));
 	VM_WARN_ON_ONCE(!folio_test_swapcache(folio));
 
+	if (zswap_never_enabled())
+		return false;
+
 	if (!zswap_enabled)
 		goto check_old;
 
