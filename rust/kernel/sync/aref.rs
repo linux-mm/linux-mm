@@ -147,7 +147,10 @@ impl<T: RefCounted> ARef<T> {
     ///
     /// struct Empty {}
     ///
-    /// # // SAFETY: TODO.
+    /// // SAFETY: The `RefCounted` implementation for `Empty` does not count references, and
+    /// // `dec_ref` never frees the underlying object, so a decrement cannot invalidate it. The
+    /// // object instead lives as long as the `Empty` value itself, so creators of `ARef<Empty>`
+    /// // must guarantee that the value outlives every `ARef` derived from it (as done below).
     /// unsafe impl RefCounted for Empty {
     ///     fn inc_ref(&self) {}
     ///     unsafe fn dec_ref(_obj: NonNull<Self>) {}
@@ -155,7 +158,9 @@ impl<T: RefCounted> ARef<T> {
     ///
     /// let mut data = Empty {};
     /// let ptr = NonNull::<Empty>::new(&mut data).unwrap();
-    /// # // SAFETY: TODO.
+    /// // SAFETY: As the refcount operations of `Empty` are no-ops, we can treat `ptr` as owning
+    /// // an increment on the refcount. `data` outlives the created `ARef`, upholding the
+    /// // liveness guarantee required by the `RefCounted` implementation above.
     /// let data_ref: ARef<Empty> = unsafe { ARef::from_raw(ptr) };
     /// let raw_ptr: NonNull<Empty> = ARef::into_raw(data_ref);
     ///
