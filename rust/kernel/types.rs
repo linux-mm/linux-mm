@@ -21,6 +21,7 @@ pub use for_lt::{
 pub use crate::{
     owned::{
         Ownable,
+        OwnableRefCounted,
         Owned, //
     },
     sync::aref::{
