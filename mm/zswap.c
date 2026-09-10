@@ -1546,15 +1546,9 @@ check_old:
 	if (!ret) {
 		unsigned type = swp_type(swp);
 		pgoff_t offset = swp_offset(swp);
-		struct zswap_entry *entry;
-		struct xarray *tree;
 
-		for (index = 0; index < nr_pages; ++index) {
-			tree = swap_zswap_tree(swp_entry(type, offset + index));
-			entry = xa_erase(tree, offset + index);
-			if (entry)
-				zswap_entry_free(entry);
-		}
+		for (index = 0; index < nr_pages; ++index)
+			zswap_invalidate(type, offset + index);
 	}
 
 	return ret;
