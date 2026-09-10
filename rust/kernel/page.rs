@@ -17,7 +17,11 @@ use crate::{
         AlwaysRefCounted,
         RefCounted, //
     },
-    types::Opaque,
+    types::{
+        Opaque,
+        Ownable,
+        Owned, //
+    },
     uaccess::UserSliceReader, //
 };
 use core::ptr::{
@@ -349,3 +353,52 @@ unsafe impl RefCounted for Page {
 // SAFETY: We do not implement `Ownable`, thus it is okay to obtain an `ARef<Page>` from a
 // `&Page`.
 unsafe impl AlwaysRefCounted for Page {}
+
+/// A page whose data area follows standard Rust aliasing rules.
+///
+/// [`ExclusivePage`] has the same usage constraints as other Rust types. Thus, it cannot be mapped
+/// to user space or shared with devices. This makes it safe to reference the contents of the page
+/// while the page is mapped in kernel space.
+///
+/// Note: [`ExclusivePage`] does not provide access to the underlying [`Page`]. Handing out a
+/// `&Page` would allow safe code to obtain an [`ARef<Page>`] to the page, which would violate the
+/// invariants of `ExclusivePage`.
+///
+/// # Invariants
+///
+/// The data of this page is accessed only through references to [`ExclusivePage`]. While a shared
+/// reference to a [`ExclusivePage`] exists, there are no writes to its data. While an exclusive
+/// reference exists, there are no other reads or writes of its data.
+#[repr(transparent)]
+pub struct ExclusivePage(Page);
+
+impl ExclusivePage {
+    /// Allocates a new `ExclusivePage`.
+    pub fn alloc_page(flags: Flags) -> Result<Owned<Self>, AllocError> {
+        // SAFETY: Depending on the value of `gfp_flags`, this call may sleep. Other than that, it
+        // is always safe to call this method.
+        let page = unsafe { bindings::alloc_pages(flags.as_raw(), 0) };
+        let page = NonNull::new(page).ok_or(AllocError)?;
+
+        // INVARIANT: The page was just allocated, so its data is only accessible through the
+        // returned `Owned<ExclusivePage>`.
+        // SAFETY:
+        //  - We just successfully allocated a page, so we hold the only reference to it, and we can
+        //    transfer that exclusive ownership to the new `Owned<ExclusivePage>`. Since
+        //    `ExclusivePage`
+        //    is transparent over `Page`, we can cast the pointer directly.
+        //  - The page is never moved out of its allocation, so we can treat it as pinned.
+        Ok(unsafe { Owned::from_raw(page.cast()) })
+    }
+}
+
+impl Ownable for ExclusivePage {
+    #[inline]
+    unsafe fn release(this: NonNull<Self>) {
+        // SAFETY: By the function safety requirements, we have exclusive ownership of the page, and
+        // by the type invariant no other references to it exist, so we relinquish the last
+        // reference count and the page is freed. Since `ExclusivePage` is transparent over `Page`,
+        // we can cast the pointer directly.
+        unsafe { bindings::put_page(this.cast().as_ptr()) };
+    }
+}
