@@ -2232,6 +2232,218 @@ drop_pml:
 	i_mmap_unlock_read(mapping);
 }
 
+struct collapse_file_state {
+	/* in-out parameter */
+	struct folio *folio;
+	/* in parameters */
+	struct address_space *mapping;
+	struct file *file;
+	struct xa_state *xas;
+	/* collapse end index */
+	pgoff_t end;
+	unsigned int is_shmem : 1;
+};
+
+static struct folio *collapse_read_folio(pgoff_t index, struct collapse_file_state *state)
+{
+	const bool may_bring_uptodate = state->is_shmem;
+	struct folio *folio = state->folio;
+
+	if (!folio || xa_is_value(folio) ||
+	   (may_bring_uptodate && !folio_test_uptodate(folio))) {
+		xas_unlock_irq(state->xas);
+		if (state->is_shmem) {
+			/* swap in or instantiate fallocated page */
+			if (shmem_get_folio(state->mapping->host, index, 0,
+					    &folio, SGP_NOALLOC))
+				return NULL;
+		} else {
+			page_cache_sync_readahead(state->mapping, &state->file->f_ra,
+						  state->file, index,
+						  state->end - index);
+			folio = filemap_lock_folio(state->mapping, index);
+			if (IS_ERR(folio))
+				return NULL;
+		}
+	}
+
+	return folio;
+}
+
+
+/**
+ * prepare_collapse_file_folio() - Prepare the collapsing of a single file folio
+ * @index: folio index in the page cache
+ * @state: helper struct of state being passed back and forth.
+ *
+ * prepare_collapse_file_folio() helps prepare the THP collapsing of file folios
+ * (both shmem and !shmem), including the reading of folios, initial tests for
+ * dirty/writeback, locking, etc.
+ *
+ * Context: Expects @state->mapping->i_pages->xa_lock to be held. Releases the same xa_lock.
+ *          On success, returns a refcounted and locked folio in @state->folio (that may
+ *          not be the same that was passed in).
+ * Return: Appropriate scan_result value (on success, SCAN_SUCCEED).
+ */
+static enum scan_result prepare_collapse_file_folio(pgoff_t index, struct collapse_file_state *state)
+{
+	struct address_space *mapping = state->mapping;
+	const int is_shmem = state->is_shmem;
+	enum scan_result ret = SCAN_SUCCEED;
+	struct folio *folio;
+	bool dirty;
+
+	folio = collapse_read_folio(index, state);
+	if (!folio)
+		return SCAN_FAIL;
+	if (folio != state->folio) {
+		/*
+		 * collapse_read_folio() got a new folio. This folio is locked
+		 * and ref'd up. Nothing tricky (dirty, writeback, etc) can
+		 * happen, so bail now. But before that, drain the local LRU
+		 * add batch. Otherwise, it's very possible folio_isolate_lru()
+		 * will not succeed.
+		 */
+		lru_add_drain();
+		state->folio = folio;
+		return SCAN_SUCCEED;
+	}
+
+	if (!is_shmem) {
+		dirty = folio_test_dirty(folio);
+		if (dirty || folio_test_writeback(folio)) {
+			/*
+			 * This folio is either dirty or under writeback.
+			 * khugepaged cannot operate on such folios.
+			 *
+			 * For dirty folios, trigger async flush for
+			 * read-only files and hope the writeback is done
+			 * when khugepaged revisits this page. Writable
+			 * files can have their folios dirty at any time;
+			 * blindly flushing them would cause undesirable
+			 * system-wide writeback.
+			 *
+			 * This is a one-off situation. We are not
+			 * forcing writeback in loop.
+			 */
+			xas_unlock_irq(state->xas);
+			if (dirty && !inode_is_open_for_write(mapping->host))
+				filemap_flush(mapping);
+			return SCAN_PAGE_DIRTY_OR_WRITEBACK;
+		}
+	}
+
+
+	/*
+	 * Note: trylock + simple folio_get() is safe here due to the i_pages
+	 * lock being held; this excludes truncation happening in parallel.
+	 */
+	if (!folio_trylock(folio))
+		ret = SCAN_PAGE_LOCK;
+	else
+		folio_get(folio);
+	xas_unlock_irq(state->xas);
+	return ret;
+}
+
+static enum scan_result collapse_isolate_folio(struct collapse_file_state *state)
+{
+	struct folio *folio = state->folio;
+	enum scan_result result;
+
+	/*
+	 * The folio must be locked, so we can drop the i_pages lock
+	 * without racing with truncate.
+	 */
+	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+
+	/* make sure the folio is up to date */
+	if (unlikely(!folio_test_uptodate(folio))) {
+		result = SCAN_FAIL;
+		goto out_unlock;
+	}
+
+	/*
+	 * If file was truncated then extended, or hole-punched, before
+	 * we locked the first folio, then a THP might be there already.
+	 * This will be discovered on the first iteration.
+	 */
+	if (is_pmd_order(folio_order(folio))) {
+		result = SCAN_PTE_MAPPED_HUGEPAGE;
+		goto out_unlock;
+	}
+
+	if (folio_mapping(folio) != state->mapping) {
+		result = SCAN_TRUNCATED;
+		goto out_unlock;
+	}
+
+	if (!state->is_shmem && (folio_test_dirty(folio) ||
+			         folio_test_writeback(folio))) {
+		/*
+		 * khugepaged only works on clean file-backed folios,
+		 * so this folio is dirty because it hasn't been flushed
+		 * since first write.
+		 */
+		result = SCAN_PAGE_DIRTY_OR_WRITEBACK;
+		goto out_unlock;
+	}
+
+	if (!folio_isolate_lru(folio)) {
+		result = SCAN_DEL_PAGE_LRU;
+		goto out_unlock;
+	}
+
+	if (!filemap_release_folio(folio, GFP_KERNEL)) {
+		result = SCAN_PAGE_HAS_PRIVATE;
+		goto out_putback;
+	}
+
+	if (folio_mapped(folio))
+		try_to_unmap(folio, TTU_IGNORE_MLOCK | TTU_BATCH_FLUSH);
+	/*
+	 * We control 2 + nr_pages references to the folio:
+	 *  - we hold a pin on it;
+	 *  - nr_pages reference from page cache;
+	 *  - one from lru_isolate_folio;
+	 * If those are the only references, then any new usage
+	 * of the folio will have to fetch it from the page
+	 * cache. That requires locking the folio to handle
+	 * truncate, so any new usage will be blocked until we
+	 * unlock folio after collapse/during rollback.
+	 */
+	if (folio_ref_count(folio) != 2 + folio_nr_pages(folio)) {
+		result = SCAN_PAGE_COUNT;
+		goto out_putback;
+	}
+
+	/*
+	 * At this point, the folio is locked and unmapped. If the PTE
+	 * was dirty, try_to_unmap() has transferred the dirty bit to
+	 * the folio and we must not collapse it into a clean
+	 * file-backed folio.
+	 *
+	 * If the folio is clean here, no one can write it until we
+	 * drop the folio lock. A write through a stale TLB entry came
+	 * from a clean PTE and must fault because the PTE has been
+	 * cleared; the fault path has to take the folio lock before
+	 * installing a writable mapping. Buffered write paths also
+	 * have to take the folio lock before modifying file contents
+	 * without a mapping, typically via write_begin_get_folio().
+	 */
+	if (!state->is_shmem && folio_test_dirty(folio)) {
+		result = SCAN_PAGE_DIRTY_OR_WRITEBACK;
+		goto out_putback;
+	}
+	return SCAN_SUCCEED;
+out_putback:
+	folio_putback_lru(folio);
+out_unlock:
+	folio_unlock(folio);
+	folio_put(folio);
+	return result;
+}
+
 /**
  * collapse_file - collapse filemap/tmpfs/shmem pages into huge one.
  *
@@ -2270,6 +2482,13 @@ static enum scan_result collapse_file(struct mm_struct *mm, unsigned long addr,
 	enum scan_result result = SCAN_SUCCEED;
 	int nr_none = 0;
 	bool is_shmem = shmem_file(file);
+	struct collapse_file_state state = {
+		.is_shmem = is_shmem,
+		.xas = &xas,
+		.mapping = mapping,
+		.file = file,
+		.end = end,
+	};
 
 	/*
 	 * MADV_COLLAPSE ignores shmem huge config, so do not check shmem
@@ -2314,193 +2533,42 @@ static enum scan_result collapse_file(struct mm_struct *mm, unsigned long addr,
 		folio = xas_load(&xas);
 
 		VM_BUG_ON(index != xas.xa_index);
-		if (is_shmem) {
-			if (!folio) {
-				/*
-				 * Stop if extent has been truncated or
-				 * hole-punched, and is now completely
-				 * empty.
-				 */
-				if (index == start) {
-					if (!xas_next_entry(&xas, end - 1)) {
-						result = SCAN_TRUNCATED;
-						goto xa_locked;
-					}
-				}
-				nr_none++;
-				index++;
-				continue;
-			}
-
-			if (xa_is_value(folio) || !folio_test_uptodate(folio)) {
-				xas_unlock_irq(&xas);
-				/* swap in or instantiate fallocated page */
-				if (shmem_get_folio(mapping->host, index, 0,
-						&folio, SGP_NOALLOC)) {
-					result = SCAN_FAIL;
-					goto xa_unlocked;
-				}
-				/* drain lru cache to help folio_isolate_lru() */
-				lru_add_drain();
-			} else if (folio_trylock(folio)) {
-				folio_get(folio);
-				xas_unlock_irq(&xas);
-			} else {
-				result = SCAN_PAGE_LOCK;
-				goto xa_locked;
-			}
-		} else {	/* !is_shmem */
-			if (!folio || xa_is_value(folio)) {
-				xas_unlock_irq(&xas);
-				page_cache_sync_readahead(mapping, &file->f_ra,
-							  file, index,
-							  end - index);
-				/* drain lru cache to help folio_isolate_lru() */
-				lru_add_drain();
-				folio = filemap_lock_folio(mapping, index);
-				if (IS_ERR(folio)) {
-					result = SCAN_FAIL;
-					goto xa_unlocked;
-				}
-			} else if (folio_test_dirty(folio)) {
-				/*
-				 * This page is dirty because it hasn't
-				 * been flushed since first write.
-				 *
-				 * Trigger async flush for read-only files and
-				 * hope the writeback is done when khugepaged
-				 * revisits this page. Writable files can have
-				 * their folios dirty at any time; blindly
-				 * flushing them would cause undesirable
-				 * system-wide writeback.
-				 *
-				 * This is a one-off situation. We are not
-				 * forcing writeback in loop.
-				 */
-				xas_unlock_irq(&xas);
-				if (!inode_is_open_for_write(mapping->host))
-					filemap_flush(mapping);
-				result = SCAN_PAGE_DIRTY_OR_WRITEBACK;
-				goto xa_unlocked;
-			} else if (folio_test_writeback(folio)) {
-				xas_unlock_irq(&xas);
-				result = SCAN_PAGE_DIRTY_OR_WRITEBACK;
-				goto xa_unlocked;
-			} else if (folio_trylock(folio)) {
-				folio_get(folio);
-				xas_unlock_irq(&xas);
-			} else {
-				result = SCAN_PAGE_LOCK;
-				goto xa_locked;
-			}
-		}
-
-		/*
-		 * The folio must be locked, so we can drop the i_pages lock
-		 * without racing with truncate.
-		 */
-		VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
-
-		/* make sure the folio is up to date */
-		if (unlikely(!folio_test_uptodate(folio))) {
-			result = SCAN_FAIL;
-			goto out_unlock;
-		}
-
-		/*
-		 * If file was truncated then extended, or hole-punched, before
-		 * we locked the first folio, then a THP might be there already.
-		 * This will be discovered on the first iteration.
-		 */
-		if (is_pmd_order(folio_order(folio))) {
-			result = SCAN_PTE_MAPPED_HUGEPAGE;
-			goto out_unlock;
-		}
-
-		if (folio_mapping(folio) != mapping) {
-			result = SCAN_TRUNCATED;
-			goto out_unlock;
-		}
-
-		if (!is_shmem && (folio_test_dirty(folio) ||
-				  folio_test_writeback(folio))) {
+		if (is_shmem && !folio) {
 			/*
-			 * khugepaged only works on clean file-backed folios,
-			 * so this folio is dirty because it hasn't been flushed
-			 * since first write.
+			 * Stop if extent has been truncated or
+			 * hole-punched, and is now completely
+			 * empty.
 			 */
-			result = SCAN_PAGE_DIRTY_OR_WRITEBACK;
-			goto out_unlock;
+			if (index == start) {
+				if (!xas_next_entry(&xas, end - 1)) {
+					result = SCAN_TRUNCATED;
+					goto xa_locked;
+				}
+			}
+			nr_none++;
+			index++;
+			continue;
 		}
 
-		if (!folio_isolate_lru(folio)) {
-			result = SCAN_DEL_PAGE_LRU;
-			goto out_unlock;
-		}
+		/* At this point folio can be NULL, or a value. */
+		state.folio = folio;
+		result = prepare_collapse_file_folio(index, &state);
+		folio = state.folio;
+		if (result != SCAN_SUCCEED)
+			goto xa_unlocked;
 
-		if (!filemap_release_folio(folio, GFP_KERNEL)) {
-			result = SCAN_PAGE_HAS_PRIVATE;
-			folio_putback_lru(folio);
-			goto out_unlock;
-		}
-
-		if (folio_mapped(folio))
-			try_to_unmap(folio,
-					TTU_IGNORE_MLOCK | TTU_BATCH_FLUSH);
+		result = collapse_isolate_folio(&state);
+		if (result != SCAN_SUCCEED)
+			goto xa_unlocked;
 
 		xas_lock_irq(&xas);
-
 		VM_BUG_ON_FOLIO(folio != xa_load(xas.xa, index), folio);
-
-		/*
-		 * We control 2 + nr_pages references to the folio:
-		 *  - we hold a pin on it;
-		 *  - nr_pages reference from page cache;
-		 *  - one from lru_isolate_folio;
-		 * If those are the only references, then any new usage
-		 * of the folio will have to fetch it from the page
-		 * cache. That requires locking the folio to handle
-		 * truncate, so any new usage will be blocked until we
-		 * unlock folio after collapse/during rollback.
-		 */
-		if (folio_ref_count(folio) != 2 + folio_nr_pages(folio)) {
-			result = SCAN_PAGE_COUNT;
-			xas_unlock_irq(&xas);
-			folio_putback_lru(folio);
-			goto out_unlock;
-		}
-
-		/*
-		 * At this point, the folio is locked and unmapped. If the PTE
-		 * was dirty, try_to_unmap() has transferred the dirty bit to
-		 * the folio and we must not collapse it into a clean
-		 * file-backed folio.
-		 *
-		 * If the folio is clean here, no one can write it until we
-		 * drop the folio lock. A write through a stale TLB entry came
-		 * from a clean PTE and must fault because the PTE has been
-		 * cleared; the fault path has to take the folio lock before
-		 * installing a writable mapping. Buffered write paths also
-		 * have to take the folio lock before modifying file contents
-		 * without a mapping, typically via write_begin_get_folio().
-		 */
-		if (!is_shmem && folio_test_dirty(folio)) {
-			result = SCAN_PAGE_DIRTY_OR_WRITEBACK;
-			xas_unlock_irq(&xas);
-			folio_putback_lru(folio);
-			goto out_unlock;
-		}
 
 		/*
 		 * Accumulate the folios that are being collapsed.
 		 */
 		list_add_tail(&folio->lru, &pagelist);
 		index += folio_nr_pages(folio);
-		continue;
-out_unlock:
-		folio_unlock(folio);
-		folio_put(folio);
-		goto xa_unlocked;
 	}
 
 xa_locked:
@@ -2508,15 +2576,19 @@ xa_locked:
 xa_unlocked:
 
 	/*
-	 * If collapse is successful, flush must be done now before copying.
-	 * If collapse is unsuccessful, does flush actually need to be done?
-	 * Do it anyway, to clear the state.
+	 * try_to_unmap() flush must be done now before copying, regardless
+	 * of success or not. In case of success, folios are about to be
+	 * copied and collapsed onto a single large folio. In that case,
+	 * stale TLB entries need to be flushed out, so no racing write may
+	 * get lost. In case of failure, stale TLB entries need to be flushed
+	 * out before putting the folio (which can possibly free it).
 	 */
 	try_to_unmap_flush();
 
 	if (result == SCAN_SUCCEED && nr_none &&
 	    !shmem_charge(mapping->host, nr_none))
 		result = SCAN_FAIL;
+
 	if (result != SCAN_SUCCEED) {
 		nr_none = 0;
 		goto rollback;
