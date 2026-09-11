@@ -2697,12 +2697,14 @@ int migrate_misplaced_folio_prepare(struct folio *folio,
 		/*
 		 * Do not migrate file folios that are mapped in multiple
 		 * processes with execute permissions as they are probably
-		 * shared libraries.
+		 * shared libraries, unless this is a promotion from a slow tier.
 		 *
 		 * See folio_maybe_mapped_shared() on possible imprecision
 		 * when we cannot easily detect if a folio is shared.
 		 */
-		if ((vma->vm_flags & VM_EXEC) && folio_maybe_mapped_shared(folio))
+		if ((vma->vm_flags & VM_EXEC) &&
+		    folio_maybe_mapped_shared(folio) &&
+		    (!folio_use_access_time(folio) || !node_is_toptier(node)))
 			return -EACCES;
 
 		/*
