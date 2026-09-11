@@ -9,3 +9,20 @@ kcov-rflags-$(CONFIG_KCOV_ENABLE_COMPARISONS)	+= -Cllvm-args=-sanitizer-coverage
 
 export CFLAGS_KCOV := $(kcov-flags-y)
 export RUSTFLAGS_KCOV := $(kcov-rflags-y)
+
+# KCOV dataflow: trace function args and return values. Each kind is gated by
+# its own Kconfig symbol, matching the #ifdef around the callback it emits calls
+# to in kernel/kcov_dataflow.c (an instrumented object must never reference a
+# callback that is not compiled in). Both variables are empty on a KCOV-only
+# kernel, so a stray per-file KCOV_DATAFLOW_file.o := y is harmless there.
+kcov-dataflow-flags-$(CONFIG_KCOV_DATAFLOW_ARGS) += -fsanitize-coverage=trace-args
+kcov-dataflow-flags-$(CONFIG_KCOV_DATAFLOW_RET) += -fsanitize-coverage=trace-ret
+kcov-dataflow-flags-$(CONFIG_KCOV_DATAFLOW_NO_INLINE) += -fno-inline
+
+# Rust: only add the trace-args/ret llvm-args (sancov-module pass and level=3
+# are already provided by RUSTFLAGS_KCOV since KCOV_DATAFLOW depends on KCOV).
+kcov-dataflow-rflags-$(CONFIG_KCOV_DATAFLOW_ARGS) += -Cllvm-args=-sanitizer-coverage-trace-args
+kcov-dataflow-rflags-$(CONFIG_KCOV_DATAFLOW_RET) += -Cllvm-args=-sanitizer-coverage-trace-ret
+
+export CFLAGS_KCOV_DATAFLOW := $(kcov-dataflow-flags-y)
+export RUSTFLAGS_KCOV_DATAFLOW := $(kcov-dataflow-rflags-y)

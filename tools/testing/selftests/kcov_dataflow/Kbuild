@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Test modules, built as external modules against the configured kernel tree
+# by the selftest Makefile ("make -C $(KDIR) M=$(CURDIR) modules"). Every
+# directory opts its object into dataflow instrumentation with
+# KCOV_DATAFLOW_<object>.o := y, the same per-file switch in-tree code uses.
+obj-m				+= rust_ffi_contract/
+obj-m				+= eight_struct_args_c/
+obj-$(CONFIG_RUST)		+= eight_struct_args_rust/
+obj-$(CONFIG_RUST)		+= rust_kworker_remote/

@@ -24,6 +24,7 @@ Documentation/process/debugging/index.rst
    context-analysis
    sparse
    kcov
+   kcov-dataflow
    gcov
    kasan
    kmsan
