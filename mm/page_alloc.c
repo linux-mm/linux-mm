@@ -575,7 +575,7 @@ void __meminit init_pageblock_migratetype(struct page *page,
 static int page_outside_zone_boundaries(struct zone *zone, struct page *page)
 {
 	int ret;
-	unsigned seq;
+	unsigned int seq;
 	unsigned long pfn = page_to_pfn(page);
 	unsigned long sp, start_pfn;
 
@@ -828,7 +828,7 @@ static inline void __del_page_from_free_list(struct page *page, struct zone *zon
 {
 	int nr_pages = 1 << order;
 
-        VM_WARN_ONCE(get_pageblock_migratetype(page) != migratetype,
+	VM_WARN_ONCE(get_pageblock_migratetype(page) != migratetype,
 		     "page type is %d, passed migratetype is %d (nr=%d)\n",
 		     get_pageblock_migratetype(page), migratetype, nr_pages);
 
@@ -2909,6 +2909,7 @@ static bool free_frozen_page_commit(struct zone *zone,
 	    zone_watermark_ok(zone, 0, high_wmark_pages(zone),
 			      ZONE_MOVABLE, 0)) {
 		struct pglist_data *pgdat = zone->zone_pgdat;
+
 		clear_bit(ZONE_BELOW_HIGH, &zone->flags);
 
 		/*
@@ -3137,6 +3138,7 @@ int __isolate_free_page(struct page *page, unsigned int order)
 	 */
 	if (order >= pageblock_order - 1) {
 		struct page *endpage = page + (1 << order) - 1;
+
 		for (; page < endpage; page += pageblock_nr_pages) {
 			int mt = get_pageblock_migratetype(page);
 			/*
@@ -3803,9 +3805,9 @@ retry:
 		unsigned long mark;
 
 		if (cpusets_enabled() &&
-			(alloc_flags & ALLOC_CPUSET) &&
-			!__cpuset_zone_allowed(zone, gfp_mask))
-				continue;
+		    (alloc_flags & ALLOC_CPUSET) &&
+		    !__cpuset_zone_allowed(zone, gfp_mask))
+			continue;
 		/*
 		 * When allocating a page cache page for writing, we
 		 * want to get it from a node that is within its dirty
@@ -3925,16 +3927,16 @@ try_this_zone:
 			prep_new_page(page, order, gfp_mask, alloc_flags);
 
 			return page;
-		} else {
-			if (cond_accept_memory(zone, order, alloc_flags))
-				goto try_this_zone;
-
-			/* Try again if zone has deferred pages */
-			if (deferred_pages_enabled()) {
-				if (_deferred_grow_zone(zone, order))
-					goto try_this_zone;
-			}
 		}
+		if (cond_accept_memory(zone, order, alloc_flags))
+			goto try_this_zone;
+
+		/* Try again if zone has deferred pages */
+		if (deferred_pages_enabled()) {
+			if (_deferred_grow_zone(zone, order))
+				goto try_this_zone;
+			}
+
 	}
 
 	/*
@@ -4619,7 +4621,7 @@ bool gfp_pfmemalloc_allowed(gfp_t gfp_mask)
  * Returns true if a retry is viable or false to enter the oom path.
  */
 static inline bool
-should_reclaim_retry(gfp_t gfp_mask, unsigned order,
+should_reclaim_retry(gfp_t gfp_mask, unsigned int order,
 		     struct alloc_context *ac, int alloc_flags,
 		     bool did_some_progress, int *no_progress_loops)
 {
@@ -4655,9 +4657,9 @@ should_reclaim_retry(gfp_t gfp_mask, unsigned order,
 		bool wmark;
 
 		if (cpusets_enabled() &&
-			(alloc_flags & ALLOC_CPUSET) &&
-			!__cpuset_zone_allowed(zone, gfp_mask))
-				continue;
+		    (alloc_flags & ALLOC_CPUSET) &&
+		    !__cpuset_zone_allowed(zone, gfp_mask))
+			continue;
 
 		available = reclaimable = zone_reclaimable_pages(zone);
 		available += zone_page_state_snapshot(zone, NR_FREE_PAGES);
@@ -5707,6 +5709,7 @@ static unsigned long nr_free_zone_pages(int offset)
 	for_each_zone_zonelist(zone, z, zonelist, offset) {
 		unsigned long size = zone_managed_pages(zone);
 		unsigned long high = high_wmark_pages(zone);
+
 		if (size > high)
 			sum += size - high;
 	}
@@ -5859,7 +5862,7 @@ int find_next_best_node(int node, nodemask_t *used_node_mask)
  * DMA zone, if any--but risks exhausting DMA zone.
  */
 static void build_zonelists_in_node_order(pg_data_t *pgdat, int *node_order,
-		unsigned nr_nodes)
+		unsigned int nr_nodes)
 {
 	struct zoneref *zonerefs;
 	int i;
@@ -6387,6 +6390,7 @@ void __init setup_per_cpu_pageset(void)
 	 */
 	for_each_possible_cpu(cpu) {
 		struct per_cpu_zonestat *pzstats = &per_cpu(boot_zonestats, cpu);
+
 		memset(pzstats->vm_numa_event, 0,
 		       sizeof(pzstats->vm_numa_event));
 	}
@@ -6797,7 +6801,7 @@ static void setup_min_unmapped_ratio(void)
 
 	for_each_zone(zone)
 		zone->zone_pgdat->min_unmapped_pages += (zone_managed_pages(zone) *
-						         sysctl_min_unmapped_ratio) / 100;
+							 sysctl_min_unmapped_ratio) / 100;
 }
 
 
