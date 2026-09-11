@@ -2011,7 +2011,8 @@ SYSCALL_DEFINE5(get_mempolicy, int __user *, policy,
 
 bool vma_migratable(struct vm_area_struct *vma)
 {
-	if (vma->vm_flags & (VM_IO | VM_PFNMAP))
+	/* Pages which GUP cannot obtain cannot be migrated either. */
+	if (!vma_can_gup(vma))
 		return false;
 
 	/*
@@ -2021,7 +2022,7 @@ bool vma_migratable(struct vm_area_struct *vma)
 	if (vma_is_dax(vma))
 		return false;
 
-	if (is_vm_hugetlb_page(vma) &&
+	if (vma_is_hugetlb(vma) &&
 		!hugepage_migration_supported(hstate_vma(vma)))
 		return false;
 
