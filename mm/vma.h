@@ -114,7 +114,7 @@ struct vma_merge_struct {
 	struct file *file;
 	struct anon_vma *anon_vma;
 	struct mempolicy *policy;
-	struct vm_userfaultfd_ctx uffd_ctx;
+	struct vm_uffd_state uffd_ctx;
 	struct anon_vma_name *anon_name;
 	enum vma_merge_state state;
 
@@ -346,7 +346,7 @@ static inline void vma_sub_pgoff(struct vm_area_struct *vma, pgoff_t delta)
 		.file = vma_->vm_file,					\
 		.anon_vma = vma_->anon_vma,				\
 		.policy = vma_policy(vma_),				\
-		.uffd_ctx = vma_->vm_userfaultfd_ctx,			\
+		.uffd_ctx = vma_->vm_uffd_state,			\
 		.anon_name = anon_vma_name(vma_),			\
 		.state = VMA_MERGE_START,				\
 	}
@@ -516,7 +516,7 @@ __must_check struct vm_area_struct *vma_modify_policy(struct vma_iterator *vmi,
 __must_check struct vm_area_struct *vma_modify_flags_uffd(struct vma_iterator *vmi,
 		struct vm_area_struct *prev, struct vm_area_struct *vma,
 		unsigned long start, unsigned long end, const vma_flags_t *vma_flags,
-		struct vm_userfaultfd_ctx new_ctx, bool give_up_on_oom);
+		struct vm_uffd_state new_ctx, bool give_up_on_oom);
 
 __must_check struct vm_area_struct *vma_merge_new_range(struct vma_merge_struct *vmg);
 

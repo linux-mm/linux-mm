@@ -56,7 +56,7 @@ struct vma_remap_struct {
 	unsigned long new_addr;	/* Optionally, desired new address. */
 
 	/* uffd state. */
-	struct vm_userfaultfd_ctx *uf;
+	struct vm_uffd_state *uf;
 	struct list_head *uf_unmap_early;
 	struct list_head *uf_unmap;
 
@@ -2044,7 +2044,7 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 		unsigned long, new_len, unsigned long, flags,
 		unsigned long, new_addr)
 {
-	struct vm_userfaultfd_ctx uf = NULL_VM_UFFD_CTX;
+	struct vm_uffd_state uf = NULL_VM_UFFD_STATE;
 	LIST_HEAD(uf_unmap_early);
 	LIST_HEAD(uf_unmap);
 	/*
