@@ -314,6 +314,18 @@ config EFI_SBAT_FILE
 
 	  If unsure, leave blank.
 
+config EFI_KHO
+	bool
+	depends on EFI_STUB && EFI_GENERIC_STUB && KEXEC_HANDOVER
+	help
+	  Carry the KHO state (the KHO state FDT and the scratch area) from
+	  one kernel to the next across kexec via an EFI configuration table
+	  entry under LINUX_EFI_KEXEC_HANDOVER_GUID, for architectures that
+	  boot through EFI without a device tree (e.g. LoongArch).
+
+	  Architectures with a boot FDT (arm64, riscv) use the /chosen FDT
+	  path instead and do not select this.
+
 endmenu
 
 config UEFI_CPER

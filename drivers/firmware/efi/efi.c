@@ -24,6 +24,7 @@
 #include <linux/initrd.h>
 #include <linux/io.h>
 #include <linux/kexec.h>
+#include <linux/kexec_handover.h>
 #include <linux/platform_device.h>
 #include <linux/random.h>
 #include <linux/reboot.h>
@@ -62,6 +63,9 @@ unsigned long __ro_after_init efi_rng_seed = EFI_INVALID_TABLE_ADDR;
 static unsigned long __initdata mem_reserve = EFI_INVALID_TABLE_ADDR;
 static unsigned long __initdata rt_prop = EFI_INVALID_TABLE_ADDR;
 static unsigned long __initdata initrd = EFI_INVALID_TABLE_ADDR;
+#ifdef CONFIG_EFI_KHO
+static unsigned long __ro_after_init efi_kho_table_phys = EFI_INVALID_TABLE_ADDR;
+#endif
 
 extern unsigned long primary_display_table;
 
@@ -629,6 +633,9 @@ static const efi_config_table_type_t common_tables[] __initconst = {
 	{EFI_TCG2_FINAL_EVENTS_TABLE_GUID,	&efi.tpm_final_log,	"TPMFinalLog"	},
 	{EFI_CC_FINAL_EVENTS_TABLE_GUID,	&efi.tpm_final_log,	"CCFinalLog"	},
 	{LINUX_EFI_MEMRESERVE_TABLE_GUID,	&mem_reserve,		"MEMRESERVE"	},
+#ifdef CONFIG_EFI_KHO
+	{LINUX_EFI_KEXEC_HANDOVER_GUID,		&efi_kho_table_phys,	"KHO"		},
+#endif
 	{LINUX_EFI_INITRD_MEDIA_GUID,		&initrd,		"INITRD"	},
 	{EFI_RT_PROPERTIES_TABLE_GUID,		&rt_prop,		"RTPROP"	},
 #ifdef CONFIG_OVMF_DEBUG_LOG
@@ -805,6 +812,31 @@ int __init efi_config_parse_tables(const efi_config_table_t *config_tables,
 			early_memunmap(p, PAGE_SIZE);
 		}
 	}
+
+#ifdef CONFIG_EFI_KHO
+	if (efi_kho_table_phys != EFI_INVALID_TABLE_ADDR) {
+		struct linux_efi_kho_data *kho;
+
+		/*
+		 * Reserve the stub-allocated table so it is neither handed
+		 * out by the buddy allocator nor placed on by kexec
+		 * segments, mirroring the memreserve handling above.  This
+		 * runs on every boot, so it also protects the table in the
+		 * next kernel until it reads it.
+		 */
+		memblock_reserve(efi_kho_table_phys, sizeof(*kho));
+
+		kho = early_memremap(efi_kho_table_phys, sizeof(*kho));
+		if (kho) {
+			if (kho->fdt_addr)
+				kho_populate((phys_addr_t)kho->fdt_addr,
+					     kho->fdt_size,
+					     (phys_addr_t)kho->scratch_addr,
+					     kho->scratch_size);
+			early_memunmap(kho, sizeof(*kho));
+		}
+	}
+#endif
 
 	if (rt_prop != EFI_INVALID_TABLE_ADDR) {
 		efi_rt_properties_table_t *tbl;
@@ -1170,6 +1202,52 @@ static int __init efi_memreserve_root_init(void)
 	return 0;
 }
 early_initcall(efi_memreserve_root_init);
+
+#ifdef CONFIG_EFI_KHO
+static struct linux_efi_kho_data *efi_kho_table __ro_after_init;
+
+static int __init efi_kho_table_init(void)
+{
+	if (efi_kho_table_phys == EFI_INVALID_TABLE_ADDR)
+		return 0;
+
+	/*
+	 * Keep a persistent mapping of the table, the same way
+	 * efi_memreserve_root_init() keeps the memreserve root mapped:
+	 * efi_kho_update() is also called on the crash kexec path, where
+	 * memremap() is no longer an option.
+	 */
+	efi_kho_table = memremap(efi_kho_table_phys, sizeof(*efi_kho_table),
+				 MEMREMAP_WB);
+	WARN_ON_ONCE(!efi_kho_table);
+
+	return 0;
+}
+early_initcall(efi_kho_table_init);
+
+/*
+ * Update the KHO config table in place before a kexec, so the next kernel
+ * finds the current handover state.  Mirrors efi_mem_reserve_persistent():
+ * the config table entry was installed once by the EFI stub and is inherited
+ * across kexec, so only the table contents are rewritten here -- the config
+ * table array is never rebuilt and st->tables is never switched.
+ */
+int efi_kho_update(phys_addr_t fdt_addr, u64 fdt_size,
+		   phys_addr_t scratch_addr, u64 scratch_size)
+{
+	struct linux_efi_kho_data *kho = efi_kho_table;
+
+	if (!kho)
+		return -ENODEV;
+
+	kho->fdt_addr		= fdt_addr;
+	kho->fdt_size		= fdt_size;
+	kho->scratch_addr	= scratch_addr;
+	kho->scratch_size	= scratch_size;
+
+	return 0;
+}
+#endif
 
 #ifdef CONFIG_KEXEC
 static int update_efi_random_seed(struct notifier_block *nb,
