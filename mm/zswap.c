@@ -228,10 +228,15 @@ static bool zswap_has_pool;
 /* One swap address space for each 64M swap space */
 #define ZSWAP_ADDRESS_SPACE_SHIFT 14
 #define ZSWAP_ADDRESS_SPACE_PAGES (1 << ZSWAP_ADDRESS_SPACE_SHIFT)
+
+static inline struct xarray *zswap_tree(int type, pgoff_t offset)
+{
+	return &zswap_trees[type][offset >> ZSWAP_ADDRESS_SPACE_SHIFT];
+}
+
 static inline struct xarray *swap_zswap_tree(swp_entry_t swp)
 {
-	return &zswap_trees[swp_type(swp)][swp_offset(swp)
-		>> ZSWAP_ADDRESS_SPACE_SHIFT];
+	return zswap_tree(swp_type(swp), swp_offset(swp));
 }
 
 #define zswap_pool_debug(msg, p)			\
@@ -1484,6 +1489,9 @@ bool zswap_store(struct folio *folio)
 	VM_WARN_ON_ONCE(!folio_test_locked(folio));
 	VM_WARN_ON_ONCE(!folio_test_swapcache(folio));
 
+	if (zswap_never_enabled())
+		return false;
+
 	if (!zswap_enabled)
 		goto check_old;
 
@@ -1541,15 +1549,9 @@ check_old:
 	if (!ret) {
 		unsigned type = swp_type(swp);
 		pgoff_t offset = swp_offset(swp);
-		struct zswap_entry *entry;
-		struct xarray *tree;
 
-		for (index = 0; index < nr_pages; ++index) {
-			tree = swap_zswap_tree(swp_entry(type, offset + index));
-			entry = xa_erase(tree, offset + index);
-			if (entry)
-				zswap_entry_free(entry);
-		}
+		for (index = 0; index < nr_pages; ++index)
+			zswap_invalidate(type, offset + index);
 	}
 
 	return ret;
@@ -1628,10 +1630,9 @@ int zswap_load(struct folio *folio)
 	return 0;
 }
 
-void zswap_invalidate(swp_entry_t swp)
+void zswap_invalidate(int type, pgoff_t offset)
 {
-	pgoff_t offset = swp_offset(swp);
-	struct xarray *tree = swap_zswap_tree(swp);
+	struct xarray *tree = zswap_tree(type, offset);
 	struct zswap_entry *entry;
 
 	if (xa_empty(tree))
