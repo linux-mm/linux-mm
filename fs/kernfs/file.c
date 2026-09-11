@@ -818,7 +818,10 @@ void kernfs_drain_open_files(struct kernfs_node *kn)
 		struct inode *inode = file_inode(of->file);
 
 		if (of->mmapped) {
-			unmap_mapping_range(inode->i_mapping, 0, 0, 1);
+			if (of->file->f_mapping != inode->i_mapping)
+				unmap_mapping_file(of->file);
+			else
+				unmap_mapping_range(inode->i_mapping, 0, 0, 1);
 			of->mmapped = false;
 			on->nr_mmapped--;
 		}
