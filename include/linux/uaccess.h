@@ -637,6 +637,26 @@ do {							\
 
 #endif  /* !__get_kernel_nofault */
 
+/*
+ * Architectures may use the begin/end hooks to establish state shared by a
+ * sequence of bare nofault accesses. Every path out of the region must call
+ * the end hook. The region, including expressions passed to the bare
+ * accessors, must not call into the scheduler.
+ */
+#ifndef __get_kernel_nofault_bare
+#define __get_kernel_nofault_bare	__get_kernel_nofault
+#define __put_kernel_nofault_bare	__put_kernel_nofault
+#endif
+
+#ifndef __begin_kernel_nofault_bare
+#define __begin_kernel_nofault_bare()	do {} while (0)
+#define __end_kernel_nofault_bare()	do {} while (0)
+#endif
+
+DEFINE_LOCK_GUARD_0(__kernel_nofault_bare,
+		    __begin_kernel_nofault_bare(),
+		    __end_kernel_nofault_bare())
+
 /**
  * get_kernel_nofault(): safely attempt to read from a location
  * @val: read into this variable
