@@ -4061,6 +4061,16 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	p->numa_faults_locality[local] += pages;
 }
 
+/*
+ * Read-only file-backed mappings are expected to be cache replicated between
+ * accessor nodes, so they are not worth sampling for placement.  They can
+ * still strand on the slow tier like anything else.
+ */
+static bool vma_is_ro_file(struct vm_area_struct *vma)
+{
+	return vma->vm_file && (vma->vm_flags & (VM_READ | VM_WRITE)) == VM_READ;
+}
+
 static void reset_ptenuma_scan(struct task_struct *p)
 {
 	/*
@@ -4220,13 +4230,13 @@ retry_pids:
 		}
 
 		/*
-		 * Shared library pages mapped by multiple processes are not
-		 * migrated as it is expected they are cache replicated. Avoid
-		 * hinting faults in read-only file-backed mappings or the vDSO
-		 * as migrating the pages will be of marginal benefit.
+		 * Read-only file-backed folios are poor NUMA placement
+		 * candidates, but slow-tier folios still need to be scanned for
+		 * promotion.
 		 */
 		if (!vma->vm_mm ||
-		    (vma->vm_file && (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ))) {
+		    (vma_is_ro_file(vma) &&
+		     !(numab_mode & NUMA_BALANCING_MEMORY_TIERING))) {
 			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_SHARED_RO);
 			continue;
 		}
@@ -4306,7 +4316,8 @@ retry_pids:
 			continue;
 		}
 
-		promo_only = !(numab_mode & NUMA_BALANCING_NORMAL);
+		promo_only = !(numab_mode & NUMA_BALANCING_NORMAL) ||
+			     vma_is_ro_file(vma);
 
 		do {
 			start = max(start, vma->vm_start);
