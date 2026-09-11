@@ -647,8 +647,9 @@ static inline bool can_follow_write_pud(pud_t pud, struct page *page,
 }
 
 static struct page *follow_huge_pud(struct vm_area_struct *vma,
-				    unsigned long addr, pud_t *pudp,
-				    int flags, unsigned long *page_mask)
+				    unsigned long addr, unsigned long end,
+				    pud_t *pudp, int flags,
+				    unsigned long *nr_pages)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct page *page;
@@ -672,10 +673,13 @@ static struct page *follow_huge_pud(struct vm_area_struct *vma,
 		return ERR_PTR(-EMLINK);
 
 	ret = try_grab_folio(page_folio(page), 1, flags);
-	if (ret)
+	if (ret) {
 		page = ERR_PTR(ret);
-	else
-		*page_mask = HPAGE_PUD_NR - 1;
+	} else {
+		unsigned long off = (addr & ~PUD_MASK) >> PAGE_SHIFT;
+
+		*nr_pages = min(HPAGE_PUD_NR - off, (end - addr) >> PAGE_SHIFT);
+	}
 
 	return page;
 }
@@ -699,9 +703,9 @@ static inline bool can_follow_write_pmd(pmd_t pmd, struct page *page,
 }
 
 static struct page *follow_huge_pmd(struct vm_area_struct *vma,
-				    unsigned long addr, pmd_t *pmd,
-				    unsigned int flags,
-				    unsigned long *page_mask)
+				    unsigned long addr, unsigned long end,
+				    pmd_t *pmd, unsigned int flags,
+				    unsigned long *nr_pages)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	pmd_t pmdval = *pmd;
@@ -738,23 +742,25 @@ static struct page *follow_huge_pmd(struct vm_area_struct *vma,
 #endif	/* CONFIG_TRANSPARENT_HUGEPAGE */
 
 	page += (addr & ~HPAGE_PMD_MASK) >> PAGE_SHIFT;
-	*page_mask = HPAGE_PMD_NR - 1;
+	*nr_pages = min(HPAGE_PMD_NR - ((addr & ~HPAGE_PMD_MASK) >> PAGE_SHIFT),
+			(end - addr) >> PAGE_SHIFT);
 
 	return page;
 }
 
 #else  /* CONFIG_PGTABLE_HAS_HUGE_LEAVES */
 static struct page *follow_huge_pud(struct vm_area_struct *vma,
-				    unsigned long addr, pud_t *pudp,
-				    int flags, unsigned long *page_mask)
+				    unsigned long addr, unsigned long end,
+				    pud_t *pudp, int flags,
+				    unsigned long *nr_pages)
 {
 	return NULL;
 }
 
 static struct page *follow_huge_pmd(struct vm_area_struct *vma,
-				    unsigned long addr, pmd_t *pmd,
-				    unsigned int flags,
-				    unsigned long *page_mask)
+				    unsigned long addr, unsigned long end,
+				    pmd_t *pmd, unsigned int flags,
+				    unsigned long *nr_pages)
 {
 	return NULL;
 }
@@ -799,8 +805,46 @@ static inline bool can_follow_write_pte(pte_t pte, struct page *page,
 	return !userfaultfd_pte_wp(vma, pte);
 }
 
+/*
+ * Count the pages, starting at @address and bounded by @end, that a PTE-mapped
+ * large @folio maps contiguously and that can be returned together with the
+ * page at @address: consecutive present PTEs mapping consecutive pages of
+ * @folio with a uniform write bit, within this VMA and a single page table.
+ * Returns at least 1.
+ *
+ * gup_must_unshare() and the write-fault check are per PTE. A writable run is
+ * always safe: a writable anon page is exclusive, and FOLL_WRITE is satisfied.
+ * A read-only run is only safe for a plain read; FOLL_WRITE would need a COW
+ * fault per page and FOLL_PIN would need a per-page gup_must_unshare() check,
+ * so those fall back to a single page.
+ */
+static unsigned long follow_pte_batch(struct vm_area_struct *vma,
+		unsigned long address, unsigned long end, struct folio *folio,
+		struct page *page, pte_t *ptep, pte_t pte, unsigned int flags)
+{
+	pte_t batch_pte = pte;
+	unsigned long max;
+
+	if (!pte_write(pte) && (flags & (FOLL_WRITE | FOLL_PIN)))
+		return 1;
+
+	/*
+	 * folio_pte_batch_flags() scans forward from @ptep, so the run must
+	 * stay within this page table: bound it by the PMD as well as @end and
+	 * the VMA, since a large folio can be PTE-mapped across a PMD boundary.
+	 */
+	max = min((pmd_addr_end(address, end) - address) >> PAGE_SHIFT,
+		  (vma->vm_end - address) >> PAGE_SHIFT);
+	if (max <= 1)
+		return 1;
+
+	return folio_pte_batch_flags(folio, vma, ptep, &batch_pte, max,
+				     FPB_RESPECT_WRITE);
+}
+
 static struct page *follow_page_pte(struct vm_area_struct *vma,
-		unsigned long address, pmd_t *pmd, unsigned int flags)
+		unsigned long address, unsigned long end, pmd_t *pmd,
+		unsigned int flags, unsigned long *nr_pages)
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct folio *folio;
@@ -885,6 +929,15 @@ static struct page *follow_page_pte(struct vm_area_struct *vma,
 		 */
 		folio_mark_accessed(folio);
 	}
+
+	/*
+	 * A PTE-mapped large folio can be handed back as a contiguous batch,
+	 * so the caller advances over the whole run in one step instead of
+	 * walking the page tables for every page.
+	 */
+	if (folio_test_large(folio))
+		*nr_pages = follow_pte_batch(vma, address, end, folio, page,
+					     ptep, pte, flags);
 out:
 	pte_unmap_unlock(ptep, ptl);
 	return page;
@@ -896,9 +949,9 @@ no_page:
 }
 
 static struct page *follow_pmd_mask(struct vm_area_struct *vma,
-				    unsigned long address, pud_t *pudp,
-				    unsigned int flags,
-				    unsigned long *page_mask)
+				    unsigned long address, unsigned long end,
+				    pud_t *pudp, unsigned int flags,
+				    unsigned long *nr_pages)
 {
 	pmd_t *pmd, pmdval;
 	spinlock_t *ptl;
@@ -912,7 +965,7 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
 	if (!pmd_present(pmdval))
 		return no_page_table(vma, flags, address);
 	if (likely(!pmd_leaf(pmdval)))
-		return follow_page_pte(vma, address, pmd, flags);
+		return follow_page_pte(vma, address, end, pmd, flags, nr_pages);
 
 	if (pmd_protnone(pmdval) && !gup_can_follow_protnone(vma, flags))
 		return no_page_table(vma, flags, address);
@@ -925,24 +978,24 @@ static struct page *follow_pmd_mask(struct vm_area_struct *vma,
 	}
 	if (unlikely(!pmd_leaf(pmdval))) {
 		spin_unlock(ptl);
-		return follow_page_pte(vma, address, pmd, flags);
+		return follow_page_pte(vma, address, end, pmd, flags, nr_pages);
 	}
 	if (pmd_trans_huge(pmdval) && (flags & FOLL_SPLIT_PMD)) {
 		spin_unlock(ptl);
 		split_huge_pmd(vma, pmd, address);
 		/* If pmd was left empty, stuff a page table in there quickly */
 		return pte_alloc(mm, pmd) ? ERR_PTR(-ENOMEM) :
-			follow_page_pte(vma, address, pmd, flags);
+			follow_page_pte(vma, address, end, pmd, flags, nr_pages);
 	}
-	page = follow_huge_pmd(vma, address, pmd, flags, page_mask);
+	page = follow_huge_pmd(vma, address, end, pmd, flags, nr_pages);
 	spin_unlock(ptl);
 	return page;
 }
 
 static struct page *follow_pud_mask(struct vm_area_struct *vma,
-				    unsigned long address, p4d_t *p4dp,
-				    unsigned int flags,
-				    unsigned long *page_mask)
+				    unsigned long address, unsigned long end,
+				    p4d_t *p4dp, unsigned int flags,
+				    unsigned long *nr_pages)
 {
 	pud_t *pudp, pud;
 	spinlock_t *ptl;
@@ -955,7 +1008,7 @@ static struct page *follow_pud_mask(struct vm_area_struct *vma,
 		return no_page_table(vma, flags, address);
 	if (pud_leaf(pud)) {
 		ptl = pud_lock(mm, pudp);
-		page = follow_huge_pud(vma, address, pudp, flags, page_mask);
+		page = follow_huge_pud(vma, address, end, pudp, flags, nr_pages);
 		spin_unlock(ptl);
 		if (page)
 			return page;
@@ -964,13 +1017,13 @@ static struct page *follow_pud_mask(struct vm_area_struct *vma,
 	if (unlikely(pud_bad(pud)))
 		return no_page_table(vma, flags, address);
 
-	return follow_pmd_mask(vma, address, pudp, flags, page_mask);
+	return follow_pmd_mask(vma, address, end, pudp, flags, nr_pages);
 }
 
 static struct page *follow_p4d_mask(struct vm_area_struct *vma,
-				    unsigned long address, pgd_t *pgdp,
-				    unsigned int flags,
-				    unsigned long *page_mask)
+				    unsigned long address, unsigned long end,
+				    pgd_t *pgdp, unsigned int flags,
+				    unsigned long *nr_pages)
 {
 	p4d_t *p4dp, p4d;
 
@@ -981,15 +1034,16 @@ static struct page *follow_p4d_mask(struct vm_area_struct *vma,
 	if (!p4d_present(p4d) || p4d_bad(p4d))
 		return no_page_table(vma, flags, address);
 
-	return follow_pud_mask(vma, address, p4dp, flags, page_mask);
+	return follow_pud_mask(vma, address, end, p4dp, flags, nr_pages);
 }
 
 /**
  * follow_page_mask - look up a page descriptor from a user-virtual address
  * @vma: vm_area_struct mapping @address
  * @address: virtual address to look up
+ * @end: virtual address at which to stop batching contiguous pages
  * @flags: flags modifying lookup behaviour
- * @page_mask: a pointer to output page_mask
+ * @nr_pages: output; number of contiguous pages the caller can read
  *
  * @flags can have FOLL_ flags set, defined in <linux/mm.h>
  *
@@ -998,15 +1052,17 @@ static struct page *follow_p4d_mask(struct vm_area_struct *vma,
  * trigger a fault with FAULT_FLAG_UNSHARE set. Note that unsharing is only
  * relevant with FOLL_PIN and !FOLL_WRITE.
  *
- * On output, @page_mask is set according to the size of the page.
+ * On output, @nr_pages holds how many contiguous pages the folio that includes
+ * the returned page has mapped into this process, so the caller can advance
+ * over a large folio in one step.
  *
  * Return: the mapped (struct page *), %NULL if no mapping exists, or
  * an error pointer if there is a mapping to something not represented
  * by a page descriptor (see also vm_normal_page()).
  */
 static struct page *follow_page_mask(struct vm_area_struct *vma,
-			      unsigned long address, unsigned int flags,
-			      unsigned long *page_mask)
+			      unsigned long address, unsigned long end,
+			      unsigned int flags, unsigned long *nr_pages)
 {
 	pgd_t *pgd;
 	struct mm_struct *mm = vma->vm_mm;
@@ -1014,13 +1070,13 @@ static struct page *follow_page_mask(struct vm_area_struct *vma,
 
 	vma_pgtable_walk_begin(vma);
 
-	*page_mask = 0;
+	*nr_pages = 1;
 	pgd = pgd_offset(mm, address);
 
 	if (pgd_none(*pgd) || unlikely(pgd_bad(*pgd)))
 		page = no_page_table(vma, flags, address);
 	else
-		page = follow_p4d_mask(vma, address, pgd, flags, page_mask);
+		page = follow_p4d_mask(vma, address, end, pgd, flags, nr_pages);
 
 	vma_pgtable_walk_end(vma);
 
@@ -1080,9 +1136,16 @@ unmap:
 }
 
 /*
- * mmap_lock must be held on entry.  If @flags has FOLL_UNLOCKABLE but not
- * FOLL_NOWAIT, the mmap_lock may be released.  If it is, *@locked will be set
- * to 0 and -EBUSY returned.
+ * The caller holds either the mmap lock, or the per-VMA lock (with
+ * FOLL_VMA_LOCK), on entry. If @flags has FOLL_UNLOCKABLE but not FOLL_NOWAIT,
+ * the mmap_lock may be released. If it is, *@locked will be set to 0 and
+ * -EAGAIN returned.
+ *
+ * The return value does not depend on the lock type: a fault that made
+ * progress but needs a retry (VM_FAULT_RETRY / VM_FAULT_COMPLETED) is reported
+ * as -EAGAIN for both the mmap lock and the per-VMA lock (FOLL_VMA_LOCK). Only
+ * the *@locked side effect is lock-type specific, as the per-VMA lock path has
+ * no unlockable mmap_lock to drop.
  */
 static int faultin_page(struct vm_area_struct *vma,
 		unsigned long address, unsigned int flags, bool unshare,
@@ -1097,6 +1160,8 @@ static int faultin_page(struct vm_area_struct *vma,
 		fault_flags |= FAULT_FLAG_WRITE;
 	if (flags & FOLL_REMOTE)
 		fault_flags |= FAULT_FLAG_REMOTE;
+	if (flags & FOLL_VMA_LOCK)
+		fault_flags |= FAULT_FLAG_VMA_LOCK;
 	if (flags & FOLL_UNLOCKABLE) {
 		fault_flags |= FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 		/*
@@ -1125,39 +1190,193 @@ static int faultin_page(struct vm_area_struct *vma,
 
 	ret = handle_mm_fault(vma, address, fault_flags, NULL);
 
+	/*
+	 * A fully completed fault (VM_FAULT_COMPLETED) or one that needs a retry
+	 * (VM_FAULT_RETRY) has released the lock it was holding. Report both as
+	 * -EAGAIN so the caller retries: the mmap lock caller retakes it here,
+	 * the per-VMA lock caller (FOLL_VMA_LOCK) falls back to the mmap lock.
+	 *
+	 * Dropping the mmap lock is recorded in *@locked. There is no such lock
+	 * to drop under the per-VMA lock, where @locked is not used, so leave it
+	 * alone in that case.
+	 */
 	if (ret & VM_FAULT_COMPLETED) {
-		/*
-		 * With FAULT_FLAG_RETRY_NOWAIT we'll never release the
-		 * mmap lock in the page fault handler. Sanity check this.
-		 */
-		WARN_ON_ONCE(fault_flags & FAULT_FLAG_RETRY_NOWAIT);
-		*locked = 0;
-
-		/*
-		 * We should do the same as VM_FAULT_RETRY, but let's not
-		 * return -EBUSY since that's not reflecting the reality of
-		 * what has happened - we've just fully completed a page
-		 * fault, with the mmap lock released.  Use -EAGAIN to show
-		 * that we want to take the mmap lock _again_.
-		 */
+		if (!(flags & FOLL_VMA_LOCK)) {
+			/*
+			 * With FAULT_FLAG_RETRY_NOWAIT we'll never release the
+			 * mmap lock in the page fault handler. Sanity check this.
+			 */
+			WARN_ON_ONCE(fault_flags & FAULT_FLAG_RETRY_NOWAIT);
+			*locked = 0;
+		}
 		return -EAGAIN;
 	}
 
 	if (ret & VM_FAULT_ERROR) {
 		int err = vm_fault_to_errno(ret, flags);
 
-		if (err)
-			return err;
-		BUG();
+		/*
+		 * VM_FAULT_ERROR always decodes to an errno; a zero here would
+		 * mean handle_mm_fault() returned an unexpected combination.
+		 * Report -EFAULT rather than crash: under the per-VMA lock the
+		 * mmap lock retry produces the definitive result.
+		 */
+		VM_WARN_ON_ONCE(!err);
+		return err ? err : -EFAULT;
 	}
 
 	if (ret & VM_FAULT_RETRY) {
-		if (!(fault_flags & FAULT_FLAG_RETRY_NOWAIT))
+		if (!(flags & FOLL_VMA_LOCK) &&
+		    !(fault_flags & FAULT_FLAG_RETRY_NOWAIT))
 			*locked = 0;
-		return -EBUSY;
+		return -EAGAIN;
 	}
 
 	return 0;
+}
+
+/*
+ * get_user_page_vma - get one page from @vma, whose lock the caller already
+ * holds: the mmap lock, or (with FOLL_VMA_LOCK) the per-VMA lock. Walks the
+ * page tables, faulting the page in if needed, and on success returns it with
+ * a reference and the lock still held.
+ *
+ * Runs check_vma_flags() like __get_user_pages(), so callers need not pre-check
+ * the VMA; most rejections are returned as their error. A VM_IO/VM_PFNMAP VMA
+ * is the exception: a COWed page with a struct page is returned, while a raw
+ * PFN has none and yields -EFAULT, to be reached via vma->vm_ops->access().
+ *
+ * Under FOLL_VMA_LOCK, anything that cannot be finished under the per-VMA lock
+ * (a dropped fault, userfaultfd, a hard error, or ->access() memory) releases
+ * the lock and returns -EAGAIN, so the caller retries under the mmap lock.
+ */
+struct page *get_user_page_vma(struct vm_area_struct *vma, unsigned long addr,
+			       unsigned int gup_flags)
+{
+	bool vma_locked = gup_flags & FOLL_VMA_LOCK;
+	unsigned long nr_pages;
+	struct page *page;
+	int locked = 1;
+	bool pfnmap;
+	int ret;
+
+	/*
+	 * Two lock modes are supported: the mmap lock, with neither flag, or
+	 * the per-VMA lock, with both FOLL_VMA_LOCK and FOLL_UNLOCKABLE. An
+	 * unlockable mmap fault would drop the lock and report it in *locked,
+	 * which this function does not relay, so reject a lone flag.
+	 */
+	VM_WARN_ON_ONCE(!(gup_flags & FOLL_VMA_LOCK) != !(gup_flags & FOLL_UNLOCKABLE));
+
+	/*
+	 * Validate the VMA up front, like __get_user_pages(). A VM_IO/VM_PFNMAP
+	 * VMA is not rejected outright: it can hold COWed pages that have a
+	 * struct page; let follow_page_mask() look for them, and treat only
+	 * its struct-page-less PFNs as unreachable. Other rejections
+	 * (secretmem, permissions, etc) result in immediate failure.
+	 */
+	ret = check_vma_flags(vma, gup_flags, VM_IO | VM_PFNMAP);
+	if (ret)
+		goto fail;
+	pfnmap = vma->vm_flags & (VM_IO | VM_PFNMAP);
+
+	for (;;) {
+		if (fatal_signal_pending(current)) {
+			ret = -EINTR;
+			goto fail;
+		}
+		cond_resched();
+
+		/* This helper hands back a single page; cap the batch at one. */
+		page = follow_page_mask(vma, addr, addr + PAGE_SIZE,
+					gup_flags | FOLL_TOUCH | FOLL_GET,
+					&nr_pages);
+		if (!IS_ERR_OR_NULL(page)) {
+			/* Match __get_user_pages(): flush for VIVT/aliasing caches. */
+			flush_anon_page(vma, page, addr);
+			flush_dcache_page(page);
+			return page;
+		}
+
+		/*
+		 * No struct page: a raw PFN of a VM_IO/VM_PFNMAP VMA, whether
+		 * seen by the up-front check (@pfnmap) or reported as -EEXIST
+		 * for a present PFN. Return -EFAULT so the caller reaches it
+		 * through vma->vm_ops->access().
+		 */
+		if (pfnmap || PTR_ERR(page) == -EEXIST) {
+			ret = -EFAULT;
+			goto fail;
+		}
+		/* A hard error from the walk itself. */
+		if (page && PTR_ERR(page) != -EMLINK) {
+			ret = PTR_ERR(page);
+			goto fail;
+		}
+
+		/*
+		 * The page is not present, or needs unsharing. A remote fault
+		 * under the per-VMA lock cannot deliver userfaultfd (which
+		 * assumes current is the faulting task), so fall back for those.
+		 */
+		if (vma_locked && userfaultfd_armed(vma)) {
+			ret = -EAGAIN;
+			goto fail;
+		}
+		ret = faultin_page(vma, addr, gup_flags | FOLL_REMOTE | FOLL_GET,
+				   PTR_ERR(page) == -EMLINK, &locked);
+		if (ret == -EAGAIN)
+			return ERR_PTR(-EAGAIN);	/* fault released the per-VMA lock */
+		if (ret)
+			goto fail;
+	}
+
+fail:
+	/*
+	 * Under the per-VMA lock the caller cannot reach ->access() or act on a
+	 * hard error (both need the mmap lock), so release the lock and have it
+	 * retry there; the mmap-lock pass produces the definitive error.
+	 */
+	if (vma_locked) {
+		vma_end_read(vma);
+		return ERR_PTR(-EAGAIN);
+	}
+	return ERR_PTR(ret);
+}
+
+/*
+ * get_user_page_lookup_vma - fault in one page of a remote mm and hand back the
+ * page along with the VMA that covers it. The caller must hold the mmap_lock.
+ * Returns with the mmap_lock still held.
+ *
+ * Looks up the VMA, and gets a reference to the page through
+ * get_user_page_vma(), faulting in the page if needed.
+ *
+ * FOLL_NOWAIT and FOLL_UNLOCKABLE are rejected: both let the fault handler
+ * drop the mmap lock, which could invalidate the looked-up VMA.
+ */
+struct page *get_user_page_lookup_vma(struct mm_struct *mm, unsigned long addr,
+				      int gup_flags,
+				      struct vm_area_struct **vmap)
+{
+	struct vm_area_struct *vma;
+	struct page *page;
+
+	if (WARN_ON_ONCE(unlikely(gup_flags & (FOLL_NOWAIT | FOLL_UNLOCKABLE))))
+		return ERR_PTR(-EINVAL);
+
+	mmap_assert_locked(mm);
+
+	vma = vma_lookup(mm, addr);
+	if (!vma)
+		return ERR_PTR(-EFAULT);
+
+	page = get_user_page_vma(vma, addr, gup_flags | FOLL_REMOTE | FOLL_TOUCH);
+	if (IS_ERR(page))
+		return page;
+
+	*vmap = vma;
+	return page;
 }
 
 /*
@@ -1197,12 +1416,20 @@ static bool writable_file_mapping_allowed(struct vm_area_struct *vma,
 	return !vma_needs_dirty_tracking(vma);
 }
 
-static int check_vma_flags(struct vm_area_struct *vma, unsigned long gup_flags)
+int check_vma_flags(struct vm_area_struct *vma, unsigned long gup_flags,
+		    vm_flags_t ignore_flags)
 {
 	vm_flags_t vm_flags = vma->vm_flags;
 	int write = (gup_flags & FOLL_WRITE);
 	int foreign = (gup_flags & FOLL_REMOTE);
 	bool vma_anon = vma_is_anonymous(vma);
+
+	/*
+	 * Opt out of the flag checks that read this local copy (the
+	 * VM_IO/VM_PFNMAP gate and the write/read/cow bits); checks that
+	 * re-read vma->vm_flags through helpers are unaffected.
+	 */
+	vm_flags &= ~ignore_flags;
 
 	if (vm_flags & (VM_IO | VM_PFNMAP))
 		return -EFAULT;
@@ -1358,7 +1585,6 @@ static long __get_user_pages(struct mm_struct *mm,
 {
 	long ret = 0, i = 0;
 	struct vm_area_struct *vma = NULL;
-	unsigned long page_mask = 0;
 
 	if (!nr_pages)
 		return 0;
@@ -1373,7 +1599,7 @@ static long __get_user_pages(struct mm_struct *mm,
 
 	do {
 		struct page *page;
-		unsigned int page_increm;
+		unsigned long page_increm;
 
 		/* first iteration or cross vma bound */
 		if (!vma || start >= vma->vm_end) {
@@ -1387,7 +1613,7 @@ static long __get_user_pages(struct mm_struct *mm,
 					ret = -ENOMEM;
 					goto out;
 				}
-				if (check_vma_flags(vma, gup_flags)) {
+				if (check_vma_flags(vma, gup_flags, 0)) {
 					ret = -EINVAL;
 					goto out;
 				}
@@ -1400,7 +1626,7 @@ static long __get_user_pages(struct mm_struct *mm,
 						pages ? &page : NULL);
 				if (ret)
 					goto out;
-				page_mask = 0;
+				page_increm = 1;
 				goto next_page;
 			}
 
@@ -1408,7 +1634,7 @@ static long __get_user_pages(struct mm_struct *mm,
 				ret = -EFAULT;
 				goto out;
 			}
-			ret = check_vma_flags(vma, gup_flags);
+			ret = check_vma_flags(vma, gup_flags, 0);
 			if (ret)
 				goto out;
 		}
@@ -1423,7 +1649,8 @@ retry:
 		}
 		cond_resched();
 
-		page = follow_page_mask(vma, start, gup_flags, &page_mask);
+		page = follow_page_mask(vma, start, start + nr_pages * PAGE_SIZE,
+					gup_flags, &page_increm);
 		if (!page || PTR_ERR(page) == -EMLINK) {
 			ret = faultin_page(vma, start, gup_flags,
 					   PTR_ERR(page) == -EMLINK, locked);
@@ -1456,7 +1683,6 @@ retry:
 			goto out;
 		}
 next_page:
-		page_increm = 1 + (~(start >> PAGE_SHIFT) & page_mask);
 		if (page_increm > nr_pages)
 			page_increm = nr_pages;
 
