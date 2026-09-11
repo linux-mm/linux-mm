@@ -1085,7 +1085,45 @@ static int mbind_range(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	return vma_replace_policy(vma, new_pol);
 }
 
-/* Set the process memory policy */
+/**
+ * mempolicy_create - build a validated, cpuset-contextualised mempolicy
+ * @mode: MPOL_* mode
+ * @flags: MPOL_F_* flags
+ * @nodes: target nodemask, or NULL (interpreted per @mode; see mpol_new())
+ *
+ * Creates a new policy and constrains it to the task's cpuset.
+ *
+ * The caller owns the returned reference and frees it with mpol_put().
+ *
+ * Return: the policy (NULL for a default policy), or an ERR_PTR on failure.
+ */
+struct mempolicy *mempolicy_create(unsigned short mode, unsigned short flags,
+		nodemask_t *nodes)
+{
+	struct mempolicy *pol;
+	NODEMASK_SCRATCH(scratch);
+	int err;
+
+	if (!scratch)
+		return ERR_PTR(-ENOMEM);
+
+	pol = mpol_new(mode, flags, nodes);
+	if (IS_ERR(pol))
+		goto out;
+
+	task_lock(current);
+	err = mpol_set_nodemask(pol, nodes, scratch);
+	task_unlock(current);
+	if (err) {
+		mpol_put(pol);
+		pol = ERR_PTR(err);
+	}
+out:
+	NODEMASK_SCRATCH_FREE(scratch);
+	return pol;
+}
+EXPORT_SYMBOL_FOR_MODULES(mempolicy_create, "kvm");
+
 static long do_set_mempolicy(unsigned short mode, unsigned short flags,
 			     nodemask_t *nodes)
 {
@@ -3274,23 +3312,46 @@ put_mpol:
 }
 EXPORT_SYMBOL_FOR_MODULES(mpol_shared_policy_init, "kvm");
 
-int mpol_set_shared_policy(struct shared_policy *sp,
-			struct vm_area_struct *vma, struct mempolicy *pol)
+/**
+ * mpol_set_shared_policy_range - install @pol over [@start, @end) of @sp
+ * @sp:    the shared policy tree
+ * @start: first page offset (inclusive)
+ * @end:   last page offset (exclusive)
+ * @pol:   a fully-built, validated policy, or NULL to clear the range
+ *
+ * Installs @pol over the given range, replacing any overlapping policy.
+ * @sp takes its own reference, the caller retains its reference on @pol.
+ *
+ * The policy is not reconstructed, so the policy is preserved exactly.
+ *
+ * Unlike mpol_set_shared_policy(), no VMA is required, so a range that
+ * is never mapped into a VMA can be covered, including the whole file.
+ *
+ * Return: 0 on success, -ENOMEM on allocation failure.
+ */
+int mpol_set_shared_policy_range(struct shared_policy *sp, pgoff_t start,
+				 pgoff_t end, struct mempolicy *pol)
 {
-	const pgoff_t pgoff = vma_start_pgoff(vma);
-	const pgoff_t pgoff_end = vma_end_pgoff(vma);
 	struct sp_node *new = NULL;
 	int err;
 
 	if (pol) {
-		new = sp_alloc(pgoff, pgoff_end, pol);
+		new = sp_alloc(start, end, pol);
 		if (!new)
 			return -ENOMEM;
 	}
-	err = shared_policy_replace(sp, pgoff, pgoff_end, new);
+	err = shared_policy_replace(sp, start, end, new);
 	if (err && new)
 		sp_free(new);
 	return err;
+}
+EXPORT_SYMBOL_FOR_MODULES(mpol_set_shared_policy_range, "kvm");
+
+int mpol_set_shared_policy(struct shared_policy *sp,
+			struct vm_area_struct *vma, struct mempolicy *pol)
+{
+	return mpol_set_shared_policy_range(sp, vma->vm_pgoff,
+					   vma->vm_pgoff + vma_pages(vma), pol);
 }
 EXPORT_SYMBOL_FOR_MODULES(mpol_set_shared_policy, "kvm");
 
