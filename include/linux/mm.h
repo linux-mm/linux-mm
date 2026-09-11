@@ -3496,7 +3496,7 @@ static inline unsigned long get_mm_rss_sum(struct mm_struct *mm)
 
 static inline unsigned long get_mm_hiwater_rss(struct mm_struct *mm)
 {
-	return max(mm->hiwater_rss, get_mm_rss(mm));
+	return max(mm->hiwater_rss, get_mm_rss_sum(mm));
 }
 
 static inline unsigned long get_mm_hiwater_vm(struct mm_struct *mm)
@@ -3520,7 +3520,7 @@ static inline void update_hiwater_vm(struct mm_struct *mm)
 
 static inline void reset_mm_hiwater_rss(struct mm_struct *mm)
 {
-	mm->hiwater_rss = get_mm_rss(mm);
+	mm->hiwater_rss = get_mm_rss_sum(mm);
 }
 
 static inline void setmax_mm_hiwater_rss(unsigned long *maxrss,
