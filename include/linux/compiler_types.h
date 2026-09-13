@@ -58,6 +58,7 @@ static inline void __chk_io_ptr(const volatile void __iomem *ptr) { }
 # define __nocast	__attribute__((nocast))
 # define __safe		__attribute__((safe))
 # define __private	__attribute__((noderef))
+# define __ptent	__attribute__((ptent))
 # define ACCESS_PRIVATE(p, member) (*((typeof((p)->member) __force *) &(p)->member))
 #else /* __CHECKER__ */
 /* address spaces */
@@ -78,6 +79,7 @@ static inline void __chk_io_ptr(const volatile void __iomem *ptr) { }
 # define __nocast
 # define __safe
 # define __private
+# define __ptent
 # define ACCESS_PRIVATE(p, member) ((p)->member)
 # define __builtin_warning(x, y...) (1)
 #endif /* __CHECKER__ */

@@ -967,6 +967,49 @@ static inline void set_pmd(pmd_t *pmdp, pmd_t pmd)
 	WRITE_ONCE(*pmdp, pmd);
 }
 
+#ifdef STRICT_MM_TYPECHECKS
+static inline void set_pte(pte_t *ptep, pte_t pte)
+{
+	pteraw_t *pteraw_ptep = (__force pteraw_t *)ptep;
+	pteraw_t pteraw = __pteraw(pte_val(pte));
+
+	if (pte_present(pte))
+		pte = clear_pte_bit(pte, __pgprot(_PAGE_UNUSED));
+	WRITE_ONCE(*pteraw_ptep, pteraw);
+}
+
+#define ptep_get ptep_get
+static inline pte_t ptep_get(pte_t *ptep)
+{
+	pteraw_t *pteraw_ptep = (__force pteraw_t *)ptep;
+	pteraw_t pteraw = READ_ONCE(*pteraw_ptep);
+
+	return __pte(pteraw.pte);
+}
+
+#define ptep_get_nopgtable ptep_get_nopgtable
+static inline pte_t ptep_get_nopgtable(pte_t *ptep)
+{
+	/*
+	 * Ensure this is a pointer to a copy not a pointer into a page table.
+	 * If this is a stack value, it won't be a valid virtual address, but
+	 * that's fine because it also cannot be pointing into the page table.
+	 */
+	VM_WARN_ON(virt_addr_valid(ptep) && PageTable(virt_to_page(ptep)));
+
+	return (__force pte_t)(*(pteraw_t *)ptep);
+}
+
+#define set_pte_nopgtable set_pte_nopgtable
+static inline void set_pte_nopgtable(pte_t *ptep, pte_t pte)
+{
+	/*
+	 * See comment in ptep_get_nopgtable().
+	 */
+	VM_WARN_ON(virt_addr_valid(ptep) && PageTable(virt_to_page(ptep)));
+	*(pteraw_t *)ptep = (__force pteraw_t)pte;
+}
+#else
 static inline void set_pte(pte_t *ptep, pte_t pte)
 {
 	if (pte_present(pte))
@@ -979,6 +1022,7 @@ static inline pte_t ptep_get(pte_t *ptep)
 {
 	return READ_ONCE(*ptep);
 }
+#endif
 
 #define pmdp_get pmdp_get
 static inline pmd_t pmdp_get(pmd_t *pmdp)
