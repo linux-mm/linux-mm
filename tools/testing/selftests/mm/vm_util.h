@@ -90,6 +90,7 @@ bool pagemap_is_populated(int fd, char *start);
 unsigned long pagemap_get_pfn(int fd, char *start);
 void clear_softdirty(void);
 bool check_for_pattern(FILE *fp, const char *pattern, char *buf, size_t len);
+uint64_t size_to_shift(uint64_t size);
 uint64_t pmd_psize(void);
 uint64_t pmd_pshift(void);
 unsigned long rss_anon(void);
