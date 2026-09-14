@@ -975,7 +975,7 @@ static inline void set_pte(pte_t *ptep, pte_t pte)
 }
 
 #define ptep_get ptep_get
-static inline pte_t ptep_get(pte_t *ptep)
+static inline pte_t ptep_get(const pte_t *ptep)
 {
 	return READ_ONCE(*ptep);
 }
