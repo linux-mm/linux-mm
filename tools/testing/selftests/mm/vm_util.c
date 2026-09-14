@@ -157,6 +157,14 @@ bool check_for_pattern(FILE *fp, const char *pattern, char *buf, size_t len)
 	return false;
 }
 
+uint64_t size_to_shift(uint64_t size)
+{
+	if (__builtin_popcountll(size) != 1)
+		return 0;
+
+	return ffsl(size) - 1;
+}
+
 uint64_t pmd_psize(void)
 {
 	int fd;
@@ -194,7 +202,7 @@ uint64_t pmd_pshift(void)
 	if (!__pmd_psize)
 		return 0;
 
-	__pmd_pshift = ffsl(__pmd_psize) - 1;
+	__pmd_pshift = size_to_shift(__pmd_psize);
 
 	return __pmd_pshift;
 }
