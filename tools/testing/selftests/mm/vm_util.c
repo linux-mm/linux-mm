@@ -384,22 +384,18 @@ out:
 enum check_huge_type {
 	CHECK_HUGE_ANON,
 	CHECK_HUGE_FILE,
-	CHECK_HUGE_SHMEM,
 };
 
 static bool check_huge_type(uint64_t categories, uint64_t kpageflags,
 			    enum check_huge_type type)
 {
 	const bool file = categories & PAGE_IS_FILE;
-	const bool swapbacked = kpageflags & KPF_SWAPBACKED;
 
 	switch (type) {
 	case CHECK_HUGE_ANON:
 		return !file;
 	case CHECK_HUGE_FILE:
-		return file && !swapbacked;
-	case CHECK_HUGE_SHMEM:
-		return file && swapbacked;
+		return file;
 	}
 
 	return false;
@@ -477,11 +473,6 @@ bool check_huge_anon(void *addr, size_t len, int nr_hpages, uint64_t hpage_size)
 bool check_huge_file(void *addr, size_t len, int nr_hpages, uint64_t hpage_size)
 {
 	return __check_huge(addr, len, nr_hpages, hpage_size, CHECK_HUGE_FILE);
-}
-
-bool check_huge_shmem(void *addr, size_t len, int nr_hpages, uint64_t hpage_size)
-{
-	return __check_huge(addr, len, nr_hpages, hpage_size, CHECK_HUGE_SHMEM);
 }
 
 int64_t allocate_transhuge(void *ptr, int pagemap_fd)
