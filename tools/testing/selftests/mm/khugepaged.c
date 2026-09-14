@@ -416,9 +416,8 @@ static bool file_check_huge(void *addr, size_t len, int nr_hpages,
 {
 	switch (finfo.type) {
 	case VMA_FILE:
-		return check_huge_file(addr, len, nr_hpages, hpage_size);
 	case VMA_SHMEM:
-		return check_huge_shmem(addr, len, nr_hpages, hpage_size);
+		return check_huge_file(addr, len, nr_hpages, hpage_size);
 	default:
 		ksft_exit_fail_msg("Unknown VMA type\n");
 		return false;
@@ -451,7 +450,7 @@ static void shmem_cleanup_area(void *p, unsigned long size)
 static bool shmem_check_huge(void *addr, size_t len, int nr_hpages,
 		unsigned long hpage_size)
 {
-	return check_huge_shmem(addr, len, nr_hpages, hpage_size);
+	return check_huge_file(addr, len, nr_hpages, hpage_size);
 }
 
 static struct mem_ops __anon_ops = {
