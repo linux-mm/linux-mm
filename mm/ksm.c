@@ -523,6 +523,8 @@ static void __init ksm_slab_free(void)
 	kmem_cache_destroy(stable_node_cache);
 	kmem_cache_destroy(rmap_item_cache);
 	mm_slot_cache = NULL;
+	stable_node_cache = NULL;
+	rmap_item_cache = NULL;
 }
 
 static __always_inline bool is_stable_node_chain(struct ksm_stable_node *chain)
