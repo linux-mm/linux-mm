@@ -1554,20 +1554,20 @@ out:
 /*
  * try_to_merge_one_page - take two pages and merge them into one
  * @vma: the vma that holds the pte pointing to page
- * @page: the PageAnon page that we want to replace with kpage
- * @kpage: the KSM page that we want to map instead of page,
- *         or NULL the first time when we want to use page as kpage.
+ * @page: the PageAnon page that we want to replace with kfolio
+ * @kfolio: the ksm folio that we want to map instead of page,
+ *          or NULL the first time when we want to use page as ksm page.
  *
  * This function returns 0 if the pages were merged, -EFAULT otherwise.
  */
 static int try_to_merge_one_page(struct vm_area_struct *vma,
-				 struct page *page, struct page *kpage)
+				 struct page *page, struct folio *kfolio)
 {
 	struct folio *folio = page_folio(page);
 	pte_t orig_pte = __pte(0);
 	int err = -EFAULT;
 
-	if (page == kpage)			/* ksm page forked */
+	if (kfolio && page == &kfolio->page)	/* ksm page forked */
 		return 0;
 
 	if (!folio_test_anon(folio))
@@ -1595,7 +1595,7 @@ static int try_to_merge_one_page(struct vm_area_struct *vma,
 	 * case, we need to lock and check page_count is not raised.
 	 */
 	if (write_protect_page(vma, folio, &orig_pte) == 0) {
-		if (!kpage) {
+		if (!kfolio) {
 			/*
 			 * While we hold folio lock, upgrade folio from
 			 * anon to a NULL stable_node with the KSM flag set:
@@ -1610,9 +1610,8 @@ static int try_to_merge_one_page(struct vm_area_struct *vma,
 			if (!folio_test_dirty(folio))
 				folio_mark_dirty(folio);
 			err = 0;
-		} else if (pages_identical(page, kpage))
-			err = replace_page(vma, folio, page_folio(kpage),
-					   orig_pte);
+		} else if (pages_identical(page, &kfolio->page))
+			err = replace_page(vma, folio, kfolio, orig_pte);
 	}
 
 out_unlock:
@@ -1642,7 +1641,8 @@ static int try_to_merge_with_zero_page(struct ksm_rmap_item *rmap_item,
 		mmap_read_lock(mm);
 		vma = find_mergeable_vma(mm, rmap_item->address);
 		if (vma) {
-			err = try_to_merge_one_page(vma, page, zero_page);
+			err = try_to_merge_one_page(vma, page,
+						     page_folio(zero_page));
 			trace_ksm_merge_one_page(page_to_pfn(zero_page),
 						 rmap_item, mm, err);
 		} else {
@@ -1676,7 +1676,7 @@ static int try_to_merge_with_ksm_page(struct ksm_rmap_item *rmap_item,
 	if (!vma)
 		goto out;
 
-	err = try_to_merge_one_page(vma, page, kpage);
+	err = try_to_merge_one_page(vma, page, page_folio(kpage));
 	if (err)
 		goto out;
 
