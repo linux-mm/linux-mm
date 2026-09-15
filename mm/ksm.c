@@ -1705,8 +1705,8 @@ out:
  * try_to_merge_two_pages - take two identical pages and prepare them
  * to be merged into one page.
  *
- * This function returns the kpage if we successfully merged two identical
- * pages into one ksm page, NULL otherwise.
+ * This function returns the KSM folio if we successfully merged two
+ * identical pages into one, NULL otherwise.
  *
  * Note that this function upgrades page to ksm page: if one of the pages
  * is already a ksm page, try_to_merge_with_ksm_folio should be used.
@@ -1795,7 +1795,7 @@ static struct folio *stable_node_dup(struct ksm_stable_node **_stable_node_dup,
 			found = dup;
 			found_rmap_hlist_len = found->rmap_hlist_len;
 			tree_folio = folio;
-			/* skip put_page for found candidate */
+			/* Skip folio_put() for the selected candidate. */
 			if (!prune_stale_stable_nodes &&
 			    is_page_sharing_candidate(found))
 				break;
@@ -1868,13 +1868,13 @@ static struct folio *stable_node_dup(struct ksm_stable_node **_stable_node_dup,
 
 /*
  * Like for ksm_get_folio, this function can free the *_stable_node and
- * *_stable_node_dup if the returned tree_page is NULL.
+ * *_stable_node_dup if the returned folio is NULL.
  *
  * It can also free and overwrite *_stable_node with the found
  * stable_node_dup if the chain is collapsed (in which case
  * *_stable_node will be equal to *_stable_node_dup like if the chain
- * never existed). It's up to the caller to verify tree_page is not
- * NULL before dereferencing *_stable_node or *_stable_node_dup.
+ * never existed). It's up to the caller to verify the returned folio is
+ * not NULL before dereferencing *_stable_node or *_stable_node_dup.
  *
  * *_stable_node_dup is really a second output parameter of this
  * function and will be overwritten in all cases, the caller doesn't
@@ -1915,8 +1915,8 @@ static __always_inline struct folio *chain(struct ksm_stable_node **s_n_d,
  * This function checks if there is a page inside the stable tree
  * with identical content to the page that we are scanning right now.
  *
- * This function returns the stable tree node of identical content if found,
- * -EBUSY if the stable node's page is being migrated, NULL otherwise.
+ * This function returns a referenced folio with identical content if found,
+ * ERR_PTR(-EBUSY) if the matching folio could not be locked, NULL otherwise.
  */
 static struct folio *stable_tree_search(struct page *page)
 {
@@ -2003,11 +2003,11 @@ again:
 			}
 
 			/*
-			 * Lock and unlock the stable_node's page (which
-			 * might already have been migrated) so that page
-			 * migration is sure to notice its raised count.
+			 * Lock and unlock the stable_node's folio (which
+			 * might already have been migrated) so that
+			 * folio migration is sure to notice its raised count.
 			 * It would be more elegant to return stable_node
-			 * than kpage, but that involves more changes.
+			 * than tree_folio, but that involves more changes.
 			 */
 			tree_folio = ksm_get_folio(stable_node_dup,
 						   KSM_GET_FOLIO_TRYLOCK);
