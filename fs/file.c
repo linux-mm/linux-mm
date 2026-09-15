@@ -23,6 +23,7 @@
 #include <linux/file_ref.h>
 #include <net/sock.h>
 #include <linux/init_task.h>
+#include <asm/syscall.h>
 
 #include "internal.h"
 
@@ -630,12 +631,234 @@ static void __put_unused_fd(struct files_struct *files, unsigned int fd)
 		files->next_fd = fd;
 }
 
-void put_unused_fd(unsigned int fd)
+/* Release @fd in the table, its slot is the caller's business. */
+static void fd_release(unsigned int fd)
 {
 	struct files_struct *files = current->files;
+
 	spin_lock(&files->file_lock);
 	__put_unused_fd(files, fd);
 	spin_unlock(&files->file_lock);
+}
+
+/* Enough for SCM_MAX_FD, and a page of slots on 4K pages. */
+#define FD_SLOTS_SPILL_MIN	256
+
+/* Make the syscall exit path call fd_slots_commit(). */
+#if defined(CONFIG_GENERIC_ENTRY)
+#define fd_slots_set_work()	set_syscall_work(FD_SLOTS)
+#define fd_slots_clear_work()	clear_syscall_work(FD_SLOTS)
+#elif defined(TIF_FD_SLOTS)
+#define fd_slots_set_work()	set_thread_flag(TIF_FD_SLOTS)
+#define fd_slots_clear_work()	clear_thread_flag(TIF_FD_SLOTS)
+#else
+#error "the syscall exit path must commit prepared file descriptors"
+#endif
+
+static struct fd_slot *fd_slot(struct fd_slots *slots, unsigned int idx)
+{
+	if (idx < FD_SLOTS_INLINE)
+		return &slots->inline_slots[idx];
+	return &slots->spill[idx - FD_SLOTS_INLINE];
+}
+
+/* Room for slot @idx in the spill array, doubling as it fills up. */
+static noinline struct fd_slot *fd_slots_spill(struct fd_slots *slots,
+					      unsigned int idx)
+{
+	unsigned int max = slots->spill_max;
+	struct fd_slot *spill;
+
+	idx -= FD_SLOTS_INLINE;
+	if (idx < max)
+		return &slots->spill[idx];
+
+	max = max ? max * 2 : FD_SLOTS_SPILL_MIN;
+	spill = kvrealloc(slots->spill, array_size(max, sizeof(*spill)),
+			  GFP_KERNEL_ACCOUNT);
+	if (!spill)
+		return NULL;
+	slots->spill = spill;
+	slots->spill_max = max;
+	return &spill[idx];
+}
+
+/* Record @fd in the next slot, returns the slot. */
+static struct fd_slot *fd_slot_record(int fd)
+{
+	struct fd_slots *slots = &current->fd_slots;
+	unsigned int idx = slots->nr;
+	struct fd_slot *slot;
+
+	/* Nothing would ever commit what a kernel thread prepares. */
+	VFS_WARN_ON_ONCE(current->flags & PF_KTHREAD);
+
+	if (likely(idx < FD_SLOTS_INLINE)) {
+		slot = &slots->inline_slots[idx];
+	} else {
+		slot = fd_slots_spill(slots, idx);
+		if (!slot)
+			return ERR_PTR(-ENOMEM);
+	}
+	ACCESS_PRIVATE(slot, fd) = fd;
+	ACCESS_PRIVATE(slot, file) = NULL;
+	if (!idx)
+		fd_slots_set_work();
+	slots->nr = idx + 1;
+	return slot;
+}
+
+/* The slot holding @fd, if this syscall prepared it. */
+static inline int fd_slot_find(struct fd_slots *slots, unsigned int fd)
+{
+	unsigned int idx = slots->nr;
+
+	while (idx--) {
+		if (ACCESS_PRIVATE(fd_slot(slots, idx), fd) == fd)
+			return idx;
+	}
+	return -1;
+}
+
+/**
+ * fd_prepare - allocate a descriptor that the syscall exit installs
+ * @flags: O_CLOEXEC or 0
+ *
+ * Returns the prepared slot as a const handle or an error pointer.
+ */
+const struct fd_slot *fd_prepare(unsigned flags)
+{
+	struct fd_slot *slot;
+	int fd;
+
+	fd = get_unused_fd_flags(flags);
+	if (fd < 0)
+		return ERR_PTR(fd);
+
+	slot = fd_slot_record(fd);
+	if (IS_ERR(slot))
+		fd_release(fd);
+	return slot;
+}
+EXPORT_SYMBOL(fd_prepare);
+
+/**
+ * fd_stage - attach the file to a prepared slot
+ * @slot: slot from fd_prepare()
+ * @file: the file to install, consumed
+ *
+ * Returns the number. The syscall exit installs @file there when the syscall
+ * returns success and drops it when the syscall returns an error.
+ */
+int fd_stage(const struct fd_slot *slot, struct file *file)
+{
+	struct fd_slot *s = (struct fd_slot *)slot;
+
+	VFS_WARN_ON_ONCE(ACCESS_PRIVATE(s, file));
+	ACCESS_PRIVATE(s, file) = file;
+	return ACCESS_PRIVATE(s, fd);
+}
+EXPORT_SYMBOL(fd_stage);
+
+/**
+ * fd_prepare_fd - the descriptor number of a prepared slot
+ * @slot: slot from fd_prepare()
+ */
+int fd_prepare_fd(const struct fd_slot *slot)
+{
+	return ACCESS_PRIVATE(slot, fd);
+}
+EXPORT_SYMBOL(fd_prepare_fd);
+
+/**
+ * fd_prepare_file - the file staged into a slot, to configure before install
+ * @slot: slot from fd_prepare()
+ *
+ * Returns the file handed to fd_stage(), or NULL before one is staged.
+ */
+struct file *fd_prepare_file(const struct fd_slot *slot)
+{
+	return ACCESS_PRIVATE(slot, file);
+}
+EXPORT_SYMBOL(fd_prepare_file);
+
+/* Install every staged file, release the slots that never got one. */
+static void fd_slots_install(struct fd_slots *slots)
+{
+	unsigned int idx;
+
+	for (idx = 0; idx < slots->nr; idx++) {
+		struct fd_slot *slot = fd_slot(slots, idx);
+
+		if (ACCESS_PRIVATE(slot, file))
+			fd_install(ACCESS_PRIVATE(slot, fd),
+				   ACCESS_PRIVATE(slot, file));
+		else
+			fd_release(ACCESS_PRIVATE(slot, fd));
+	}
+}
+
+/* Release every slot's descriptor and drop the staged files. */
+static void fd_slots_drop(struct fd_slots *slots)
+{
+	struct files_struct *files = current->files;
+	unsigned int idx;
+
+	spin_lock(&files->file_lock);
+	for (idx = 0; idx < slots->nr; idx++)
+		__put_unused_fd(files, ACCESS_PRIVATE(fd_slot(slots, idx), fd));
+	spin_unlock(&files->file_lock);
+	for (idx = 0; idx < slots->nr; idx++) {
+		struct fd_slot *slot = fd_slot(slots, idx);
+
+		if (ACCESS_PRIVATE(slot, file))
+			fput(ACCESS_PRIVATE(slot, file));
+	}
+}
+
+static __always_inline void fd_slots_finish(struct fd_slots *slots, bool failed)
+{
+	if (likely(!failed))
+		fd_slots_install(slots);
+	else
+		fd_slots_drop(slots);
+	slots->nr = 0;
+	fd_slots_clear_work();
+}
+
+/* Syscall exit hook, keyed on the return value the caller will see. */
+void fd_slots_commit(struct pt_regs *regs)
+{
+	fd_slots_finish(&current->fd_slots,
+			syscall_get_error(current, regs) != 0);
+}
+
+/* Install or drop the prepared descriptors based on @ret. */
+void __fd_slots_commit(long ret)
+{
+	fd_slots_finish(&current->fd_slots, IS_ERR_VALUE(ret));
+}
+
+void exit_fd_slots(void)
+{
+	struct fd_slots *slots = &current->fd_slots;
+
+	/* A syscall must not exit with prepared descriptors outstanding. */
+	if (WARN_ON_ONCE(slots->nr))
+		fd_slots_finish(slots, true);
+	kvfree(slots->spill);
+}
+
+/**
+ * put_unused_fd - give a descriptor back before it got a file
+ * @fd: descriptor returned by get_unused_fd_flags()
+ *
+ * Not for a prepared descriptor, the syscall exit releases that one.
+ */
+void put_unused_fd(unsigned int fd)
+{
+	VFS_WARN_ON_ONCE(fd_slot_find(&current->fd_slots, fd) >= 0);
+	fd_release(fd);
 }
 
 EXPORT_SYMBOL(put_unused_fd);
@@ -1384,25 +1607,27 @@ out_unlock:
  */
 int receive_fd(struct file *file, int __user *ufd, unsigned int o_flags)
 {
-	int error;
+	int fd, error;
 
 	error = security_file_receive(file);
 	if (error)
 		return error;
 
-	FD_PREPARE(fdf, o_flags, file);
-	if (fdf.err)
-		return fdf.err;
-	get_file(file);
+	fd = get_unused_fd_flags(o_flags);
+	if (fd < 0)
+		return fd;
 
 	if (ufd) {
-		error = put_user(fd_prepare_fd(fdf), ufd);
-		if (error)
+		error = put_user(fd, ufd);
+		if (error) {
+			put_unused_fd(fd);
 			return error;
+		}
 	}
 
-	__receive_sock(fd_prepare_file(fdf));
-	return fd_publish(fdf);
+	__receive_sock(file);
+	fd_install(fd, get_file(file));
+	return fd;
 }
 EXPORT_SYMBOL_GPL(receive_fd);
 

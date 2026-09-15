@@ -91,6 +91,10 @@ extern bool get_close_on_exec(unsigned int fd);
 extern int __get_unused_fd_flags(unsigned flags, unsigned long nofile);
 extern int get_unused_fd_flags(unsigned flags);
 extern void put_unused_fd(unsigned int fd);
+void __fd_slots_commit(long ret);
+struct pt_regs;
+void fd_slots_commit(struct pt_regs *regs);
+void exit_fd_slots(void);
 
 DEFINE_CLASS(get_unused_fd, int, if (_T >= 0) put_unused_fd(_T),
 	     get_unused_fd_flags(flags), unsigned flags)
@@ -118,6 +122,12 @@ DEFINE_FREE(fput, struct file *, if (!IS_ERR_OR_NULL(_T)) fput(_T))
 
 extern void fd_install(unsigned int fd, struct file *file);
 
+struct fd_slot;
+const struct fd_slot *fd_prepare(unsigned flags);
+int fd_stage(const struct fd_slot *slot, struct file *file);
+int fd_prepare_fd(const struct fd_slot *slot);
+struct file *fd_prepare_file(const struct fd_slot *slot);
+
 int receive_fd(struct file *file, int __user *ufd, unsigned int o_flags);
 
 int receive_fd_replace(int new_fd, struct file *file, unsigned int o_flags);
@@ -128,128 +138,46 @@ extern void __fput_sync(struct file *);
 extern unsigned int sysctl_nr_open_min, sysctl_nr_open_max;
 
 /*
- * fd_prepare: Combined fd + file allocation cleanup class.
- * @err: Error code to indicate if allocation succeeded.
- * @__fd: Allocated fd (may not be accessed directly)
- * @__file: Allocated struct file pointer (may not be accessed directly)
- *
- * Allocates an fd and a file together. On error paths, automatically cleans
- * up whichever resource was successfully allocated. Allows flexible file
- * allocation with different functions per usage.
- *
- * Do not use directly.
- */
-struct fd_prepare {
-	s32 err;
-	s32 __fd; /* do not access directly */
-	struct file *__file; /* do not access directly */
-};
-
-/* Typedef for fd_prepare cleanup guards. */
-typedef struct fd_prepare class_fd_prepare_t;
-
-/*
- * Accessors for fd_prepare class members.
- * _Generic() is used for zero-cost type safety.
- */
-#define fd_prepare_fd(_fdf) \
-	(_Generic((_fdf), struct fd_prepare: (_fdf).__fd))
-
-#define fd_prepare_file(_fdf) \
-	(_Generic((_fdf), struct fd_prepare: (_fdf).__file))
-
-/* Do not use directly. */
-static inline void class_fd_prepare_destructor(const struct fd_prepare *fdf)
-{
-	if (unlikely(fdf->__fd >= 0))
-		put_unused_fd(fdf->__fd);
-	if (unlikely(!IS_ERR_OR_NULL(fdf->__file)))
-		fput(fdf->__file);
-}
-
-/* Do not use directly. */
-static inline int class_fd_prepare_lock_err(const struct fd_prepare *fdf)
-{
-	if (unlikely(fdf->err))
-		return fdf->err;
-	if (unlikely(fdf->__fd < 0))
-		return fdf->__fd;
-	if (unlikely(IS_ERR(fdf->__file)))
-		return PTR_ERR(fdf->__file);
-	if (unlikely(!fdf->__file))
-		return -ENOMEM;
-	return 0;
-}
-
-/*
- * __FD_PREPARE_INIT - Helper to initialize fd_prepare class.
+ * FD_ADD - allocate a descriptor, build the file and install it in one step.
  * @_fd_flags: flags for get_unused_fd_flags()
- * @_file_owned: expression that returns struct file *
+ * @_file_owned: struct file to take ownership of (can be an expression)
  *
- * Returns a struct fd_prepare with fd, file, and err set.
- * If fd allocation fails, fd will be negative and err will be set. If
- * fd succeeds but file_init_expr fails, file will be ERR_PTR and err
- * will be set. The err field is the single source of truth for error
- * checking.
+ * The file expression is evaluated only after the descriptor is allocated, so
+ * a full table does not run its side effects. Drops the file and returns a
+ * negative errno on failure. Installs immediately: for anything more than a
+ * bare install-and-return (reporting the number, configuring the file,
+ * installing several descriptors) use fd_prepare()/fd_stage().
  */
-#define __FD_PREPARE_INIT(_fd_flags, _file_owned)                 \
-	({                                                        \
-		struct fd_prepare fdf = {                         \
-			.__fd = get_unused_fd_flags((_fd_flags)), \
-		};                                                \
-		if (likely(fdf.__fd >= 0))                        \
-			fdf.__file = (_file_owned);               \
-		fdf.err = ACQUIRE_ERR(fd_prepare, &fdf);          \
-		fdf;                                              \
-	})
+#define FD_ADD(_fd_flags, _file_owned)					\
+({									\
+	int __fd = get_unused_fd_flags(_fd_flags);			\
+	if (likely(__fd >= 0)) {					\
+		struct file *__file = (_file_owned);			\
+		if (unlikely(IS_ERR_OR_NULL(__file))) {			\
+			put_unused_fd(__fd);				\
+			__fd = __file ? PTR_ERR(__file) : -ENOMEM;	\
+		} else {						\
+			fd_install(__fd, __file);			\
+		}							\
+	}								\
+	__fd;								\
+})
 
 /*
- * FD_PREPARE - Macro to declare and initialize an fd_prepare variable.
- *
- * Declares and initializes an fd_prepare variable with automatic
- * cleanup. No separate scope required - cleanup happens when variable
- * goes out of scope.
- *
- * @_fdf: name of struct fd_prepare variable to define
+ * FD_PREPARE - reserve a descriptor and stage @_file_owned on it for the
+ * install at syscall exit; declares @_fdf, an fd_prepare() slot.
+ * @_fdf: name of the const struct fd_slot * to declare
  * @_fd_flags: flags for get_unused_fd_flags()
- * @_file_owned: struct file to take ownership of (can be expression)
+ * @_file_owned: struct file to take ownership of (can be an expression)
  */
-#define FD_PREPARE(_fdf, _fd_flags, _file_owned) \
-	CLASS_INIT(fd_prepare, _fdf, __FD_PREPARE_INIT(_fd_flags, _file_owned))
-
-/*
- * fd_publish - Publish prepared fd and file to the fd table.
- * @_fdf: struct fd_prepare variable
- */
-#define fd_publish(_fdf)                                       \
-	({                                                     \
-		struct fd_prepare *fdp = &(_fdf);              \
-		VFS_WARN_ON_ONCE(fdp->err);                    \
-		VFS_WARN_ON_ONCE(fdp->__fd < 0);               \
-		VFS_WARN_ON_ONCE(IS_ERR_OR_NULL(fdp->__file)); \
-		fd_install(fdp->__fd, fdp->__file);            \
-		retain_and_null_ptr(fdp->__file);              \
-		take_fd(fdp->__fd);                            \
-	})
-
-/* Do not use directly. */
-#define __FD_ADD(_fdf, _fd_flags, _file_owned)            \
-	({                                                \
-		FD_PREPARE(_fdf, _fd_flags, _file_owned); \
-		s32 ret = _fdf.err;                       \
-		if (likely(!ret))                         \
-			ret = fd_publish(_fdf);           \
-		ret;                                      \
-	})
-
-/*
- * FD_ADD - Allocate and install an fd and file in one step.
- * @_fd_flags: flags for get_unused_fd_flags()
- * @_file_owned: struct file to take ownership of
- *
- * Returns the allocated fd number, or negative error code on failure.
- */
-#define FD_ADD(_fd_flags, _file_owned) \
-	__FD_ADD(__UNIQUE_ID(fd_prepare), _fd_flags, _file_owned)
+#define FD_PREPARE(_fdf, _fd_flags, _file_owned)			\
+	const struct fd_slot *_fdf = fd_prepare(_fd_flags);		\
+	if (!IS_ERR(_fdf)) {						\
+		struct file *__file = (_file_owned);			\
+		if (unlikely(IS_ERR_OR_NULL(__file)))			\
+			_fdf = __file ? ERR_CAST(__file) : ERR_PTR(-ENOMEM); \
+		else							\
+			fd_stage(_fdf, __file);				\
+	}
 
 #endif /* __LINUX_FILE_H */
