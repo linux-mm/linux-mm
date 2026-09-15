@@ -2758,8 +2758,8 @@ next_page:
 		}
 	}
 
-	if (ksm_test_exit(mm)) {
 no_vmas:
+	if (ksm_test_exit(mm)) {
 		ksm_scan.address = 0;
 		ksm_scan.rmap_list = &mm_slot->rmap_list;
 	}
