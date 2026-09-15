@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * mm/mmap.c
+ *mm/mmap.c
  *
  * Written by obz.
  *
@@ -526,9 +526,9 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			 * And don't attempt to combine with hugetlb for now.
 			 */
 			if (flags & (MAP_LOCKED | MAP_HUGETLB))
-			        return -EINVAL;
+				return -EINVAL;
 			if (vma_flags_can_grow(&vma_flags))
-			        return -EINVAL;
+				return -EINVAL;
 
 			/*
 			 * If the pages can be dropped, then it doesn't make
@@ -832,6 +832,7 @@ __get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 				  = NULL;
 
 	unsigned long error = arch_mmap_check(addr, len, flags);
+
 	if (error)
 		return error;
 
@@ -1017,12 +1018,12 @@ struct vm_area_struct *find_extend_vma_locked(struct mm_struct *mm, unsigned lon
 
 #if defined(CONFIG_STACK_GROWSUP)
 
-#define vma_expand_up(vma,addr) expand_upwards(vma, addr)
+#define vma_expand_up(vma, addr) expand_upwards(vma, addr)
 #define vma_expand_down(vma, addr) (-EFAULT)
 
 #else
 
-#define vma_expand_up(vma,addr) (-EFAULT)
+#define vma_expand_up(vma, addr) (-EFAULT)
 #define vma_expand_down(vma, addr) expand_downwards(vma, addr)
 
 #endif
@@ -1454,6 +1455,7 @@ static vm_fault_t special_mapping_fault(struct vm_fault *vmf)
 
 	if (*pages) {
 		struct page *page = *pages;
+
 		get_page(page);
 		vmf->page = page;
 		return 0;
