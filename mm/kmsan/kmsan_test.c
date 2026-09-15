@@ -352,6 +352,12 @@ static void test_init_vmalloc(struct kunit *test)
 
 	kunit_info(test, "vmalloc buffer can be initialized (no reports)\n");
 	buf = vmalloc(PAGE_SIZE * npages);
+
+	if (!buf) {
+		kunit_skip(test, "vmalloc failed, skipping test\n");
+		return;
+	}
+
 	buf[0] = 1;
 	memset(buf, 0xfe, PAGE_SIZE * npages);
 	USE(buf[0]);
