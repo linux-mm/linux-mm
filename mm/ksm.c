@@ -2601,7 +2601,7 @@ found_unlock:
 	return 1;
 }
 
-static struct mm_walk_ops ksm_next_page_ops = {
+static const struct mm_walk_ops ksm_next_page_ops = {
 	.pmd_entry = ksm_next_page_pmd_entry,
 	.walk_lock = PGWALK_RDLOCK,
 };
