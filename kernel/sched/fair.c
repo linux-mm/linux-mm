@@ -4061,6 +4061,16 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	p->numa_faults_locality[local] += pages;
 }
 
+/*
+ * Read-only file-backed mappings are expected to be cache replicated between
+ * accessor nodes, so they are not worth sampling for placement.  They can
+ * still strand on the slow tier like anything else.
+ */
+static bool vma_is_ro_file(struct vm_area_struct *vma)
+{
+	return vma->vm_file && (vma->vm_flags & (VM_READ | VM_WRITE)) == VM_READ;
+}
+
 static void reset_ptenuma_scan(struct task_struct *p)
 {
 	/*
@@ -4075,6 +4085,10 @@ static void reset_ptenuma_scan(struct task_struct *p)
 	p->mm->numa_scan_offset = 0;
 }
 
+/*
+ * Decide whether this VMA should be sampled for NUMA placement.  In addition
+ * to recent accesses, periodically allow a scan to avoid starvation.
+ */
 static bool vma_is_accessed(struct mm_struct *mm, struct vm_area_struct *vma)
 {
 	unsigned long pids;
@@ -4092,21 +4106,12 @@ static bool vma_is_accessed(struct mm_struct *mm, struct vm_area_struct *vma)
 		return true;
 
 	/*
-	 * Complete a scan that has already started regardless of PID access, or
-	 * some VMAs may never be scanned in multi-threaded applications:
-	 */
-	if (mm->numa_scan_offset > vma->vm_start) {
-		trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_IGNORE_PID);
-		return true;
-	}
-
-	/*
 	 * This vma has not been accessed for a while, and if the number
 	 * the threads in the same process is low, which means no other
 	 * threads can help scan this vma, force a vma scan.
 	 */
 	if (READ_ONCE(mm->numa_scan_seq) >
-	   (vma->numab_state->prev_scan_seq + get_nr_threads(current)))
+	   (vma->numab_state->prev_placement_scan_seq + get_nr_threads(current)))
 		return true;
 
 	return false;
@@ -4129,8 +4134,10 @@ static void task_numa_work(struct callback_head *work)
 	unsigned long nr_pte_updates = 0;
 	long pages, virtpages;
 	struct vma_iterator vmi;
+	unsigned int numab_mode = READ_ONCE(sysctl_numa_balancing_mode);
 	bool vma_pids_skipped;
 	bool vma_pids_forced = false;
+	bool accessed, scan_started, promo_only;
 
 	WARN_ON_ONCE(p != container_of(work, struct task_struct, numa_work));
 
@@ -4218,13 +4225,13 @@ retry_pids:
 		}
 
 		/*
-		 * Shared library pages mapped by multiple processes are not
-		 * migrated as it is expected they are cache replicated. Avoid
-		 * hinting faults in read-only file-backed mappings or the vDSO
-		 * as migrating the pages will be of marginal benefit.
+		 * Read-only file-backed folios are poor NUMA placement
+		 * candidates, but slow-tier folios still need to be scanned for
+		 * promotion.
 		 */
 		if (!vma->vm_mm ||
-		    (vma->vm_file && (vma->vm_flags & (VM_READ|VM_WRITE)) == (VM_READ))) {
+		    (vma_is_ro_file(vma) &&
+		     !(numab_mode & NUMA_BALANCING_MEMORY_TIERING))) {
 			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_SHARED_RO);
 			continue;
 		}
@@ -4266,6 +4273,7 @@ retry_pids:
 			 * first scan:
 			 */
 			 vma->numab_state->prev_scan_seq = mm->numa_scan_seq - 1;
+			 vma->numab_state->prev_placement_scan_seq = mm->numa_scan_seq - 1;
 		}
 
 		/*
@@ -4295,20 +4303,37 @@ retry_pids:
 		}
 
 		/*
-		 * Do not scan the VMA if task has not accessed it, unless no other
-		 * VMA candidate exists.
+		 * The PID filter must not gate promotion.  Scan PID-inactive
+		 * VMAs in tiering mode using promotion-only scans.
 		 */
-		if (!vma_pids_forced && !vma_is_accessed(mm, vma)) {
+		accessed = vma_is_accessed(mm, vma);
+		scan_started = mm->numa_scan_offset > vma->vm_start;
+
+		if (!vma_pids_forced && !accessed && !scan_started &&
+		    !(numab_mode & NUMA_BALANCING_MEMORY_TIERING)) {
 			vma_pids_skipped = true;
 			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_PID_INACTIVE);
 			continue;
 		}
+		if (!vma_pids_forced && !accessed &&
+		    !(numab_mode & NUMA_BALANCING_MEMORY_TIERING) &&
+		    scan_started)
+			trace_sched_skip_vma_numa(mm, vma, NUMAB_SKIP_IGNORE_PID);
+
+		/*
+		 * In combined mode, only VMAs the task uses need placement
+		 * samples. Without tiering, every VMA reaching here does.
+		 */
+		promo_only = !(numab_mode & NUMA_BALANCING_NORMAL) ||
+			     ((numab_mode & NUMA_BALANCING_MEMORY_TIERING) &&
+			      !accessed) || vma_is_ro_file(vma);
 
 		do {
 			start = max(start, vma->vm_start);
 			end = ALIGN(start + (pages << PAGE_SHIFT), HPAGE_SIZE);
 			end = min(end, vma->vm_end);
-			nr_pte_updates = change_prot_numa(vma, start, end);
+			nr_pte_updates = change_prot_numa(vma, start, end,
+							  promo_only);
 
 			/*
 			 * Try to scan sysctl_numa_balancing_size worth of
@@ -4329,8 +4354,15 @@ retry_pids:
 			cond_resched();
 		} while (end != vma->vm_end);
 
-		/* VMA scan is complete, do not scan until next sequence. */
+		/*
+		 * VMA scan is complete, do not scan until next sequence.  A
+		 * promotion-only scan reached the end of the VMA but did not
+		 * sample placement, so it does not count towards the starvation
+		 * horizon in vma_is_accessed().
+		 */
 		vma->numab_state->prev_scan_seq = mm->numa_scan_seq;
+		if (!promo_only)
+			vma->numab_state->prev_placement_scan_seq = mm->numa_scan_seq;
 
 		/*
 		 * Only force scan within one VMA at a time, to limit the
