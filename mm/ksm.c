@@ -1661,13 +1661,13 @@ static int try_to_merge_with_zero_page(struct ksm_rmap_item *rmap_item,
 }
 
 /*
- * try_to_merge_with_ksm_page - like try_to_merge_two_pages,
- * but no new kernel page is allocated: kpage must already be a ksm page.
+ * try_to_merge_with_ksm_folio - like try_to_merge_two_pages,
+ * but no new kernel page is allocated: kfolio must already be a ksm page.
  *
  * This function returns 0 if the pages were merged, -EFAULT otherwise.
  */
-static int try_to_merge_with_ksm_page(struct ksm_rmap_item *rmap_item,
-				      struct page *page, struct page *kpage)
+static int try_to_merge_with_ksm_folio(struct ksm_rmap_item *rmap_item,
+				      struct page *page, struct folio *kfolio)
 {
 	struct mm_struct *mm = rmap_item->mm;
 	struct vm_area_struct *vma;
@@ -1678,7 +1678,7 @@ static int try_to_merge_with_ksm_page(struct ksm_rmap_item *rmap_item,
 	if (!vma)
 		goto out;
 
-	err = try_to_merge_one_page(vma, page, page_folio(kpage));
+	err = try_to_merge_one_page(vma, page, kfolio);
 	if (err)
 		goto out;
 
@@ -1697,8 +1697,9 @@ static int try_to_merge_with_ksm_page(struct ksm_rmap_item *rmap_item,
 	get_anon_vma(vma->anon_vma);
 out:
 	mmap_read_unlock(mm);
-	trace_ksm_merge_with_ksm_page(kpage, page_to_pfn(kpage ? kpage : page),
-				rmap_item, mm, err);
+	trace_ksm_merge_with_ksm_page(kfolio ? &kfolio->page : NULL,
+				      kfolio ? folio_pfn(kfolio) : page_to_pfn(page),
+				      rmap_item, mm, err);
 	return err;
 }
 
@@ -1710,7 +1711,7 @@ out:
  * pages into one ksm page, NULL otherwise.
  *
  * Note that this function upgrades page to ksm page: if one of the pages
- * is already a ksm page, try_to_merge_with_ksm_page should be used.
+ * is already a ksm page, try_to_merge_with_ksm_folio should be used.
  */
 static struct folio *try_to_merge_two_pages(struct ksm_rmap_item *rmap_item,
 					   struct page *page,
@@ -1719,10 +1720,10 @@ static struct folio *try_to_merge_two_pages(struct ksm_rmap_item *rmap_item,
 {
 	int err;
 
-	err = try_to_merge_with_ksm_page(rmap_item, page, NULL);
+	err = try_to_merge_with_ksm_folio(rmap_item, page, NULL);
 	if (!err) {
-		err = try_to_merge_with_ksm_page(tree_rmap_item,
-							tree_page, page);
+		err = try_to_merge_with_ksm_folio(tree_rmap_item,
+						 tree_page, page_folio(page));
 		/*
 		 * If that fails, we have a ksm page with only one pte
 		 * pointing to it: so break it.
@@ -2411,7 +2412,7 @@ static void cmp_and_merge_page(struct page *page, struct ksm_rmap_item *rmap_ite
 		if (kfolio == ERR_PTR(-EBUSY))
 			return;
 
-		err = try_to_merge_with_ksm_page(rmap_item, page, &kfolio->page);
+		err = try_to_merge_with_ksm_folio(rmap_item, page, kfolio);
 		if (!err) {
 			/*
 			 * The page was successfully merged:
