@@ -1135,6 +1135,64 @@ static struct ksm_mm_slot *advance_scan_mm_slot(struct ksm_mm_slot *mm_slot)
 	return ksm_scan.mm_slot;
 }
 
+/*
+ * ksm_begin_full_scan - start a new full scan of all mergeable mms
+ *
+ * Called when the scanning cursor has come back around to ksm_mm_head:
+ * drain the per-cpu pagevecs, prune the migrate_nodes list and reset
+ * the unstable trees for the new pass, then move the cursor onto the
+ * first mm slot.  Returns the new cursor, which is &ksm_mm_head itself
+ * if a racing __ksm_exit removed the last mm from the list.
+ */
+static struct ksm_mm_slot *ksm_begin_full_scan(void)
+{
+	struct ksm_mm_slot *mm_slot;
+	int nid;
+
+	advisor_start_scan();
+	trace_ksm_start_scan(ksm_scan.seqnr, ksm_rmap_items);
+
+	/*
+	 * A number of pages can hang around indefinitely in per-cpu
+	 * LRU cache, raised page count preventing write_protect_page
+	 * from merging them.  Though it doesn't really matter much,
+	 * it is puzzling to see some stuck in pages_volatile until
+	 * other activity jostles them out, and they also prevented
+	 * LTP's KSM test from succeeding deterministically; so drain
+	 * them here (here rather than on entry to ksm_do_scan(),
+	 * so we don't IPI too often when pages_to_scan is set low).
+	 */
+	lru_add_drain_all();
+
+	/*
+	 * Whereas stale stable_nodes on the stable_tree itself
+	 * get pruned in the regular course of stable_tree_search(),
+	 * those moved out to the migrate_nodes list can accumulate:
+	 * so prune them once before each full scan.
+	 */
+	if (!ksm_merge_across_nodes) {
+		struct ksm_stable_node *stable_node, *next;
+		struct folio *folio;
+
+		list_for_each_entry_safe(stable_node, next,
+					 &migrate_nodes, list) {
+			folio = ksm_get_folio(stable_node,
+					      KSM_GET_FOLIO_NOLOCK);
+			if (folio)
+				folio_put(folio);
+			cond_resched();
+		}
+	}
+
+	for (nid = 0; nid < ksm_nr_node_ids; nid++)
+		root_unstable_tree[nid] = RB_ROOT;
+
+	spin_lock(&ksm_mmlist_lock);
+	mm_slot = advance_scan_mm_slot(&ksm_mm_head);
+	spin_unlock(&ksm_mmlist_lock);
+	return mm_slot;
+}
+
 #ifdef CONFIG_SYSFS
 /*
  * Only called through the sysfs control interface:
@@ -2631,65 +2689,24 @@ static struct ksm_rmap_item *scan_get_next_rmap_item(struct page **page)
 	struct vm_area_struct *vma;
 	struct ksm_rmap_item *rmap_item;
 	struct vma_iterator vmi;
-	int nid;
 
 	if (list_empty(&ksm_mm_head.slot.mm_node))
 		return NULL;
 
 	mm_slot = ksm_scan.mm_slot;
 	if (mm_slot == &ksm_mm_head) {
-		advisor_start_scan();
-		trace_ksm_start_scan(ksm_scan.seqnr, ksm_rmap_items);
-
-		/*
-		 * A number of pages can hang around indefinitely in per-cpu
-		 * LRU cache, raised page count preventing write_protect_page
-		 * from merging them.  Though it doesn't really matter much,
-		 * it is puzzling to see some stuck in pages_volatile until
-		 * other activity jostles them out, and they also prevented
-		 * LTP's KSM test from succeeding deterministically; so drain
-		 * them here (here rather than on entry to ksm_do_scan(),
-		 * so we don't IPI too often when pages_to_scan is set low).
-		 */
-		lru_add_drain_all();
-
-		/*
-		 * Whereas stale stable_nodes on the stable_tree itself
-		 * get pruned in the regular course of stable_tree_search(),
-		 * those moved out to the migrate_nodes list can accumulate:
-		 * so prune them once before each full scan.
-		 */
-		if (!ksm_merge_across_nodes) {
-			struct ksm_stable_node *stable_node, *next;
-			struct folio *folio;
-
-			list_for_each_entry_safe(stable_node, next,
-						 &migrate_nodes, list) {
-				folio = ksm_get_folio(stable_node,
-						      KSM_GET_FOLIO_NOLOCK);
-				if (folio)
-					folio_put(folio);
-				cond_resched();
-			}
-		}
-
-		for (nid = 0; nid < ksm_nr_node_ids; nid++)
-			root_unstable_tree[nid] = RB_ROOT;
-
-		spin_lock(&ksm_mmlist_lock);
-		mm_slot = advance_scan_mm_slot(mm_slot);
-		spin_unlock(&ksm_mmlist_lock);
+		mm_slot = ksm_begin_full_scan();
 		/*
 		 * Although we tested list_empty() above, a racing __ksm_exit
 		 * of the last mm on the list may have removed it since then.
 		 */
 		if (mm_slot == &ksm_mm_head)
 			return NULL;
-next_mm:
 		ksm_scan.address = 0;
 		ksm_scan.rmap_list = &mm_slot->rmap_list;
 	}
 
+next_mm:
 	slot = &mm_slot->slot;
 	mm = slot->mm;
 	vma_iter_init(&vmi, mm, ksm_scan.address);
@@ -2809,8 +2826,11 @@ no_vmas:
 
 	/* Repeat until we've completed scanning the whole list */
 	mm_slot = ksm_scan.mm_slot;
-	if (mm_slot != &ksm_mm_head)
+	if (mm_slot != &ksm_mm_head) {
+		ksm_scan.address = 0;
+		ksm_scan.rmap_list = &mm_slot->rmap_list;
 		goto next_mm;
+	}
 
 	advisor_stop_scan();
 
