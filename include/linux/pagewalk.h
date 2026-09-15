@@ -183,8 +183,8 @@ struct folio_walk {
 		pmd_t pmd;
 	};
 	/* private */
-	struct vm_area_struct *vma;
 	spinlock_t *ptl;
+	enum page_walk_lock walk_lock;
 };
 
 struct folio *folio_walk_start(struct folio_walk *fw,
