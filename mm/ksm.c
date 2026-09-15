@@ -1580,15 +1580,14 @@ static int try_to_merge_with_zero_page(struct ksm_rmap_item *rmap_item,
 	 */
 	if (ksm_use_zero_pages && (rmap_item->oldchecksum == zero_checksum)) {
 		struct vm_area_struct *vma;
+		struct page *zero_page = ZERO_PAGE(rmap_item->address);
 
 		mmap_read_lock(mm);
 		vma = find_mergeable_vma(mm, rmap_item->address);
 		if (vma) {
-			err = try_to_merge_one_page(vma, page,
-					ZERO_PAGE(rmap_item->address));
-			trace_ksm_merge_one_page(
-				page_to_pfn(ZERO_PAGE(rmap_item->address)),
-				rmap_item, mm, err);
+			err = try_to_merge_one_page(vma, page, zero_page);
+			trace_ksm_merge_one_page(page_to_pfn(zero_page),
+						 rmap_item, mm, err);
 		} else {
 			/*
 			 * If the vma is out of date, we do not need to
