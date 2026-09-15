@@ -2314,6 +2314,10 @@ static void cmp_and_merge_page(struct page *page, struct ksm_rmap_item *rmap_ite
 		if (!is_page_sharing_candidate(stable_node))
 			max_page_sharing_bypass = true;
 	} else {
+		/*
+		 * Detach before the checksum and zero-page checks, which can
+		 * return without reaching the removal below.
+		 */
 		remove_rmap_item_from_tree(rmap_item);
 
 		/*
@@ -2339,6 +2343,10 @@ static void cmp_and_merge_page(struct page *page, struct ksm_rmap_item *rmap_ite
 		return;
 	}
 
+	/*
+	 * A KSM page can still have an old tree association here; non-KSM
+	 * pages were already detached before the checks above.
+	 */
 	remove_rmap_item_from_tree(rmap_item);
 
 	if (kfolio) {
