@@ -9,14 +9,15 @@
  */
 
 /**
- * DOC: Memfd Preservation via LUO
+ * DOC: Memfd and Tmpfs Preservation via LUO
  *
  * Overview
  * ========
  *
- * Memory file descriptors (memfd) can be preserved over a kexec using the Live
- * Update Orchestrator (LUO) file preservation. This allows userspace to
- * transfer its memory contents to the next kernel after a kexec.
+ * Memory file descriptors (memfd) and generic tmpfs files can be preserved
+ * over a kexec using the Live Update Orchestrator (LUO) file preservation.
+ * This allows userspace to transfer its memory contents to the next kernel
+ * after a kexec.
  *
  * The preservation is not intended to be transparent. Only select properties of
  * the file are preserved. All others are reset to default. The preserved
@@ -24,16 +25,17 @@
  *
  * .. note::
  *    The LUO API is not stabilized yet, so the preserved properties of a memfd
- *    are also not stable and are subject to backwards incompatible changes.
+ *    or tmpfs file are also not stable and are subject to backwards
+ *    incompatible changes.
  *
  * .. note::
- *    Currently a memfd backed by Hugetlb is not supported. Memfds created
+ *    Currently a file backed by Hugetlb is not supported. Memfds created
  *    with ``MFD_HUGETLB`` will be rejected.
  *
  * Preserved Properties
  * ====================
  *
- * The following properties of the memfd are preserved across kexec:
+ * The following properties of the memfd/tmpfs file are preserved across kexec:
  *
  * File Contents
  *   All data stored in the file is preserved.
@@ -580,9 +582,7 @@ free_ser:
 static bool memfd_luo_can_preserve(struct liveupdate_file_handler *handler,
 				   struct file *file)
 {
-	struct inode *inode = file_inode(file);
-
-	return shmem_file(file) && !inode->i_nlink;
+	return shmem_file(file) || shmem_mapping(file->f_mapping);
 }
 
 static unsigned long memfd_luo_get_id(struct file *file)
@@ -590,10 +590,58 @@ static unsigned long memfd_luo_get_id(struct file *file)
 	return (unsigned long)file_inode(file);
 }
 
+static int memfd_luo_retrieve_into(struct liveupdate_file_op_args *args, struct file *target_file)
+{
+	struct inode *inode = file_inode(target_file);
+	struct memfd_luo_folio_ser *folios_ser;
+	struct memfd_luo_ser *ser;
+	int err;
+
+	/* Security/Safety checks: Ensure it's a shmem file and is completely empty */
+	if (!shmem_mapping(target_file->f_mapping))
+		return -EINVAL;
+
+	inode_lock(inode);
+	if (i_size_read(inode) != 0) {
+		inode_unlock(inode);
+		return -EBUSY;
+	}
+
+	ser = phys_to_virt(args->serialized_data);
+	if (!ser) {
+		inode_unlock(inode);
+		return -EINVAL;
+	}
+
+	if (ser->nr_folios) {
+		folios_ser = kho_restore_vmalloc(&ser->folios);
+		if (!folios_ser) {
+			inode_unlock(inode);
+			return -EINVAL;
+		}
+
+		/* Inject the physical pages from KHO using the extracted helper */
+		err = memfd_luo_retrieve_folios(target_file, folios_ser, ser->nr_folios);
+		kho_restore_free(folios_ser);
+		if (err) {
+			inode_unlock(inode);
+			return err;
+		}
+	}
+
+	/* Fast-forward the kernel inode size to match the injected data */
+	vfs_setpos(target_file, ser->pos, MAX_LFS_FILESIZE);
+	i_size_write(inode, ser->size);
+
+	inode_unlock(inode);
+	return 0;
+}
+
 static const struct liveupdate_file_ops memfd_luo_file_ops = {
 	.freeze = memfd_luo_freeze,
 	.finish = memfd_luo_finish,
 	.retrieve = memfd_luo_retrieve,
+	.retrieve_into = memfd_luo_retrieve_into,
 	.preserve = memfd_luo_preserve,
 	.unpreserve = memfd_luo_unpreserve,
 	.can_preserve = memfd_luo_can_preserve,

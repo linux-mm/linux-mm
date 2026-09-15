@@ -549,26 +549,32 @@ void luo_file_unfreeze(struct luo_file_set *file_set,
  *         -ENOENT if no file with the matching token is found.
  *         Any error code returned by the handler's .retrieve() op.
  */
+
+static struct luo_file *luo_find_file_by_token(struct luo_file_set *file_set, u64 token)
+{
+	struct luo_file *luo_file;
+
+	if (list_empty(&file_set->files_list))
+		return ERR_PTR(-ENOENT);
+
+	list_for_each_entry(luo_file, &file_set->files_list, list) {
+		if (luo_file->token == token)
+			return luo_file;
+	}
+
+	return ERR_PTR(-ENOENT);
+}
+
 int luo_retrieve_file(struct luo_file_set *file_set, u64 token,
 		      struct file **filep)
 {
 	struct liveupdate_file_op_args args = {0};
 	struct luo_file *luo_file;
-	bool found = false;
 	int err;
 
-	if (list_empty(&file_set->files_list))
-		return -ENOENT;
-
-	list_for_each_entry(luo_file, &file_set->files_list, list) {
-		if (luo_file->token == token) {
-			found = true;
-			break;
-		}
-	}
-
-	if (!found)
-		return -ENOENT;
+	luo_file = luo_find_file_by_token(file_set, token);
+	if (IS_ERR(luo_file))
+		return PTR_ERR(luo_file);
 
 	guard(mutex)(&luo_file->mutex);
 	if (luo_file->retrieve_status < 0) {
@@ -925,4 +931,40 @@ void liveupdate_unregister_file_handler(struct liveupdate_file_handler *fh)
 	guard(rwsem_write)(&luo_register_rwlock);
 	luo_flb_unregister_all(fh);
 	list_del(&ACCESS_PRIVATE(fh, list));
+}
+
+int luo_retrieve_into_file(struct luo_file_set *file_set, u64 token,
+			   struct file *target_file)
+{
+	struct liveupdate_file_op_args args = {0};
+	struct luo_file *luo_file;
+	int err;
+
+	luo_file = luo_find_file_by_token(file_set, token);
+	if (IS_ERR(luo_file))
+		return PTR_ERR(luo_file);
+
+	guard(mutex)(&luo_file->mutex);
+	if (luo_file->retrieve_status < 0)
+		return luo_file->retrieve_status;
+
+	if (luo_file->retrieve_status > 0)
+		return -EBUSY; /* Already retrieved */
+
+	if (!luo_file->fh->ops->retrieve_into)
+		return -EOPNOTSUPP;
+
+	args.handler = luo_file->fh;
+	args.serialized_data = luo_file->serialized_data;
+	err = luo_file->fh->ops->retrieve_into(&args, target_file);
+	if (err) {
+		luo_file->retrieve_status = err;
+		return err;
+	}
+
+	luo_file->file = target_file;
+	get_file(luo_file->file);
+	luo_file->retrieve_status = 1;
+
+	return 0;
 }
