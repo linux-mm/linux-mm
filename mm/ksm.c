@@ -1453,18 +1453,18 @@ out:
 /**
  * replace_page - replace page in vma by new ksm page
  * @vma:      vma that holds the pte pointing to page
- * @page:     the page we are replacing by kpage
- * @kpage:    the ksm page we replace page by
+ * @folio:    the folio we are replacing by kfolio
+ * @kfolio:   the ksm folio we replace folio by
  * @orig_pte: the original value of the pte
  *
  * Returns 0 on success, -EFAULT on failure.
  */
-static int replace_page(struct vm_area_struct *vma, struct page *page,
-			struct page *kpage, pte_t orig_pte)
+static int replace_page(struct vm_area_struct *vma, struct folio *folio,
+			struct folio *kfolio, pte_t orig_pte)
 {
-	struct folio *kfolio = page_folio(kpage);
+	struct page *page = folio_page(folio, 0);
+	struct page *kpage = folio_page(kfolio, 0);
 	struct mm_struct *mm = vma->vm_mm;
-	struct folio *folio = page_folio(page);
 	pmd_t *pmd;
 	pmd_t pmde;
 	pte_t *ptep;
@@ -1613,7 +1613,8 @@ static int try_to_merge_one_page(struct vm_area_struct *vma,
 				folio_mark_dirty(folio);
 			err = 0;
 		} else if (pages_identical(page, kpage))
-			err = replace_page(vma, page, kpage, orig_pte);
+			err = replace_page(vma, folio, page_folio(kpage),
+					   orig_pte);
 	}
 
 out_unlock:
