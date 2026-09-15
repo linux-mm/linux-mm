@@ -889,6 +889,74 @@ static void damos_test_commit_quota_goal(struct kunit *test)
 			});
 }
 
+/*
+ * Unmeasured PSI goals must not disable the temporal quota.
+ * Keep sz * 10000 within a 32-bit unsigned long.
+ */
+static void damos_test_set_effective_quota_temporal_psi(struct kunit *test)
+{
+	struct damon_ctx *c = damon_new_ctx();
+	struct damos_access_pattern pattern = {};
+	struct damos_quota quota = {
+		.sz = SZ_64K,
+		.goal_tuner = DAMOS_QUOTA_GOAL_TUNER_TEMPORAL,
+	};
+	struct damos_watermarks wmarks = {};
+	struct damos_quota_goal src = {
+		.metric = DAMOS_QUOTA_SOME_MEM_PSI_US,
+		.target_value = ULONG_MAX,
+	};
+	struct damos_quota_goal *goal;
+	struct damos *s;
+
+	if (!c)
+		kunit_skip(test, "ctx alloc fail");
+	s = damon_new_scheme(&pattern, DAMOS_STAT, 0, &quota, &wmarks,
+			NUMA_NO_NODE);
+	if (!s) {
+		damon_destroy_ctx(c);
+		kunit_skip(test, "scheme alloc fail");
+	}
+	damon_add_scheme(c, s);
+	goal = damos_new_quota_goal(DAMOS_QUOTA_SOME_MEM_PSI_US, ULONG_MAX);
+	if (!goal) {
+		damon_destroy_ctx(c);
+		kunit_skip(test, "goal alloc fail");
+	}
+	damos_add_quota_goal(&s->quota, goal);
+
+	/* fresh goal, first tuning round */
+	damos_set_effective_quota(c, s);
+	KUNIT_EXPECT_EQ(test, s->quota.esz, (unsigned long)SZ_64K);
+
+	/* second round: last_psi_total is initialised now */
+	damos_set_effective_quota(c, s);
+	KUNIT_EXPECT_EQ(test, s->quota.esz, (unsigned long)SZ_64K);
+
+	/* commit a PSI goal onto the initialised PSI goal */
+	damos_commit_quota_goal(goal, &src);
+	damos_set_effective_quota(c, s);
+	KUNIT_EXPECT_EQ(test, s->quota.esz, (unsigned long)SZ_64K);
+
+	/* a measured round that reaches the target disables the quota */
+	goal->target_value = 10;
+	goal->last_psi_total = damos_get_some_mem_psi_total() - 10;
+	/* U64_MAX marks an unmeasured goal, keep the sample away from it */
+	if (goal->last_psi_total == U64_MAX)
+		goal->last_psi_total--;
+	damos_set_effective_quota(c, s);
+	KUNIT_EXPECT_EQ(test, s->quota.esz, 0ul);
+
+	/* the consist tuner keeps its quota over an unmeasured round */
+	s->quota.goal_tuner = DAMOS_QUOTA_GOAL_TUNER_CONSIST;
+	s->quota.esz_bp = SZ_32K * 10000;
+	damos_commit_quota_goal(goal, &src);
+	damos_set_effective_quota(c, s);
+	KUNIT_EXPECT_EQ(test, s->quota.esz, (unsigned long)SZ_32K);
+
+	damon_destroy_ctx(c);
+}
+
 static void damos_test_commit_quota_goals_for(struct kunit *test,
 		struct damos_quota_goal *dst_goals, int nr_dst_goals,
 		struct damos_quota_goal *src_goals, int nr_src_goals)
@@ -1887,6 +1955,7 @@ static struct kunit_case damon_test_cases[] = {
 	KUNIT_CASE(damos_test_new_filter),
 	KUNIT_CASE(damos_test_commit_quota_goal),
 	KUNIT_CASE(damos_test_commit_quota_goals),
+	KUNIT_CASE(damos_test_set_effective_quota_temporal_psi),
 	KUNIT_CASE(damos_test_commit_quota),
 	KUNIT_CASE(damos_test_commit_dests),
 	KUNIT_CASE(damos_test_commit_filter),
