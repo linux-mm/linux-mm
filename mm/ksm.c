@@ -811,21 +811,20 @@ static void break_cow(struct ksm_rmap_item *rmap_item)
 	mmap_read_unlock(mm);
 }
 
-static struct page *get_mergeable_page(struct ksm_rmap_item *rmap_item)
+/*
+ * Get the page that @addr maps in @vma, with an elevated reference, or NULL
+ * when the address no longer maps an anon page.  The caller must hold a lock
+ * that stabilizes @vma: either the mmap read lock, or the vma read lock
+ * together with an mm_users reference.
+ */
+static struct page *__get_mergeable_page(struct vm_area_struct *vma,
+					 unsigned long addr, folio_walk_flags_t flags)
 {
-	struct mm_struct *mm = rmap_item->mm;
-	unsigned long addr = rmap_item->address;
-	struct vm_area_struct *vma;
-	struct page *page = NULL;
 	struct folio_walk fw;
+	struct page *page = NULL;
 	struct folio *folio;
 
-	mmap_read_lock(mm);
-	vma = find_mergeable_vma(mm, addr);
-	if (!vma)
-		goto out;
-
-	folio = folio_walk_start(&fw, vma, addr, 0);
+	folio = folio_walk_start(&fw, vma, addr, flags);
 	if (folio) {
 		if (!folio_is_zone_device(folio) &&
 		    folio_test_anon(folio)) {
@@ -834,11 +833,52 @@ static struct page *get_mergeable_page(struct ksm_rmap_item *rmap_item)
 		}
 		folio_walk_end(&fw, vma);
 	}
-out:
 	if (page) {
 		flush_anon_page(vma, page, addr);
 		flush_dcache_page(page);
 	}
+	return page;
+}
+
+static struct page *get_mergeable_page(struct ksm_rmap_item *rmap_item)
+{
+	struct mm_struct *mm = rmap_item->mm;
+	unsigned long addr = rmap_item->address;
+	struct vm_area_struct *vma;
+	struct page *page = NULL;
+
+	/*
+	 * Try the vma lock before the mmap lock, so that ksmd does not queue
+	 * behind a writer that changes the address space layout anywhere in
+	 * this mm: the vma lock only contends with modification of this very
+	 * vma.  Pin mm_users for the walk: exit_mmap() frees the page tables
+	 * under the mmap lock alone, so a vma read lock cannot keep it away,
+	 * but an mm_users reference can; the pin also stands in for the
+	 * ksm_test_exit() check of find_mergeable_vma() on this path.  Drop
+	 * it again before waiting for the mmap lock below, so that an exiting
+	 * mm is not delayed by us.
+	 */
+	if (IS_ENABLED(CONFIG_PER_VMA_LOCK) && mmget_not_zero(mm)) {
+		vma = lock_vma_under_rcu(mm, addr);
+		if (vma) {
+			if ((vma->vm_flags & VM_MERGEABLE) && vma->anon_vma)
+				page = __get_mergeable_page(vma, addr, FW_VMA_LOCKED);
+			vma_end_read(vma);
+			mmput_async(mm);
+			return page;
+		}
+		mmput_async(mm);
+	}
+
+	/*
+	 * The vma is being modified, or CONFIG_PER_VMA_LOCK is off: take the
+	 * mmap read lock as before.  We are prepared to wait rather than skip
+	 * this page, so a contended mm only slows down its own merging.
+	 */
+	mmap_read_lock(mm);
+	vma = find_mergeable_vma(mm, addr);
+	if (vma)
+		page = __get_mergeable_page(vma, addr, 0);
 	mmap_read_unlock(mm);
 	return page;
 }
@@ -2608,6 +2648,98 @@ static struct mm_walk_ops ksm_next_page_ops = {
 	.walk_lock = PGWALK_RDLOCK,
 };
 
+#ifdef CONFIG_PER_VMA_LOCK
+static const struct mm_walk_ops ksm_next_page_vma_ops = {
+	.pmd_entry = ksm_next_page_pmd_entry,
+	.walk_lock = PGWALK_VMA_RDLOCK_VERIFY,
+};
+
+/* Return true when a candidate was processed, including allocation failure. */
+static bool scan_get_next_rmap_item_vma(struct ksm_mm_slot *mm_slot,
+		struct page **page, struct ksm_rmap_item **result,
+		bool *complete, unsigned int *mm_wr_seq)
+{
+	struct mm_struct *mm = mm_slot->slot.mm;
+	unsigned long address = ksm_scan.address;
+	struct vm_area_struct *vma;
+	struct vma_iterator vmi;
+	bool done = false;
+	bool mmap_unlocked;
+
+	if (!mmget_not_zero(mm))
+		return false;
+
+	mmap_unlocked = mmap_lock_speculate_try_begin(mm, mm_wr_seq);
+
+	for (;;) {
+		rcu_read_lock();
+		vma_iter_init(&vmi, mm, address);
+		vma = lock_next_vma(mm, &vmi, address);
+		rcu_read_unlock();
+		if (IS_ERR_OR_NULL(vma))
+			break;
+
+		address = vma->vm_end;
+		if (!(vma->vm_flags & VM_MERGEABLE))
+			goto next_vma;
+		if (ksm_scan.address < vma->vm_start)
+			ksm_scan.address = vma->vm_start;
+		if (!vma->anon_vma)
+			ksm_scan.address = vma->vm_end;
+
+		while (ksm_scan.address < vma->vm_end) {
+			struct ksm_next_page_arg arg;
+			struct ksm_rmap_item *rmap_item;
+			int found;
+
+			found = walk_page_range_vma(vma, ksm_scan.address,
+					vma->vm_end, &ksm_next_page_vma_ops, &arg);
+			if (found <= 0) {
+				VM_WARN_ON_ONCE(found < 0);
+				ksm_scan.address = vma->vm_end;
+				break;
+			}
+
+			ksm_scan.address = arg.addr;
+			flush_anon_page(vma, arg.page, arg.addr);
+			flush_dcache_page(arg.page);
+			rmap_item = get_next_rmap_item(mm_slot,
+					ksm_scan.rmap_list, arg.addr);
+			if (rmap_item) {
+				ksm_scan.rmap_list = &rmap_item->rmap_list;
+				if (should_skip_rmap_item(arg.folio, rmap_item)) {
+					folio_put(arg.folio);
+					ksm_scan.address += PAGE_SIZE;
+					cond_resched();
+					continue;
+				}
+				ksm_scan.address += PAGE_SIZE;
+				*page = arg.page;
+			} else {
+				folio_put(arg.folio);
+			}
+			*result = rmap_item;
+			done = true;
+			vma_end_read(vma);
+			goto out;
+		}
+next_vma:
+		/*
+		 * Don't advance ksm_scan.address for VMAs the mmap-lock loop
+		 * skips with a plain continue: the cursor has to stay 0 when
+		 * this mm holds no VM_MERGEABLE vma, so the fallback walk can
+		 * remove the mm from the scan list at the end of the pass.
+		 */
+		vma_end_read(vma);
+		cond_resched();
+	}
+	*complete = mmap_unlocked && !vma;
+out:
+	mmput_async(mm);
+	return done;
+}
+#endif
+
 static struct ksm_rmap_item *scan_get_next_rmap_item(struct page **page)
 {
 	struct mm_struct *mm;
@@ -2616,6 +2748,9 @@ static struct ksm_rmap_item *scan_get_next_rmap_item(struct page **page)
 	struct vm_area_struct *vma;
 	struct ksm_rmap_item *rmap_item;
 	struct vma_iterator vmi;
+	bool skip_vma_scan = false;
+	bool vma_scan_complete = false;
+	unsigned int mm_wr_seq;
 	int nid;
 
 	if (list_empty(&ksm_mm_head.slot.mm_node))
@@ -2680,12 +2815,23 @@ next_mm:
 
 	slot = &mm_slot->slot;
 	mm = slot->mm;
+#ifdef CONFIG_PER_VMA_LOCK
+	rmap_item = NULL;
+	if (scan_get_next_rmap_item_vma(mm_slot, page, &rmap_item,
+			&vma_scan_complete, &mm_wr_seq))
+		return rmap_item;
+#endif
+	/* Recheck the end of the scan under mmap_lock before removing the mm. */
 	vma_iter_init(&vmi, mm, ksm_scan.address);
 
 	mmap_read_lock(mm);
+	if (vma_scan_complete && !mmap_lock_speculate_retry(mm, mm_wr_seq))
+		skip_vma_scan = true;
 	if (ksm_test_exit(mm))
 		goto no_vmas;
 
+	if (skip_vma_scan)
+		goto scan_cleanup;
 	for_each_vma(vmi, vma) {
 		if (!(vma->vm_flags & VM_MERGEABLE))
 			continue;
@@ -2746,6 +2892,7 @@ next_page:
 		}
 	}
 
+scan_cleanup:
 	if (ksm_test_exit(mm)) {
 no_vmas:
 		ksm_scan.address = 0;
