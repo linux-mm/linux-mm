@@ -293,7 +293,7 @@ enum {
 	DECLARE_VMA_BIT(MAYSHARE, 7),
 	DECLARE_VMA_BIT(GROWSDOWN, 8),	/* general info on the segment */
 #ifdef CONFIG_MMU
-	DECLARE_VMA_BIT(UFFD_MISSING, 9),/* missing pages tracking */
+	DECLARE_VMA_BIT(UFFD, 9),	/* userfaultfd registered */
 #else
 	/* nommu: R/O MAP_PRIVATE mapping that might overlay a file mapping */
 	DECLARE_VMA_BIT(MAYOVERLAY, 9),
@@ -301,7 +301,7 @@ enum {
 	/* Page-ranges managed without "struct page", just pure PFN */
 	DECLARE_VMA_BIT(PFNMAP, 10),
 	DECLARE_VMA_BIT(MAYBE_GUARD, 11),
-	DECLARE_VMA_BIT(UFFD_WP, 12),	/* wrprotect pages tracking */
+	/* Bit 12 is free */
 	DECLARE_VMA_BIT(LOCKED, 13),
 	DECLARE_VMA_BIT(IO, 14),	/* Memory mapped I/O or similar */
 	DECLARE_VMA_BIT(SEQ_READ, 15),	/* App will access data sequentially */
@@ -342,9 +342,8 @@ enum {
 #elif defined(CONFIG_64BIT)
 	DECLARE_VMA_BIT(DROPPABLE, 40),
 #endif
-	DECLARE_VMA_BIT(UFFD_MINOR, 41),
+	/* Bits 41 and 43 are free */
 	DECLARE_VMA_BIT(SEALED, 42),
-	DECLARE_VMA_BIT(UFFD_RWP, 43),
 	/* Flags that reuse flags above. */
 	DECLARE_VMA_BIT_ALIAS(PKEY_BIT0, HIGH_ARCH_0),
 	DECLARE_VMA_BIT_ALIAS(PKEY_BIT1, HIGH_ARCH_1),
@@ -398,14 +397,14 @@ enum {
 #define VM_MAYSHARE	INIT_VM_FLAG(MAYSHARE)
 #define VM_GROWSDOWN	INIT_VM_FLAG(GROWSDOWN)
 #ifdef CONFIG_MMU
-#define VM_UFFD_MISSING	INIT_VM_FLAG(UFFD_MISSING)
+#define VM_UFFD		INIT_VM_FLAG(UFFD)
+#define VMA_UFFD	mk_vma_flags(VMA_UFFD_BIT)
 #else
-#define VM_UFFD_MISSING	VM_NONE
+#define VM_UFFD		VM_NONE
 #define VM_MAYOVERLAY	INIT_VM_FLAG(MAYOVERLAY)
 #endif
 #define VM_PFNMAP	INIT_VM_FLAG(PFNMAP)
 #define VM_MAYBE_GUARD	INIT_VM_FLAG(MAYBE_GUARD)
-#define VM_UFFD_WP	INIT_VM_FLAG(UFFD_WP)
 #define VM_LOCKED	INIT_VM_FLAG(LOCKED)
 #define VM_IO		INIT_VM_FLAG(IO)
 #define VM_SEQ_READ	INIT_VM_FLAG(SEQ_READ)
@@ -489,36 +488,6 @@ enum {
 #define VM_MTE		VM_NONE
 #define VM_MTE_ALLOWED	VM_NONE
 #endif
-#ifdef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
-#define VM_UFFD_MINOR	INIT_VM_FLAG(UFFD_MINOR)
-#else
-#define VM_UFFD_MINOR	VM_NONE
-#endif
-#ifdef CONFIG_USERFAULTFD_RWP
-#define VM_UFFD_RWP		INIT_VM_FLAG(UFFD_RWP)
-#else
-#define VM_UFFD_RWP		VM_NONE
-#endif
-
-/*
- * vma_flags_t masks for the userfaultfd VMA flags. The two high-bit modes are
- * gated on the same configs as their VM_* flags above -- both of which imply
- * 64BIT -- so an out-of-range bit is never fed to mk_vma_flags() on a build
- * whose bitmap cannot hold it.
- */
-#define VMA_UFFD_MISSING	mk_vma_flags(VMA_UFFD_MISSING_BIT)
-#define VMA_UFFD_WP		mk_vma_flags(VMA_UFFD_WP_BIT)
-#ifdef CONFIG_HAVE_ARCH_USERFAULTFD_MINOR
-#define VMA_UFFD_MINOR		mk_vma_flags(VMA_UFFD_MINOR_BIT)
-#else
-#define VMA_UFFD_MINOR		EMPTY_VMA_FLAGS
-#endif
-#ifdef CONFIG_USERFAULTFD_RWP
-#define VMA_UFFD_RWP		mk_vma_flags(VMA_UFFD_RWP_BIT)
-#else
-#define VMA_UFFD_RWP		EMPTY_VMA_FLAGS
-#endif
-
 #ifdef CONFIG_64BIT
 #define VM_ALLOW_ANY_UNCACHED	INIT_VM_FLAG(ALLOW_ANY_UNCACHED)
 #define VM_SEALED		INIT_VM_FLAG(SEALED)
@@ -658,32 +627,26 @@ enum {
  * reconsistuted upon page fault, so necessitate page table copying upon fork.
  *
  * Note that these flags should be compared with the DESTINATION VMA not the
- * source: VM_UFFD_WP and VM_UFFD_RWP may be cleared on the destination
+ * source: uffd WP/RWP mode may be cleared on the destination
  * (dup_userfaultfd() -> userfaultfd_reset_ctx() when the parent context did
  * not negotiate UFFD_FEATURE_EVENT_FORK), while all other flags propagate.
  *
  * VM_PFNMAP / VM_MIXEDMAP - These contain kernel-mapped data which cannot be
  *                           reasonably reconstructed on page fault.
  *
- *              VM_UFFD_WP - Encodes metadata about an installed uffd
- *              VM_UFFD_RWP  write- or read-write-protect handler, which
- *                           cannot be reconstructed on page fault.
- *
- *                           We always copy pgtables when dst_vma has the
- *                           uffd PTE bit in use even if it's file-backed
- *                           (e.g. shmem). Because when the uffd bit is
- *                           in use, the pgtable contains the protection
- *                           information, that's something we can't
- *                           retrieve from page cache, and skip copying
- *                           will lose those info.
- *
  *          VM_MAYBE_GUARD - Could contain page guard region markers which
  *                           by design are a property of the page tables
  *                           only and thus cannot be reconstructed on page
  *                           fault.
+ *
+ *       uffd WP/RWP modes - Encode metadata about an installed uffd
+ *                           write- or read-write-protect handler, which
+ *                           cannot be reconstructed on page fault.
+ *                           This is checked separately via
+ *                           userfaultfd_protected() in vma_needs_copy().
+ *
  */
-#define VM_COPY_ON_FORK (VM_PFNMAP | VM_MIXEDMAP | VM_UFFD_WP | VM_UFFD_RWP | \
-			 VM_MAYBE_GUARD)
+#define VM_COPY_ON_FORK (VM_PFNMAP | VM_MIXEDMAP | VM_MAYBE_GUARD)
 
 /*
  * mapping from the currently active vm_flags protection bits (the
@@ -4833,44 +4796,6 @@ static inline int vm_fault_to_errno(vm_fault_t vm_fault, int foll_flags)
 	if (vm_fault & (VM_FAULT_SIGBUS | VM_FAULT_SIGSEGV))
 		return -EFAULT;
 	return 0;
-}
-
-/*
- * Indicates whether GUP can follow a PROT_NONE mapped page, or whether
- * a (NUMA hinting or userfaultfd RWP) fault is required.
- */
-static inline bool gup_can_follow_protnone(const struct vm_area_struct *vma,
-					   unsigned int flags)
-{
-	/*
-	 * VM_UFFD_RWP uses protnone as an access-tracking marker, not for
-	 * NUMA hinting. GUP must always take a fault so the access is
-	 * delivered to userfaultfd, regardless of FOLL_HONOR_NUMA_FAULT.
-	 *
-	 * Only do so while the VMA is accessible. If it has been made
-	 * inaccessible (e.g. mprotect(PROT_NONE)), fall through to the guard
-	 * below: forcing a fault there would loop, as handle_mm_fault() makes
-	 * no progress on protnone in an inaccessible VMA, and the access is
-	 * denied regardless of RWP anyway.
-	 */
-	if (vma_test_single_mask(vma, VMA_UFFD_RWP) && vma_is_accessible(vma))
-		return false;
-
-	/*
-	 * If callers don't want to honor NUMA hinting faults, no need to
-	 * determine if we would actually have to trigger a NUMA hinting fault.
-	 */
-	if (!(flags & FOLL_HONOR_NUMA_FAULT))
-		return true;
-
-	/*
-	 * NUMA hinting faults don't apply in inaccessible (PROT_NONE) VMAs.
-	 *
-	 * Requiring a fault here even for inaccessible VMAs would mean that
-	 * FOLL_FORCE cannot make any progress, because handle_mm_fault()
-	 * refuses to process NUMA hinting faults in inaccessible VMAs.
-	 */
-	return !vma_is_accessible(vma);
 }
 
 typedef int (*pte_fn_t)(pte_t *pte, unsigned long addr, void *data);

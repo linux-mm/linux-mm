@@ -2658,7 +2658,7 @@ repeat:
 	if (folio && vma && userfaultfd_minor(vma)) {
 		if (!xa_is_value(folio))
 			folio_put(folio);
-		*fault_type = handle_userfault(vmf, VM_UFFD_MINOR);
+		*fault_type = handle_userfault(vmf, USERFAULT_MINOR);
 		return 0;
 	}
 
@@ -2707,7 +2707,7 @@ repeat:
 	 */
 
 	if (vma && userfaultfd_missing(vma)) {
-		*fault_type = handle_userfault(vmf, VM_UFFD_MISSING);
+		*fault_type = handle_userfault(vmf, USERFAULT_MISSING);
 		return 0;
 	}
 
@@ -3422,7 +3422,7 @@ static struct folio *shmem_get_folio_noalloc(struct inode *inode, pgoff_t pgoff)
 	return folio;
 }
 
-static bool shmem_can_userfault(struct vm_area_struct *vma, vm_flags_t vm_flags)
+static bool shmem_can_userfault(struct vm_area_struct *vma, unsigned int mode)
 {
 	return true;
 }
