@@ -334,7 +334,7 @@ struct advisor_ctx {
 	unsigned long change;
 	unsigned long long cpu_time;
 };
-static struct advisor_ctx advisor_ctx;
+static struct advisor_ctx ksm_advisor_ctx;
 
 /* Define different advisor's */
 enum ksm_advisor_type {
@@ -356,7 +356,7 @@ static void set_advisor_defaults(void)
 	if (ksm_advisor == KSM_ADVISOR_NONE) {
 		ksm_thread_pages_to_scan = DEFAULT_PAGES_TO_SCAN;
 	} else if (ksm_advisor == KSM_ADVISOR_SCAN_TIME) {
-		advisor_ctx = (const struct advisor_ctx){ 0 };
+		ksm_advisor_ctx = (const struct advisor_ctx){ 0 };
 		ksm_thread_pages_to_scan = ksm_advisor_min_pages_to_scan;
 	}
 }
@@ -365,7 +365,7 @@ static void set_advisor_defaults(void)
 static inline void advisor_start_scan(void)
 {
 	if (ksm_advisor == KSM_ADVISOR_SCAN_TIME)
-		advisor_ctx.start_scan = ktime_get();
+		ksm_advisor_ctx.start_scan = ktime_get();
 }
 
 /*
@@ -419,18 +419,18 @@ static void scan_time_advisor(void)
 	unsigned long scan_time;
 
 	/* Convert scan time to seconds */
-	scan_time = div_s64(ktime_ms_delta(ktime_get(), advisor_ctx.start_scan),
+	scan_time = div_s64(ktime_ms_delta(ktime_get(), ksm_advisor_ctx.start_scan),
 			    MSEC_PER_SEC);
 	scan_time = scan_time ? scan_time : 1;
 
 	/* Calculate CPU consumption of ksmd background thread */
 	cpu_time = task_sched_runtime(current);
-	cpu_time_diff = cpu_time - advisor_ctx.cpu_time;
+	cpu_time_diff = cpu_time - ksm_advisor_ctx.cpu_time;
 	cpu_time_diff_ms = cpu_time_diff / 1000 / 1000;
 
 	cpu_percent = (cpu_time_diff_ms * 100) / (scan_time * 1000);
 	cpu_percent = cpu_percent ? cpu_percent : 1;
-	last_scan_time = prev_scan_time(&advisor_ctx, scan_time);
+	last_scan_time = prev_scan_time(&ksm_advisor_ctx, scan_time);
 
 	/* Calculate scan time as percentage of target scan time */
 	factor = ksm_advisor_target_scan_time * 100 / scan_time;
@@ -442,7 +442,7 @@ static void scan_time_advisor(void)
 	 */
 	change = scan_time * 100 / last_scan_time;
 	change = change ? change : 1;
-	change = ewma(advisor_ctx.change, change);
+	change = ewma(ksm_advisor_ctx.change, change);
 
 	/* Calculate new scan rate based on target scan rate. */
 	pages = ksm_thread_pages_to_scan * 100 / factor;
@@ -458,9 +458,9 @@ static void scan_time_advisor(void)
 	pages = min(pages, ksm_advisor_max_pages_to_scan);
 
 	/* Update advisor context */
-	advisor_ctx.change = change;
-	advisor_ctx.scan_time = scan_time;
-	advisor_ctx.cpu_time = cpu_time;
+	ksm_advisor_ctx.change = change;
+	ksm_advisor_ctx.scan_time = scan_time;
+	ksm_advisor_ctx.cpu_time = cpu_time;
 
 	ksm_thread_pages_to_scan = pages;
 	trace_ksm_advisor(scan_time, pages, cpu_percent);
