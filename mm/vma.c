@@ -118,7 +118,7 @@ static inline bool is_mergeable_vma(struct vma_merge_struct *vmg, bool merge_nex
 		return false;
 	if (vma->vm_file != vmg->file)
 		return false;
-	if (!is_mergeable_vm_userfaultfd_ctx(vma, vmg->uffd_ctx))
+	if (!is_mergeable_vm_uffd_state(vma, vmg->uffd_ctx))
 		return false;
 	if (!anon_vma_name_eq(anon_vma_name(vma), vmg->anon_name))
 		return false;
@@ -1837,7 +1837,7 @@ struct vm_area_struct *vma_modify_policy(struct vma_iterator *vmi,
 struct vm_area_struct *vma_modify_flags_uffd(struct vma_iterator *vmi,
 		struct vm_area_struct *prev, struct vm_area_struct *vma,
 		unsigned long start, unsigned long end,
-		const vma_flags_t *vma_flags, struct vm_userfaultfd_ctx new_ctx,
+		const vma_flags_t *vma_flags, struct vm_uffd_state new_ctx,
 		bool give_up_on_oom)
 {
 	VMG_VMA_STATE(vmg, vmi, prev, vma, start, end);
