@@ -3130,6 +3130,7 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	struct address_space *mapping;
 	struct inode *inode;
 	unsigned int maxpages;
+	unsigned int freed_tier;
 	int err, found = 0;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -3229,7 +3230,11 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 	p->max = 0;
 	p->cluster_info = NULL;
 	spin_unlock(&p->lock);
+	freed_tier = swap_tiers_release_dev(p);
 	spin_unlock(&swap_lock);
+	/* Under swapon_mutex, so a swapon cannot reuse the index before this. */
+	if (freed_tier)
+		swap_tiers_memcg_propagate(freed_tier);
 	arch_swap_invalidate_area(p->type);
 	zswap_swapoff(p->type);
 	mutex_unlock(&swapon_mutex);
