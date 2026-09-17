@@ -3398,6 +3398,36 @@ config TEST_KEXEC_HANDOVER
 
 	  If unsure, say N.
 
+config TEST_VMSTAT
+	tristate "VM Statistics Benchmark"
+	default n
+	help
+	  A synthetic benchmark measuring the performance of VM statistics,
+	  useful to analyze any improvements or regressions in functions that
+	  are frequently used in hot code paths.
+
+	  If unsure, say N.
+
+config TEST_SLAB
+	tristate "Slab Allocator Benchmark"
+	default n
+	help
+	  A synthetic benchmark that measures slab allocator performance,
+	  specifically focusing on single thread testing by repeatedly
+	  allocating then freeing memory and concurrent or remote allocations.
+
+	  If unsure, say N.
+
+config TEST_PAGEALLOC
+	tristate "Page Allocator Benchmark"
+	default n
+	help
+	  A benchmark measuring the performance of the page allocator, useful
+	  to analyze any improvements or regressions when repeatedly allocating
+	  and freeing memory as well as concurrent and remote allocations.
+
+	  If unsure, say N.
+
 config RATELIMIT_KUNIT_TEST
 	tristate "KUnit Test for correctness and stress of ratelimit" if !KUNIT_ALL_TESTS
 	depends on KUNIT
