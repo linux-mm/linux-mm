@@ -4202,6 +4202,10 @@ restart:
 	WRITE_ONCE(lrugen->timestamps[next], jiffies);
 	/* make sure preceding modifications appear */
 	smp_store_release(&lrugen->max_seq, lrugen->max_seq + 1);
+	trace_mm_mglru_inc_max_seq(mem_cgroup_id(lruvec_memcg(lruvec)),
+				   lrugen->max_seq,
+				   lrugen->min_seq[LRU_GEN_ANON],
+				   lrugen->min_seq[LRU_GEN_FILE]);
 unlock:
 	lruvec_unlock_irq(lruvec);
 
@@ -4980,6 +4984,7 @@ static int isolate_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	bool type_fallback_allowed = !is_single_type_reclaim(swappiness);
 	int type = get_type_to_scan(lruvec, swappiness);
 	int total_scanned = 0, scanned, tier;
+	struct lru_gen_folio *lrugen = &lruvec->lrugen;
 	bool tried = false;
 
 retry:
@@ -4991,7 +4996,7 @@ retry:
 	if (*isolated) {
 		*isolate_type = type;
 		*isolate_scanned = scanned;
-		return total_scanned;
+		goto done;
 	}
 
 	/*
@@ -5013,6 +5018,12 @@ retry:
 		goto retry;
 	}
 
+done:
+	trace_mm_mglru_isolate_folios(mem_cgroup_id(lruvec_memcg(lruvec)),
+				      type, swappiness, total_scanned, *isolated,
+				      lrugen->min_seq[LRU_GEN_ANON],
+				      lrugen->min_seq[LRU_GEN_FILE],
+				      lrugen->max_seq);
 	return total_scanned;
 }
 
