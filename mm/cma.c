@@ -783,25 +783,32 @@ static void cma_debug_show_areas(struct cma *cma)
 	spin_unlock_irq(&cma->lock);
 }
 
+/*
+ * Searches the CMA memrange, from @start to @end, for a free region of
+ * @count bits. If @end is less or equal to @start, will search the entire
+ * memrange.
+ */
 static int cma_range_alloc(struct cma *cma, struct cma_memrange *cmr,
-				unsigned long count, unsigned int align,
-				struct page **pagep, gfp_t gfp)
+			   unsigned long start, unsigned long end,
+			   unsigned long count, unsigned int align,
+			   struct page **pagep, gfp_t gfp)
 {
 	unsigned long bitmap_maxno, bitmap_no, bitmap_count;
-	unsigned long start, pfn, mask, offset;
-	int ret = -EBUSY;
+	unsigned long pfn, mask, offset;
 	struct page *page = NULL;
+	int ret = -EBUSY;
 
 	mask = cma_bitmap_aligned_mask(cma, align);
 	offset = cma_bitmap_aligned_offset(cma, cmr, align);
-	bitmap_maxno = cma_bitmap_maxno(cma, cmr);
+	bitmap_maxno = (end > start) ? end : cma_bitmap_maxno(cma, cmr);
 	bitmap_count = cma_bitmap_pages_to_bits(cma, count);
 
 	if (bitmap_count > bitmap_maxno)
 		goto out;
 
-	for (start = 0; ; start = bitmap_no + mask + 1) {
+	while (true) {
 		spin_lock_irq(&cma->lock);
+
 		/*
 		 * If the request is larger than the available number
 		 * of pages, stop right away.
@@ -810,6 +817,7 @@ static int cma_range_alloc(struct cma *cma, struct cma_memrange *cmr,
 			spin_unlock_irq(&cma->lock);
 			break;
 		}
+
 		bitmap_no = bitmap_find_next_zero_area_off(cmr->bitmap,
 				bitmap_maxno, start, bitmap_count, mask,
 				offset);
@@ -835,10 +843,11 @@ static int cma_range_alloc(struct cma *cma, struct cma_memrange *cmr,
 
 		bitmap_set(cmr->bitmap, bitmap_no, bitmap_count);
 		cma->available_count -= count;
+
 		/*
-		 * It's safe to drop the lock here. We've marked this region for
-		 * our exclusive use. If the migration fails we will take the
-		 * lock again and unmark it.
+		 * It's safe to drop the lock here. We've marked this region
+		 * for our exclusive use. If the migration fails we will take
+		 * the lock again and unmark it.
 		 */
 		spin_unlock_irq(&cma->lock);
 
@@ -856,37 +865,45 @@ static int cma_range_alloc(struct cma *cma, struct cma_memrange *cmr,
 			 __func__, pfn, page);
 
 		trace_cma_alloc_busy_retry(cma->name, pfn, page, count, align);
+		start = bitmap_no + mask + 1;
 	}
+
 out:
 	if (!ret)
 		*pagep = page;
+
 	return ret;
 }
 
-static struct page *__cma_alloc_frozen(struct cma *cma,
-		unsigned long count, unsigned int align, gfp_t gfp)
+static struct page *__cma_alloc_frozen(struct cma *cma, unsigned long start,
+				       unsigned long end, unsigned long count,
+				       unsigned int align, gfp_t gfp)
 {
 	struct page *page = NULL;
 	int ret = -ENOMEM, r;
 	unsigned long i;
-	const char *name = cma ? cma->name : NULL;
+
+	/* cma_alloc_at() and friends will only work with single-range CMA */
+	if (WARN_ON_ONCE(start > 0 && cma->nranges != 1))
+		return page;
 
 	if (!cma || !cma->count)
 		return page;
 
-	pr_debug("%s(cma %p, name: %s, count %lu, align %d)\n", __func__,
-		(void *)cma, cma->name, count, align);
+	pr_debug("%s(cma %p, name: %s, start %lu, end %lu, count %lu, align %d)\n",
+		 __func__, (void *)cma, cma->name, start, end, count, align);
 
 	if (!count)
 		return page;
 
-	trace_cma_alloc_start(name, count, cma->available_count, cma->count, align);
+	trace_cma_alloc_start(cma->name, start, end, count,
+			      cma->available_count, cma->count, align);
 
 	for (r = 0; r < cma->nranges; r++) {
 		page = NULL;
 
-		ret = cma_range_alloc(cma, &cma->ranges[r], count, align,
-				       &page, gfp);
+		ret = cma_range_alloc(cma, &cma->ranges[r], start, end,
+				      count, align, &page, gfp);
 		if (ret != -EBUSY || page)
 			break;
 	}
@@ -908,7 +925,7 @@ static struct page *__cma_alloc_frozen(struct cma *cma,
 	}
 
 	pr_debug("%s(): returned %p\n", __func__, page);
-	trace_cma_alloc_finish(name, page ? page_to_pfn(page) : 0,
+	trace_cma_alloc_finish(cma->name, page ? page_to_pfn(page) : 0,
 			       page, count, align, ret);
 	if (page) {
 		count_vm_event(CMA_ALLOC_SUCCESS);
@@ -926,14 +943,22 @@ struct page *cma_alloc_frozen(struct cma *cma, unsigned long count,
 {
 	gfp_t gfp = GFP_KERNEL | (no_warn ? __GFP_NOWARN : 0);
 
-	return __cma_alloc_frozen(cma, count, align, gfp);
+	return __cma_alloc_frozen(cma, 0, 0, count, align, gfp);
 }
 
 struct page *cma_alloc_frozen_compound(struct cma *cma, unsigned int order)
 {
 	gfp_t gfp = GFP_KERNEL | __GFP_COMP | __GFP_NOWARN;
 
-	return __cma_alloc_frozen(cma, 1 << order, order, gfp);
+	return __cma_alloc_frozen(cma, 0, 0, 1 << order, order, gfp);
+}
+
+struct page *cma_alloc_at_frozen(struct cma *cma, unsigned long offset,
+				 unsigned long count, bool no_warn)
+{
+	gfp_t gfp = GFP_KERNEL | (no_warn ? __GFP_NOWARN : 0);
+
+	return __cma_alloc_frozen(cma, offset, offset + count, count, 0, gfp);
 }
 
 /**
@@ -958,6 +983,29 @@ struct page *cma_alloc(struct cma *cma, unsigned long count,
 	return page;
 }
 EXPORT_SYMBOL_GPL(cma_alloc);
+
+/**
+ * cma_alloc_at() - allocate pages from contiguous area at fixed offset
+ * @cma:     Contiguous memory region for which the allocation is performed.
+ * @offset:  Index of the first page to allocate.
+ * @count:   Requested number of pages (in PAGE_SIZE order).
+ * @no_warn: Avoid printing message about failed allocation.
+ *
+ * This function allocates a part of the contiguous memory on a specific
+ * contiguous memory area.
+ */
+struct page *cma_alloc_at(struct cma *cma, unsigned long offset,
+			  unsigned long count, bool no_warn)
+{
+	struct page *page;
+
+	page = cma_alloc_at_frozen(cma, offset, count, no_warn);
+	if (page)
+		set_pages_refcounted(page, count);
+
+	return page;
+}
+EXPORT_SYMBOL_GPL(cma_alloc_at);
 
 static struct cma_memrange *find_cma_memrange(struct cma *cma,
 		const struct page *pages, unsigned long count)
