@@ -337,6 +337,7 @@ static long change_pte_range(struct mmu_gather *tlb,
 	long pages = 0;
 	bool is_private_single_threaded;
 	bool prot_numa = cp_flags & MM_CP_PROT_NUMA;
+	bool numa_promo_only = cp_flags & MM_CP_PROT_NUMA_PROMO_ONLY;
 	bool uffd_rwp = cp_flags & MM_CP_UFFD_RWP;
 	bool uffd_wp = cp_flags & MM_CP_UFFD_WP;
 	int nr_ptes;
@@ -384,7 +385,8 @@ static long change_pte_range(struct mmu_gather *tlb,
 			 */
 			if (prot_numa &&
 			    !folio_can_map_prot_numa(folio, vma,
-						is_private_single_threaded)) {
+						is_private_single_threaded,
+						numa_promo_only)) {
 
 				/* determine batch to skip */
 				nr_ptes = mprotect_folio_pte_batch(folio,
