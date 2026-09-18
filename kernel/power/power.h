@@ -160,6 +160,7 @@ struct snapshot_handle {
 
 extern unsigned int snapshot_additional_pages(struct zone *zone);
 extern unsigned long snapshot_get_image_size(void);
+unsigned long snapshot_get_meta_page_count(void);
 extern int snapshot_read_next(struct snapshot_handle *handle);
 extern int snapshot_write_next(struct snapshot_handle *handle);
 int snapshot_write_finalize(struct snapshot_handle *handle);
@@ -167,8 +168,10 @@ extern int snapshot_image_loaded(struct snapshot_handle *handle);
 
 extern bool hibernate_acquire(void);
 extern void hibernate_release(void);
+bool hibernation_snapshot_dev_available(void);
 
 extern sector_t alloc_swapdev_block(int swap);
+bool swsusp_swap_range_allocated(int swap, loff_t pos, size_t count);
 extern void free_all_swap_pages(int swap);
 extern int swsusp_swap_in_use(void);
 
