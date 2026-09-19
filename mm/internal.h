@@ -1636,10 +1636,14 @@ static inline bool can_spin_trylock(void)
 	 * confuse PI logic, so return immediately if called from hard IRQ or
 	 * NMI.
 	 *
-	 * Note, irqs_disabled() case is ok. spin_trylock() can be called
-	 * from raw_spin_lock_irqsave region.
+	 * Task context with a raw spinlock held is not safe either. The
+	 * caller may hold a pi_lock, like a BPF program on a tracepoint in
+	 * try_to_wake_up(). rt_spin_trylock() takes the rtmutex wait_lock
+	 * and can take a pi_lock under it. rt_spin_unlock() wakes a waiter
+	 * if there is one, which takes a pi_lock again. The locks held by
+	 * the caller are not known here, so allow preemptible context only.
 	 */
-	if (IS_ENABLED(CONFIG_PREEMPT_RT) && (in_nmi() || in_hardirq()))
+	if (IS_ENABLED(CONFIG_PREEMPT_RT) && !preemptible())
 		return false;
 
 	/* On UP, spin_trylock() always succeeds even when it is locked */
