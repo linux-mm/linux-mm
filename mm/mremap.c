@@ -1362,6 +1362,16 @@ static void dontunmap_complete(struct vma_remap_struct *vrm,
 	/* Self-merge is disallowed. */
 	VM_WARN_ON_ONCE(new_vma == vma);
 
+	if (vma_test(vma, VMA_LOCKED_BIT)) {
+		unsigned long unl_pages = vma_pages(vma);
+
+		if (new_vma != vma)
+			unl_pages -= vrm->old_len >> PAGE_SHIFT;
+		else
+			unl_pages -= vrm->new_len >> PAGE_SHIFT;
+		current->mm->locked_vm -= unl_pages;
+	}
+
 	/* We always clear VMA_LOCKED[ONFAULT]_BIT on the old VMA. */
 	vma_clear_flags_mask(vma, VMA_LOCKED_MASK);
 
