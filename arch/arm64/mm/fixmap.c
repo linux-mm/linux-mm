@@ -35,7 +35,7 @@ static pte_t bm_pte[NR_BM_PTE_TABLES][PTRS_PER_PTE] __bss_pgtbl;
 static pmd_t bm_pmd[PTRS_PER_PMD] __bss_pgtbl __maybe_unused;
 static pud_t bm_pud[PTRS_PER_PUD] __bss_pgtbl __maybe_unused;
 
-static inline pte_t *fixmap_pte(unsigned long addr)
+static inline hw_pte_t *fixmap_pte(unsigned long addr)
 {
 	return &bm_pte[BM_PTE_TABLE_IDX(addr)][pte_index(addr)];
 }
@@ -43,7 +43,7 @@ static inline pte_t *fixmap_pte(unsigned long addr)
 static void __init early_fixmap_init_pte(pmd_t *pmdp, unsigned long addr)
 {
 	pmd_t pmd = READ_ONCE(*pmdp);
-	pte_t *ptep;
+	hw_pte_t *ptep;
 
 	if (pmd_none(pmd)) {
 		ptep = bm_pte[BM_PTE_TABLE_IDX(addr)];
@@ -120,7 +120,7 @@ void __set_fixmap(enum fixed_addresses idx,
 			       phys_addr_t phys, pgprot_t flags)
 {
 	unsigned long addr = __fix_to_virt(idx);
-	pte_t *ptep;
+	hw_pte_t *ptep;
 
 	BUG_ON(idx <= FIX_HOLE || idx >= __end_of_fixed_addresses);
 

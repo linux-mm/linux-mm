@@ -166,7 +166,8 @@ static void show_pte(unsigned long addr)
 		p4d_t *p4dp, p4d;
 		pud_t *pudp, pud;
 		pmd_t *pmdp, pmd;
-		pte_t *ptep, pte;
+		hw_pte_t *ptep;
+		pte_t pte;
 
 		if (pgd_none(pgd) || pgd_bad(pgd))
 			break;
@@ -212,7 +213,7 @@ static void show_pte(unsigned long addr)
  * Returns whether or not the PTE actually changed.
  */
 int __ptep_set_access_flags_anysz(struct vm_area_struct *vma,
-				  unsigned long address, pte_t *ptep,
+				  unsigned long address, hw_pte_t *ptep,
 				  pte_t entry, int dirty, unsigned long pgsize)
 {
 	pteval_t old_pteval, pteval;

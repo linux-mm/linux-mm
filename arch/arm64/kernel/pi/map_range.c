@@ -27,7 +27,8 @@
  * 			in the VA space
  */
 void __init map_range(phys_addr_t *pte, u64 start, u64 end, phys_addr_t pa,
-		      pgprot_t prot, int level, pte_t *tbl, bool may_use_cont,
+		      pgprot_t prot, int level, hw_pte_t *tbl,
+		      bool may_use_cont,
 		      u64 va_offset)
 {
 	u64 cmask = (level == 3) ? CONT_PTE_SIZE - 1 : U64_MAX;
@@ -62,7 +63,7 @@ void __init map_range(phys_addr_t *pte, u64 start, u64 end, phys_addr_t pa,
 				*pte += PTRS_PER_PTE * sizeof(pte_t);
 			}
 			map_range(pte, start, next, pa, prot, level + 1,
-				  (pte_t *)(__pte_to_phys(*tbl) + va_offset),
+				  (hw_pte_t *)(__pte_to_phys(*tbl) + va_offset),
 				  may_use_cont, va_offset);
 		} else {
 			/*
@@ -100,10 +101,10 @@ asmlinkage phys_addr_t __init create_init_idmap(pgd_t *pg_dir, ptval_t clrmask)
 	/* MMU is off; pointer casts to phys_addr_t are safe */
 	map_range(&ptep, (u64)_stext, (u64)__initdata_begin,
 		  (phys_addr_t)_stext, text_prot, IDMAP_ROOT_LEVEL,
-		  (pte_t *)pg_dir, false, 0);
+		  (hw_pte_t *)pg_dir, false, 0);
 	map_range(&ptep, (u64)__initdata_begin, (u64)_end,
 		  (phys_addr_t)__initdata_begin, data_prot, IDMAP_ROOT_LEVEL,
-		  (pte_t *)pg_dir, false, 0);
+		  (hw_pte_t *)pg_dir, false, 0);
 
 	return ptep;
 }

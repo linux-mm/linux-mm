@@ -159,7 +159,7 @@ static void init_clear_pgtable(void *table)
 	dsb(ishst);
 }
 
-static void init_pte(pte_t *ptep, unsigned long addr, unsigned long end,
+static void init_pte(hw_pte_t *ptep, unsigned long addr, unsigned long end,
 		     phys_addr_t phys, pgprot_t prot)
 {
 	do {
@@ -182,7 +182,7 @@ static void init_pte(pte_t *ptep, unsigned long addr, unsigned long end,
 	} while (ptep++, addr += PAGE_SIZE, addr != end);
 }
 
-static bool pte_range_has_valid_noncont(pte_t *ptep)
+static bool pte_range_has_valid_noncont(hw_pte_t *ptep)
 {
 	for (int i = 0; i < CONT_PTES; i++) {
 		pte_t pte = __ptep_get(&ptep[i]);
@@ -201,7 +201,7 @@ static int alloc_init_cont_pte(pmd_t *pmdp, unsigned long addr,
 {
 	unsigned long next;
 	pmd_t pmd = READ_ONCE(*pmdp);
-	pte_t *ptep;
+	hw_pte_t *ptep;
 
 	BUG_ON(pmd_leaf(pmd));
 	if (pmd_none(pmd)) {
@@ -592,7 +592,7 @@ pgd_pgtable_alloc_special_mm(enum pgtable_level pgtable_level)
 	return  __pgd_pgtable_alloc(NULL, GFP_PGTABLE_KERNEL, pgtable_level);
 }
 
-static void split_contpte(pte_t *ptep)
+static void split_contpte(hw_pte_t *ptep)
 {
 	int i;
 
@@ -607,13 +607,13 @@ static int split_pmd(pmd_t *pmdp, pmd_t pmd, gfp_t gfp, bool to_cont)
 	unsigned long pfn = pmd_pfn(pmd);
 	pgprot_t prot = pmd_pgprot(pmd);
 	phys_addr_t pte_phys;
-	pte_t *ptep;
+	hw_pte_t *ptep;
 	int i;
 
 	pte_phys = pgd_pgtable_alloc_init_mm_gfp(PGTABLE_LEVEL_PTE, gfp);
 	if (pte_phys == INVALID_PHYS_ADDR)
 		return -ENOMEM;
-	ptep = (pte_t *)phys_to_virt(pte_phys);
+	ptep = (hw_pte_t *)phys_to_virt(pte_phys);
 
 	if (pgprot_val(prot) & PMD_SECT_PXN)
 		tableprot |= PMD_TABLE_PXN;
@@ -691,7 +691,8 @@ static int split_kernel_leaf_mapping_locked(unsigned long addr)
 	p4d_t *p4dp, p4d;
 	pud_t *pudp, pud;
 	pmd_t *pmdp, pmd;
-	pte_t *ptep, pte;
+	hw_pte_t *ptep;
+	pte_t pte;
 	int ret = 0;
 
 	/*
@@ -904,7 +905,7 @@ static int split_to_ptes_pmd_entry(pmd_t *pmdp, unsigned long addr,
 	return ret;
 }
 
-static int split_to_ptes_pte_entry(pte_t *ptep, unsigned long addr,
+static int split_to_ptes_pte_entry(hw_pte_t *ptep, unsigned long addr,
 				   unsigned long next, struct mm_walk *walk)
 {
 	pte_t pte = __ptep_get(ptep);
@@ -1438,7 +1439,8 @@ static void __init declare_kernel_vmas(void)
 }
 
 void __pi_map_range(phys_addr_t *pte, u64 start, u64 end, phys_addr_t pa,
-		    pgprot_t prot, int level, pte_t *tbl, bool may_use_cont,
+		    pgprot_t prot, int level, hw_pte_t *tbl,
+		    bool may_use_cont,
 		    u64 va_offset);
 
 static u8 idmap_ptes[IDMAP_LEVELS - 1][PAGE_SIZE] __aligned(PAGE_SIZE) __ro_after_init,
@@ -1451,7 +1453,7 @@ static void __init create_idmap(void)
 	phys_addr_t ptep  = __pa_symbol(idmap_ptes);
 
 	__pi_map_range(&ptep, start, end, start, PAGE_KERNEL_ROX,
-		       IDMAP_ROOT_LEVEL, (pte_t *)idmap_pg_dir, false,
+		       IDMAP_ROOT_LEVEL, (hw_pte_t *)idmap_pg_dir, false,
 		       __phys_to_virt(ptep) - ptep);
 
 	if (linear_map_requires_bbml3 ||
@@ -1466,7 +1468,8 @@ static void __init create_idmap(void)
 		 */
 		ptep = __pa_symbol(kpti_bbml3_ptes);
 		__pi_map_range(&ptep, pa, pa + sizeof(u32), pa, PAGE_KERNEL,
-			       IDMAP_ROOT_LEVEL, (pte_t *)idmap_pg_dir, false,
+			       IDMAP_ROOT_LEVEL, (hw_pte_t *)idmap_pg_dir,
+			       false,
 			       __phys_to_virt(ptep) - ptep);
 	}
 }
@@ -1522,7 +1525,8 @@ static void unmap_hotplug_pte_range(pmd_t *pmdp, unsigned long addr,
 				    unsigned long end, bool free_mapped,
 				    struct vmem_altmap *altmap)
 {
-	pte_t *ptep, pte;
+	hw_pte_t *ptep;
+	pte_t pte;
 
 	do {
 		ptep = pte_offset_kernel(pmdp, addr);
@@ -1665,7 +1669,8 @@ static void free_empty_pte_table(pmd_t *pmdp, unsigned long addr,
 				 unsigned long end, unsigned long floor,
 				 unsigned long ceiling)
 {
-	pte_t *ptep, pte;
+	hw_pte_t *ptep;
+	pte_t pte;
 	unsigned long i, start = addr;
 
 	do {
@@ -1914,7 +1919,7 @@ int pmd_clear_huge(pmd_t *pmdp)
 
 int pmd_free_pte_page(pmd_t *pmdp, unsigned long addr)
 {
-	pte_t *table;
+	hw_pte_t *table;
 	pmd_t pmd;
 
 	pmd = READ_ONCE(*pmdp);
@@ -2056,7 +2061,8 @@ static bool addr_splits_kernel_leaf(unsigned long addr)
 	p4d_t *p4dp, p4d;
 	pud_t *pudp, pud;
 	pmd_t *pmdp, pmd;
-	pte_t *ptep, pte;
+	hw_pte_t *ptep;
+	pte_t pte;
 
 	/*
 	 * If the given address points at a the start address of
@@ -2284,7 +2290,7 @@ early_initcall(prevent_memory_remove_init);
 #endif
 
 pte_t modify_prot_start_ptes(struct vm_area_struct *vma, unsigned long addr,
-			     pte_t *ptep, unsigned int nr)
+			     hw_pte_t *ptep, unsigned int nr)
 {
 	pte_t pte = get_and_clear_ptes(vma->vm_mm, addr, ptep, nr);
 
@@ -2302,19 +2308,21 @@ pte_t modify_prot_start_ptes(struct vm_area_struct *vma, unsigned long addr,
 	return pte;
 }
 
-pte_t ptep_modify_prot_start(struct vm_area_struct *vma, unsigned long addr, pte_t *ptep)
+pte_t ptep_modify_prot_start(struct vm_area_struct *vma, unsigned long addr,
+			     hw_pte_t *ptep)
 {
 	return modify_prot_start_ptes(vma, addr, ptep, 1);
 }
 
 void modify_prot_commit_ptes(struct vm_area_struct *vma, unsigned long addr,
-			     pte_t *ptep, pte_t old_pte, pte_t pte,
+			     hw_pte_t *ptep, pte_t old_pte, pte_t pte,
 			     unsigned int nr)
 {
 	set_ptes(vma->vm_mm, addr, ptep, pte, nr);
 }
 
-void ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr, pte_t *ptep,
+void ptep_modify_prot_commit(struct vm_area_struct *vma, unsigned long addr,
+			     hw_pte_t *ptep,
 			     pte_t old_pte, pte_t pte)
 {
 	modify_prot_commit_ptes(vma, addr, ptep, old_pte, pte, 1);

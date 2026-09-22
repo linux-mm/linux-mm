@@ -59,7 +59,7 @@ static phys_addr_t __init kasan_alloc_raw_page(int node)
 	return __pa(p);
 }
 
-static pte_t *__init kasan_pte_offset(pmd_t *pmdp, unsigned long addr, int node,
+static hw_pte_t *__init kasan_pte_offset(pmd_t *pmdp, unsigned long addr, int node,
 				      bool early)
 {
 	if (pmd_none(READ_ONCE(*pmdp))) {
@@ -116,7 +116,7 @@ static void __init kasan_pte_populate(pmd_t *pmdp, unsigned long addr,
 				      unsigned long end, int node, bool early)
 {
 	unsigned long next;
-	pte_t *ptep = kasan_pte_offset(pmdp, addr, node, early);
+	hw_pte_t *ptep = kasan_pte_offset(pmdp, addr, node, early);
 
 	do {
 		phys_addr_t page_phys = early ?

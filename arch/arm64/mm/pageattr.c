@@ -68,7 +68,7 @@ static int pageattr_pmd_entry(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 
-static int pageattr_pte_entry(pte_t *pte, unsigned long addr,
+static int pageattr_pte_entry(hw_pte_t *pte, unsigned long addr,
 			      unsigned long next, struct mm_walk *walk)
 {
 	pte_t val = __ptep_get(pte);
@@ -379,7 +379,7 @@ bool kernel_page_present(struct page *page)
 	p4d_t *p4dp;
 	pud_t *pudp, pud;
 	pmd_t *pmdp, pmd;
-	pte_t *ptep;
+	hw_pte_t *ptep;
 	unsigned long addr = (unsigned long)page_address(page);
 
 	pgdp = pgd_offset_k(addr);
