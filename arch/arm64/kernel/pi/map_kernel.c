@@ -26,7 +26,7 @@ static void __init map_segment(pgd_t *pg_dir, phys_addr_t *pgd, u64 va_offset,
 {
 	map_range(pgd, ((u64)start + va_offset) & ~PAGE_OFFSET,
 		  ((u64)end + va_offset) & ~PAGE_OFFSET, (u64)start,
-		  prot, root_level, (pte_t *)pg_dir, may_use_cont, 0);
+		  prot, root_level, (hw_pte_t *)pg_dir, may_use_cont, 0);
 }
 
 static void __init unmap_segment(pgd_t *pg_dir, u64 va_offset, void *start,
@@ -209,7 +209,7 @@ static void *__init map_fdt(phys_addr_t fdt)
 	 */
 	map_range(&ptep, fdt, (u64)_text > fdt ? min((u64)_text, efdt) : efdt,
 		  fdt, PAGE_KERNEL, IDMAP_ROOT_LEVEL,
-		  (pte_t *)init_idmap_pg_dir, false, 0);
+		  (hw_pte_t *)init_idmap_pg_dir, false, 0);
 	dsb(ishst);
 
 	return (void *)fdt;

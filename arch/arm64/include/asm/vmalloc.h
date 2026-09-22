@@ -45,7 +45,7 @@ static inline unsigned long arch_vmap_pte_range_map_size(unsigned long addr,
 
 #define arch_vmap_pte_range_unmap_size arch_vmap_pte_range_unmap_size
 static inline unsigned long arch_vmap_pte_range_unmap_size(unsigned long addr,
-							   pte_t *ptep)
+							   hw_pte_t *ptep)
 {
 	/*
 	 * The caller handles alignment so it's sufficient just to check

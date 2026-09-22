@@ -111,7 +111,8 @@ struct set_perm_data {
 	bool			has_bti;
 };
 
-static int __init set_permissions(pte_t *ptep, unsigned long addr, void *data)
+static int __init set_permissions(hw_pte_t *ptep, unsigned long addr,
+				  void *data)
 {
 	struct set_perm_data *spd = data;
 	const efi_memory_desc_t *md = spd->md;
