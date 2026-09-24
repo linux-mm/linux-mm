@@ -2455,9 +2455,14 @@ static unsigned long reclaim_high(struct mem_cgroup *memcg,
 static void high_work_func(struct work_struct *work)
 {
 	struct mem_cgroup *memcg;
+	struct cgroup *old;
 
 	memcg = container_of(work, struct mem_cgroup, high_work);
+
+	/* Charge the reclaim to the memcg's cgroup, not to the root. */
+	old = set_active_cgroup(memcg->css.cgroup);
 	reclaim_high(memcg, MEMCG_CHARGE_BATCH, GFP_KERNEL);
+	set_active_cgroup(old);
 }
 
 static void high_irq_work_func(struct irq_work *work)
