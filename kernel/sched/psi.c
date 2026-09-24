@@ -886,7 +886,7 @@ static inline struct psi_group *task_psi_group(struct task_struct *task)
 {
 #ifdef CONFIG_CGROUPS
 	if (static_branch_likely(&psi_cgroups_enabled))
-		return cgroup_psi(task_dfl_cgroup(task));
+		return cgroup_psi(task->active_cgroup ?: task_dfl_cgroup(task));
 #endif
 	return &psi_system;
 }
@@ -1211,6 +1211,26 @@ void cgroup_move_task(struct task_struct *task, struct css_set *to)
 		psi_task_change(task, 0, task_flags);
 
 	task_rq_unlock(rq, task, &rf);
+}
+
+/*
+ * Set @task's active cgroup and move its pressure state along with it.
+ * The caller holds the task's rq lock.
+ */
+void psi_set_active_cgroup(struct task_struct *task, struct cgroup *cgrp)
+{
+	unsigned int task_flags = task->psi_flags;
+
+	lockdep_assert_rq_held(task_rq(task));
+
+	if (!static_branch_likely(&psi_cgroups_enabled) || !task_flags) {
+		task->active_cgroup = cgrp;
+		return;
+	}
+
+	psi_task_change(task, task_flags, 0);
+	task->active_cgroup = cgrp;
+	psi_task_change(task, 0, task_flags);
 }
 
 void psi_cgroup_restart(struct psi_group *group)
