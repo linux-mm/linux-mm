@@ -7155,6 +7155,10 @@ void cgroup_task_exit(struct task_struct *tsk)
 	struct cgroup_subsys *ss;
 	int i;
 
+	/* The task forgot to undo set_active_cgroup(). */
+	if (WARN_ON_ONCE(tsk->active_cgroup))
+		set_active_cgroup(NULL);
+
 	/* see cgroup_post_fork() for details */
 	do_each_subsys_mask(ss, i, have_exit_callback) {
 		ss->exit(tsk);
