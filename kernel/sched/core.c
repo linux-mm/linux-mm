@@ -9960,6 +9960,7 @@ static int tg_set_cfs_bandwidth(struct task_group *tg,
 		cfs_b->period = ns_to_ktime(period);
 		cfs_b->quota = quota;
 		cfs_b->burst = burst;
+		cfs_b->debt = 0;
 
 		__refill_cfs_bandwidth_runtime(cfs_b);
 
