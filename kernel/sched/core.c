@@ -5766,7 +5766,7 @@ struct cgroup *set_active_cgroup(struct cgroup *cgrp)
 	rq->donor->sched_class->update_curr(rq);
 
 	old = p->active_cgroup;
-	p->active_cgroup = cgrp;
+	psi_set_active_cgroup(p, cgrp);
 	task_rq_unlock(rq, p, &rf);
 
 	return old;
