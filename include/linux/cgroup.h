@@ -879,12 +879,20 @@ static inline void cgroup_account_system_time(struct cgroup *cgrp,
 	}
 }
 
+struct cgroup *set_active_cgroup(struct cgroup *cgrp);
+
 static inline void cgroup_account_cputime(struct task_struct *task,
 					  u64 delta_exec)
 {
 	struct cgroup *cgrp;
 
 	cpuacct_charge(task, delta_exec);
+
+	/* Time spent under set_active_cgroup() is all kernel time. */
+	if (task->active_cgroup) {
+		cgroup_account_system_time(task->active_cgroup, delta_exec);
+		return;
+	}
 
 	cgrp = task_dfl_cgroup(task);
 	if (cgroup_parent(cgrp))
@@ -898,6 +906,20 @@ static inline void cgroup_account_cputime_field(struct task_struct *task,
 	struct cgroup *cgrp;
 
 	cpuacct_account_field(task, index, delta_exec);
+
+	/*
+	 * cgroup_account_cputime() has charged the run time already. Forced
+	 * idle time from core scheduling is not run time: charge it here.
+	 */
+	if (task->active_cgroup) {
+#ifdef CONFIG_SCHED_CORE
+		if (index == CPUTIME_FORCEIDLE &&
+		    cgroup_parent(task->active_cgroup))
+			__cgroup_account_cputime_field(task->active_cgroup,
+						       index, delta_exec);
+#endif
+		return;
+	}
 
 	cgrp = task_dfl_cgroup(task);
 	if (cgroup_parent(cgrp))
@@ -913,6 +935,10 @@ static inline void cgroup_account_cputime_field(struct task_struct *task,
 						u64 delta_exec) {}
 static inline void cgroup_account_system_time(struct cgroup *cgrp,
 					      u64 delta_exec) {}
+static inline struct cgroup *set_active_cgroup(struct cgroup *cgrp)
+{
+	return NULL;
+}
 
 #endif	/* CONFIG_CGROUPS */
 

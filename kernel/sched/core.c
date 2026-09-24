@@ -5730,6 +5730,49 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 	return ns;
 }
 
+#ifdef CONFIG_CGROUPS
+/**
+ * set_active_cgroup - charge current's CPU time to another cgroup
+ * @cgrp: the cgroup to charge, or NULL for current's own cgroup
+ *
+ * For kernel code that does work for a cgroup. The time it uses is charged
+ * to @cgrp as kernel time. Returns the old value, which the caller restores
+ * when done. @cgrp must stay alive until then.
+ *
+ * Only for callers in the root cgroup, like kworkers. The scheduler still
+ * runs the caller in its own cgroup, so from any other cgroup the time would
+ * also count against that cgroup's cpu.max, and on nohz_full CPUs some of
+ * it could show up in that cgroup's cpu.stat. It warns and does nothing for
+ * such a caller.
+ */
+struct cgroup *set_active_cgroup(struct cgroup *cgrp)
+{
+	struct task_struct *p = current;
+	struct cgroup *old;
+	struct rq_flags rf;
+	struct rq *rq;
+
+	WARN_ON_ONCE(!in_task());
+	WARN_ON_ONCE(cgrp && cgrp->root != &cgrp_dfl_root);
+
+	scoped_guard(rcu) {
+		if (cgrp && WARN_ON_ONCE(cgroup_parent(task_dfl_cgroup(p))))
+			return p->active_cgroup;
+	}
+
+	rq = task_rq_lock(p, &rf);
+	/* Charge the time used so far to the old cgroup. */
+	update_rq_clock(rq);
+	rq->donor->sched_class->update_curr(rq);
+
+	old = p->active_cgroup;
+	p->active_cgroup = cgrp;
+	task_rq_unlock(rq, p, &rf);
+
+	return old;
+}
+#endif
+
 static u64 cpu_resched_latency(struct rq *rq)
 {
 	int latency_warn_ms = READ_ONCE(sysctl_resched_latency_warn_ms);
