@@ -5736,8 +5736,9 @@ unsigned long long task_sched_runtime(struct task_struct *p)
  * @cgrp: the cgroup to charge, or NULL for current's own cgroup
  *
  * For kernel code that does work for a cgroup. The time it uses is charged
- * to @cgrp as kernel time. Returns the old value, which the caller restores
- * when done. @cgrp must stay alive until then.
+ * to @cgrp as kernel time, and taken out of @cgrp's cpu.max quota. Returns
+ * the old value, which the caller restores when done. @cgrp must stay alive
+ * until then.
  *
  * Only for callers in the root cgroup, like kworkers. The scheduler still
  * runs the caller in its own cgroup, so from any other cgroup the time would
@@ -5751,6 +5752,7 @@ struct cgroup *set_active_cgroup(struct cgroup *cgrp)
 	struct cgroup *old;
 	struct rq_flags rf;
 	struct rq *rq;
+	u64 used;
 
 	WARN_ON_ONCE(!in_task());
 	WARN_ON_ONCE(cgrp && cgrp->root != &cgrp_dfl_root);
@@ -5766,8 +5768,14 @@ struct cgroup *set_active_cgroup(struct cgroup *cgrp)
 	rq->donor->sched_class->update_curr(rq);
 
 	old = p->active_cgroup;
+	used = p->se.sum_exec_runtime - p->active_cgroup_start;
+	p->active_cgroup_start = p->se.sum_exec_runtime;
 	psi_set_active_cgroup(p, cgrp);
 	task_rq_unlock(rq, p, &rf);
+
+	/* Take that time out of the old cgroup's cpu.max quota as well. */
+	if (old)
+		cfs_bandwidth_charge(old, used);
 
 	return old;
 }
