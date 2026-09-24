@@ -868,6 +868,17 @@ void __cgroup_account_cputime(struct cgroup *cgrp, u64 delta_exec);
 void __cgroup_account_cputime_field(struct cgroup *cgrp,
 				    enum cpu_usage_stat index, u64 delta_exec);
 
+/* Charge @delta_exec of kernel CPU time to @cgrp. */
+static inline void cgroup_account_system_time(struct cgroup *cgrp,
+					      u64 delta_exec)
+{
+	if (cgroup_parent(cgrp)) {
+		__cgroup_account_cputime(cgrp, delta_exec);
+		__cgroup_account_cputime_field(cgrp, CPUTIME_SYSTEM,
+					       delta_exec);
+	}
+}
+
 static inline void cgroup_account_cputime(struct task_struct *task,
 					  u64 delta_exec)
 {
@@ -900,6 +911,8 @@ static inline void cgroup_account_cputime(struct task_struct *task,
 static inline void cgroup_account_cputime_field(struct task_struct *task,
 						enum cpu_usage_stat index,
 						u64 delta_exec) {}
+static inline void cgroup_account_system_time(struct cgroup *cgrp,
+					      u64 delta_exec) {}
 
 #endif	/* CONFIG_CGROUPS */
 
