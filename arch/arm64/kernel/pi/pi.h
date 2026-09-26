@@ -2,6 +2,7 @@
 // Copyright 2023 Google LLC
 // Author: Ard Biesheuvel <ardb@google.com>
 
+#include <linux/pgtable_types.h>
 #include <linux/types.h>
 
 #define __prel64_initconst	__section(".init.rodata.prel64")
@@ -30,7 +31,7 @@ void relocate_kernel(u64 offset);
 int scs_patch(const u8 eh_frame[], int size, bool skip_dry_run);
 
 void map_range(phys_addr_t *pte, u64 start, u64 end, phys_addr_t pa,
-	       pgprot_t prot, int level, pte_t *tbl, bool may_use_cont,
+	       pgprot_t prot, int level, hw_pte_t *tbl, bool may_use_cont,
 	       u64 va_offset);
 
 asmlinkage void early_map_kernel(u64 boot_status, phys_addr_t fdt);
