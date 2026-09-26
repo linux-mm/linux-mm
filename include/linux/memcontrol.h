@@ -200,6 +200,13 @@ struct mem_cgroup {
 	/* Accounted resources */
 	struct page_counter memory;		/* Both v1 & v2 */
 
+	/*
+	 * Hierarchical memory.min/memory.low protection tracking for the
+	 * memory page counter. swap/memsw, kmem and tcpmem counters do not
+	 * support protection and have no such context.
+	 */
+	struct page_counter_protection memory_prot;
+
 	union {
 		struct page_counter swap;	/* v2 only */
 		struct page_counter memsw;	/* v1 only */
@@ -617,8 +624,8 @@ static inline void mem_cgroup_protection(const struct mem_cgroup *root,
 	if (root == memcg)
 		return;
 
-	*min = READ_ONCE(memcg->memory.emin);
-	*low = READ_ONCE(memcg->memory.elow);
+	*min = READ_ONCE(memcg->memory_prot.emin);
+	*low = READ_ONCE(memcg->memory_prot.elow);
 }
 
 void mem_cgroup_calculate_protection(struct mem_cgroup *root,
@@ -642,7 +649,7 @@ static inline bool mem_cgroup_below_low(const struct mem_cgroup *target,
 	if (mem_cgroup_unprotected(target, memcg))
 		return false;
 
-	return READ_ONCE(memcg->memory.elow) >=
+	return READ_ONCE(memcg->memory_prot.elow) >=
 		page_counter_read(&memcg->memory);
 }
 
@@ -652,7 +659,7 @@ static inline bool mem_cgroup_below_min(const struct mem_cgroup *target,
 	if (mem_cgroup_unprotected(target, memcg))
 		return false;
 
-	return READ_ONCE(memcg->memory.emin) >=
+	return READ_ONCE(memcg->memory_prot.emin) >=
 		page_counter_read(&memcg->memory);
 }
 
