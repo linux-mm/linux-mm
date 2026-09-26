@@ -803,6 +803,16 @@ struct vma_numab_state {
 	 * A VMA is not eligible for scanning if prev_scan_seq == numa_scan_seq
 	 */
 	int prev_scan_seq;
+
+	/*
+	 * MM scan sequence ID when the VMA was last scanned for placement.
+	 * The starvation horizon in vma_needs_placement_scan() counts against
+	 * this, so promotion-only scans cannot postpone placement indefinitely.
+	 */
+	int prev_placement_scan_seq;
+
+	/* Preserve placement-scan eligibility during an in-progress scan. */
+	bool placement_scan;
 };
 
 #ifdef __HAVE_PFNMAP_TRACKING
