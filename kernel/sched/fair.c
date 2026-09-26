@@ -6623,6 +6623,7 @@ static inline u64 sched_cfs_bandwidth_slice(void)
 void __refill_cfs_bandwidth_runtime(struct cfs_bandwidth *cfs_b)
 {
 	s64 runtime;
+	u64 pay;
 
 	if (unlikely(cfs_b->quota == RUNTIME_INF))
 		return;
@@ -6635,7 +6636,49 @@ void __refill_cfs_bandwidth_runtime(struct cfs_bandwidth *cfs_b)
 	}
 
 	cfs_b->runtime = min(cfs_b->runtime, cfs_b->quota + cfs_b->burst);
+
+	/* Pay back the kernel work charged by cfs_bandwidth_charge(). */
+	pay = min(cfs_b->runtime, cfs_b->debt);
+	cfs_b->runtime -= pay;
+	cfs_b->debt -= pay;
+
 	cfs_b->runtime_snap = cfs_b->runtime;
+}
+
+/*
+ * Kernel work used @delta of CPU time for @cgrp, see set_active_cgroup().
+ * Take it out of the quota of @cgrp's task group and of each ancestor with
+ * a limit, the same way the group's own run time is taken. What the pool
+ * cannot cover now becomes debt, paid out of the next refills. The debt is
+ * capped at one period's quota, so the work cannot starve the group for
+ * long.
+ */
+void cfs_bandwidth_charge(struct cgroup *cgrp, u64 delta)
+{
+	struct task_group *tg;
+
+	if (!cfs_bandwidth_used())
+		return;
+
+	guard(rcu)();
+	tg = css_tg(cgroup_e_css(cgrp, &cpu_cgrp_subsys));
+
+	/* No limit here or above. */
+	if (READ_ONCE(tg->cfs_bandwidth.hierarchical_quota) == RUNTIME_INF)
+		return;
+
+	for (; tg; tg = tg->parent) {
+		struct cfs_bandwidth *cfs_b = &tg->cfs_bandwidth;
+		u64 take;
+
+		guard(raw_spinlock_irqsave)(&cfs_b->lock);
+		if (cfs_b->quota == RUNTIME_INF)
+			continue;
+
+		take = min(delta, cfs_b->runtime);
+		cfs_b->runtime -= take;
+		cfs_b->debt = min(cfs_b->debt + delta - take, cfs_b->quota);
+	}
 }
 
 static inline struct cfs_bandwidth *tg_cfs_bandwidth(struct task_group *tg)
