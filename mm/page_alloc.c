@@ -5285,6 +5285,7 @@ retry_this_zone:
 		trace_mm_page_alloc(page, 0, gfp, ac.migratetype);
 		kmsan_alloc_page(page, 0, gfp & ~__GFP_RECLAIM);
 		set_page_refcounted(page);
+		trace_mm_page_alloc(page, 0, gfp, ac.migratetype);
 		page_array[nr_populated++] = page;
 	}
 
