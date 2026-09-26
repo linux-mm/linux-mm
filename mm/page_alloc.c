@@ -5138,200 +5138,6 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
 	return true;
 }
 
-/*
- * __alloc_pages_bulk - Allocate a number of order-0 pages to an array
- * @gfp: GFP flags for the allocation
- * @preferred_nid: The preferred NUMA node ID to allocate from
- * @nodemask: Set of nodes to allocate from, may be NULL
- * @nr_pages: The number of pages desired in the array
- * @page_array: Array to store the pages
- *
- * This is a batched version of the page allocator that attempts to allocate
- * @nr_pages quickly.  Pages are added to @page_array.
- *
- * Note that only the elements in @page_array that were cleared to %NULL on
- * entry are populated with newly allocated pages. @nr_pages is the maximum
- * number of pages that will be stored in the array.
- *
- * Returns the number of pages in @page_array, including ones already
- * allocated on entry.  This can be less than the number requested in @nr_pages,
- * but all empty slots are filled from the beginning.  I.e., if all slots in
- * @page_array were set to %NULL on entry, the slots from 0 to the return value
- * - 1 will be filled.
- */
-unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
-			nodemask_t *nodemask, int nr_pages,
-			struct page **page_array)
-{
-	struct page *page;
-	struct zone *zone;
-	struct zoneref *z;
-	struct per_cpu_pages *pcp;
-	struct list_head *pcp_list;
-	struct alloc_context ac;
-	unsigned int alloc_flags = ALLOC_WMARK_LOW;
-	int nr_populated = 0, nr_account = 0;
-
-	/*
-	 * Skip populated array elements to determine if any pages need
-	 * to be allocated before disabling IRQs.
-	 */
-	while (nr_populated < nr_pages && page_array[nr_populated])
-		nr_populated++;
-
-	/* No pages requested? */
-	if (unlikely(nr_pages <= 0))
-		goto out;
-
-	/* Already populated array? */
-	if (unlikely(nr_pages - nr_populated == 0))
-		goto out;
-
-	/* Bulk allocator does not support memcg accounting. */
-	if (memcg_kmem_online() && (gfp & __GFP_ACCOUNT))
-		goto failed;
-
-	/* Use the single page allocator for one page. */
-	if (nr_pages - nr_populated == 1)
-		goto failed;
-
-#ifdef CONFIG_PAGE_OWNER
-	/*
-	 * PAGE_OWNER may recurse into the allocator to allocate space to
-	 * save the stack with pagesets.lock held. Releasing/reacquiring
-	 * removes much of the performance benefit of bulk allocation so
-	 * force the caller to allocate one page at a time as it'll have
-	 * similar performance to added complexity to the bulk allocator.
-	 */
-	if (static_branch_unlikely(&page_owner_inited))
-		goto failed;
-#endif
-
-	/* May set ALLOC_NOFRAGMENT, fragmentation will return 1 page. */
-	gfp &= gfp_allowed_mask;
-	gfp = current_gfp_context(gfp);
-	if (!prepare_alloc_pages(gfp, 0, preferred_nid, nodemask, &ac, &gfp, &alloc_flags))
-		goto out;
-
-	/* Find an allowed local zone that meets the low watermark. */
-	z = ac.preferred_zoneref;
-	for_next_zone_zonelist_nodemask(zone, z, ac.highest_zoneidx, ac.nodemask) {
-		unsigned long mark;
-
-		if (cpusets_enabled() && (alloc_flags & ALLOC_CPUSET) &&
-		    !__cpuset_zone_allowed(zone, gfp)) {
-			continue;
-		}
-
-		if (nr_online_nodes > 1 && zone != zonelist_zone(ac.preferred_zoneref) &&
-		    zone_to_nid(zone) != zonelist_node_idx(ac.preferred_zoneref)) {
-			goto failed;
-		}
-
-		cond_accept_memory(zone, 0, alloc_flags);
-retry_this_zone:
-		mark = wmark_pages(zone, alloc_flags & ALLOC_WMARK_MASK) + nr_pages - nr_populated;
-		if (zone_watermark_fast(zone, 0,  mark,
-				zonelist_zone_idx(ac.preferred_zoneref),
-				alloc_flags, gfp)) {
-			break;
-		}
-
-		if (cond_accept_memory(zone, 0, alloc_flags))
-			goto retry_this_zone;
-
-		/* Try again if zone has deferred pages */
-		if (deferred_pages_enabled()) {
-			if (_deferred_grow_zone(zone, 0))
-				goto retry_this_zone;
-		}
-	}
-
-	/*
-	 * If there are no allowed local zones that meets the watermarks then
-	 * try to allocate a single page and reclaim if necessary.
-	 */
-	if (unlikely(!zone))
-		goto failed;
-
-	/* spin_trylock may fail due to a parallel drain or IRQ reentrancy. */
-	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
-	if (!pcp)
-		goto failed;
-
-	/* Attempt the batch allocation */
-	pcp_list = &pcp->lists[order_to_pindex(ac.migratetype, 0)];
-	while (nr_populated < nr_pages) {
-
-		/* Skip existing pages */
-		if (page_array[nr_populated]) {
-			nr_populated++;
-			continue;
-		}
-
-		page = __rmqueue_pcplist(zone, 0, ac.migratetype, alloc_flags,
-								pcp, pcp_list);
-		if (unlikely(!page)) {
-			/* Try and allocate at least one page */
-			if (!nr_account) {
-				pcp_spin_unlock(pcp);
-				goto failed;
-			}
-			break;
-		}
-		nr_account++;
-
-		prep_new_page(page, 0, gfp, ALLOC_DEFAULT);
-		trace_mm_page_alloc(page, 0, gfp, ac.migratetype);
-		kmsan_alloc_page(page, 0, gfp & ~__GFP_RECLAIM);
-		set_page_refcounted(page);
-		page_array[nr_populated++] = page;
-	}
-
-	pcp_spin_unlock(pcp);
-
-	__count_zid_vm_events(PGALLOC, zone_idx(zone), nr_account);
-	zone_statistics(zonelist_zone(ac.preferred_zoneref), zone, nr_account);
-
-out:
-	return nr_populated;
-
-failed:
-	page = __alloc_pages_noprof(gfp, 0, preferred_nid, nodemask, ALLOC_DEFAULT);
-	if (page)
-		page_array[nr_populated++] = page;
-	goto out;
-}
-EXPORT_SYMBOL_GPL(alloc_pages_bulk_noprof);
-
-/*
- * free_pages_bulk - Free an array of order-0 pages
- * @page_array: Array of pages to free
- * @nr_pages: The number of pages in the array
- *
- * Free the order-0 pages. Adjacent entries whose PFNs form a contiguous
- * run are released with a single __free_contig_range() call.
- *
- * This assumes page_array is sorted in ascending PFN order. Without that,
- * the function still frees all pages, but contiguous runs may not be
- * detected and the freeing pattern can degrade to freeing one page at a
- * time.
- *
- * Context: Sleepable process context only; calls cond_resched()
- */
-void free_pages_bulk(struct page **page_array, unsigned long nr_pages)
-{
-	while (nr_pages) {
-		unsigned long nr_contig = num_pages_contiguous(page_array, nr_pages);
-
-		__free_contig_range(page_to_pfn(*page_array), nr_contig);
-
-		nr_pages -= nr_contig;
-		page_array += nr_contig;
-		cond_resched();
-	}
-}
-
 static inline bool alloc_order_allowed(gfp_t gfp, unsigned int order,
 				       unsigned int alloc_flags)
 {
@@ -5382,6 +5188,245 @@ static inline bool alloc_nolock_allowed(void)
 static const gfp_t gfp_nolock = __GFP_NOWARN | __GFP_ZERO | __GFP_NOMEMALLOC |
 				__GFP_COMP;
 
+static __always_inline bool prepare_alloc_flags(gfp_t *gfp, unsigned int order,
+		unsigned int alloc_flags, unsigned int *prepared_alloc_flags,
+		unsigned int *fastpath_alloc_flags)
+{
+	/* Other flags could be supported later if needed. */
+	if (WARN_ON(alloc_flags & ~(ALLOC_NOLOCK | ALLOC_NO_CODETAG)))
+		return false;
+
+	if (!alloc_order_allowed(*gfp, order, alloc_flags))
+		return false;
+
+	*prepared_alloc_flags = alloc_flags;
+	*fastpath_alloc_flags = alloc_flags;
+
+	if (alloc_flags & ALLOC_NOLOCK) {
+		/* Certain other flags could be supported later if needed. */
+		VM_WARN_ON_ONCE(*gfp & ~(__GFP_ACCOUNT | gfp_nolock));
+		if (!alloc_nolock_allowed())
+			return false;
+		*gfp |= gfp_nolock;
+		*fastpath_alloc_flags |= ALLOC_WMARK_MIN;
+	} else {
+		*fastpath_alloc_flags |= ALLOC_WMARK_LOW;
+	}
+
+	return true;
+}
+
+/*
+ * __alloc_pages_bulk - Allocate a number of order-0 pages to an array
+ * @gfp: GFP flags for the allocation
+ * @alloc_flags: Allocation behavior flags
+ * @preferred_nid: The preferred NUMA node ID to allocate from
+ * @nodemask: Set of nodes to allocate from, may be NULL
+ * @nr_pages: The number of pages desired in the array
+ * @page_array: Array to store the pages
+ *
+ * This is a batched version of the page allocator that attempts to allocate
+ * @nr_pages quickly.  Pages are added to @page_array.
+ *
+ * Note that only the elements in @page_array that were cleared to %NULL on
+ * entry are populated with newly allocated pages. @nr_pages is the maximum
+ * number of pages that will be stored in the array.
+ *
+ * Returns the number of pages in @page_array, including ones already
+ * allocated on entry.  This can be less than the number requested in @nr_pages,
+ * but all empty slots are filled from the beginning.  I.e., if all slots in
+ * @page_array were set to %NULL on entry, the slots from 0 to the return value
+ * - 1 will be filled.
+ */
+unsigned long __alloc_pages_bulk_noprof(gfp_t gfp, unsigned int alloc_flags,
+		int preferred_nid, nodemask_t *nodemask, int nr_pages,
+		struct page **page_array)
+{
+	struct page *page;
+	struct zone *zone;
+	struct zoneref *z;
+	struct per_cpu_pages *pcp;
+	struct list_head *pcp_list;
+	gfp_t orig_gfp = gfp;
+	struct alloc_context ac;
+	unsigned int fastpath_alloc_flags;
+	int nr_populated = 0, nr_account = 0;
+
+	/*
+	 * Skip populated array elements to determine if any pages need
+	 * to be allocated before disabling IRQs.
+	 */
+	while (nr_populated < nr_pages && page_array[nr_populated])
+		nr_populated++;
+
+	/* No pages requested? */
+	if (unlikely(nr_pages <= 0))
+		goto out;
+
+	/* Already populated array? */
+	if (unlikely(nr_pages - nr_populated == 0))
+		goto out;
+
+	/* Bulk allocator does not support memcg accounting. */
+	if (memcg_kmem_online() && (gfp & __GFP_ACCOUNT))
+		goto failed;
+
+	/* Use the single page allocator for one page. */
+	if (nr_pages - nr_populated == 1)
+		goto failed;
+
+#ifdef CONFIG_PAGE_OWNER
+	/*
+	 * PAGE_OWNER may recurse into the allocator to allocate space to
+	 * save the stack with pagesets.lock held. Releasing/reacquiring
+	 * removes much of the performance benefit of bulk allocation so
+	 * force the caller to allocate one page at a time as it'll have
+	 * similar performance to added complexity to the bulk allocator.
+	 */
+	if (static_branch_unlikely(&page_owner_inited))
+		goto failed;
+#endif
+
+	if (!prepare_alloc_flags(&gfp, 0, alloc_flags, &ac.alloc_flags,
+				 &fastpath_alloc_flags))
+		goto out;
+
+	/* May set ALLOC_NOFRAGMENT, fragmentation will return 1 page. */
+	gfp &= gfp_allowed_mask;
+	gfp = current_gfp_context(gfp);
+	if (!prepare_alloc_pages(gfp, 0, preferred_nid, nodemask, &ac, &gfp,
+				 &fastpath_alloc_flags))
+		goto out;
+
+	/* Find an allowed local zone that meets the required watermark. */
+	z = ac.preferred_zoneref;
+	for_next_zone_zonelist_nodemask(zone, z, ac.highest_zoneidx, ac.nodemask) {
+		unsigned long mark;
+
+		if (cpusets_enabled() && (fastpath_alloc_flags & ALLOC_CPUSET) &&
+		    !__cpuset_zone_allowed(zone, gfp)) {
+			continue;
+		}
+
+		if (nr_online_nodes > 1 && zone != zonelist_zone(ac.preferred_zoneref) &&
+		    zone_to_nid(zone) != zonelist_node_idx(ac.preferred_zoneref)) {
+			goto failed;
+		}
+
+		cond_accept_memory(zone, 0, fastpath_alloc_flags);
+retry_this_zone:
+		mark = wmark_pages(zone, fastpath_alloc_flags & ALLOC_WMARK_MASK) +
+		       nr_pages - nr_populated;
+		if (zone_watermark_fast(zone, 0,  mark,
+				zonelist_zone_idx(ac.preferred_zoneref),
+				fastpath_alloc_flags, gfp)) {
+			break;
+		}
+
+		if (cond_accept_memory(zone, 0, fastpath_alloc_flags))
+			goto retry_this_zone;
+
+		/* Try again if zone has deferred pages */
+		if (deferred_pages_enabled()) {
+			if (_deferred_grow_zone(zone, 0))
+				goto retry_this_zone;
+		}
+	}
+
+	/*
+	 * If there are no allowed local zones that meet the watermarks, try the
+	 * single-page allocator.
+	 */
+	if (unlikely(!zone))
+		goto failed;
+
+	/* spin_trylock may fail due to a parallel drain or IRQ reentrancy. */
+	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
+	if (!pcp)
+		goto failed;
+
+	/* Attempt the batch allocation */
+	pcp_list = &pcp->lists[order_to_pindex(ac.migratetype, 0)];
+	while (nr_populated < nr_pages) {
+
+		/* Skip existing pages */
+		if (page_array[nr_populated]) {
+			nr_populated++;
+			continue;
+		}
+
+		page = __rmqueue_pcplist(zone, 0, ac.migratetype,
+					 fastpath_alloc_flags, pcp,
+					 pcp_list);
+		if (unlikely(!page)) {
+			/* Try and allocate at least one page */
+			if (!nr_account) {
+				pcp_spin_unlock(pcp);
+				goto failed;
+			}
+			break;
+		}
+		nr_account++;
+
+		prep_new_page(page, 0, gfp, fastpath_alloc_flags);
+		trace_mm_page_alloc(page, 0, gfp, ac.migratetype);
+		kmsan_alloc_page(page, 0, gfp & ~__GFP_RECLAIM);
+		set_page_refcounted(page);
+		page_array[nr_populated++] = page;
+	}
+
+	pcp_spin_unlock(pcp);
+
+	__count_zid_vm_events(PGALLOC, zone_idx(zone), nr_account);
+	zone_statistics(zonelist_zone(ac.preferred_zoneref), zone, nr_account);
+
+out:
+	return nr_populated;
+
+failed:
+	page = __alloc_pages_noprof(orig_gfp, 0, preferred_nid, nodemask,
+				    alloc_flags);
+	if (page)
+		page_array[nr_populated++] = page;
+	goto out;
+}
+
+unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
+		nodemask_t *nodemask, int nr_pages, struct page **page_array)
+{
+	return __alloc_pages_bulk_noprof(gfp, ALLOC_DEFAULT, preferred_nid,
+					 nodemask, nr_pages, page_array);
+}
+EXPORT_SYMBOL_GPL(alloc_pages_bulk_noprof);
+
+/*
+ * free_pages_bulk - Free an array of order-0 pages
+ * @page_array: Array of pages to free
+ * @nr_pages: The number of pages in the array
+ *
+ * Free the order-0 pages. Adjacent entries whose PFNs form a contiguous
+ * run are released with a single __free_contig_range() call.
+ *
+ * This assumes page_array is sorted in ascending PFN order. Without that,
+ * the function still frees all pages, but contiguous runs may not be
+ * detected and the freeing pattern can degrade to freeing one page at a
+ * time.
+ *
+ * Context: Sleepable process context only; calls cond_resched()
+ */
+void free_pages_bulk(struct page **page_array, unsigned long nr_pages)
+{
+	while (nr_pages) {
+		unsigned long nr_contig = num_pages_contiguous(page_array, nr_pages);
+
+		__free_contig_range(page_to_pfn(*page_array), nr_contig);
+
+		nr_pages -= nr_contig;
+		page_array += nr_contig;
+		cond_resched();
+	}
+}
+
 /*
  * This is the 'heart' of the zoned buddy allocator.
  */
@@ -5390,28 +5435,12 @@ struct page *__alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order,
 {
 	struct page *page;
 	gfp_t alloc_gfp; /* The gfp_t that was actually used for allocation */
-	struct alloc_context ac = {
-		.alloc_flags = alloc_flags,
-	};
-	unsigned int fastpath_alloc_flags = alloc_flags;
+	struct alloc_context ac;
+	unsigned int fastpath_alloc_flags;
 
-	/* Other flags could be supported later if needed. */
-	if (WARN_ON(alloc_flags & ~(ALLOC_NOLOCK | ALLOC_NO_CODETAG)))
+	if (!prepare_alloc_flags(&gfp, order, alloc_flags, &ac.alloc_flags,
+				 &fastpath_alloc_flags))
 		return NULL;
-
-	if (!alloc_order_allowed(gfp, order, alloc_flags))
-		return NULL;
-
-	if (alloc_flags & ALLOC_NOLOCK) {
-		/* Certain other flags could be supported later if needed. */
-		VM_WARN_ON_ONCE(gfp & ~(__GFP_ACCOUNT | gfp_nolock));
-		if (!alloc_nolock_allowed())
-			return NULL;
-		gfp |= gfp_nolock;
-		fastpath_alloc_flags |= ALLOC_WMARK_MIN;
-	} else {
-		fastpath_alloc_flags |= ALLOC_WMARK_LOW;
-	}
 
 	gfp &= gfp_allowed_mask;
 	/*
@@ -5491,12 +5520,20 @@ struct page *alloc_pages_node_noprof(int nid, gfp_t gfp_mask, unsigned int order
 }
 EXPORT_SYMBOL(alloc_pages_node_noprof);
 
-struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
-		nodemask_t *nodemask)
+struct folio *__folio_alloc_flags_noprof(gfp_t gfp, unsigned int order,
+		int preferred_nid, nodemask_t *nodemask,
+		unsigned int alloc_flags)
 {
 	struct page *page = __alloc_pages_noprof(gfp | __GFP_COMP, order,
-					preferred_nid, nodemask, ALLOC_DEFAULT);
+					preferred_nid, nodemask, alloc_flags);
 	return page_rmappable_folio(page);
+}
+
+struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order,
+		int preferred_nid, nodemask_t *nodemask)
+{
+	return __folio_alloc_flags_noprof(gfp, order, preferred_nid, nodemask,
+					 ALLOC_DEFAULT);
 }
 EXPORT_SYMBOL(__folio_alloc_noprof);
 
