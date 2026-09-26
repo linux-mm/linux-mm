@@ -591,6 +591,13 @@ void pgalloc_tag_swap(struct folio *new, struct folio *old)
 	put_page_tag_ref(handle_new);
 }
 
+static void remove_allocinfo_file(struct work_struct *work)
+{
+	remove_proc_entry(ALLOCINFO_FILE_NAME, NULL);
+}
+
+static DECLARE_WORK(remove_allocinfo_work, remove_allocinfo_file);
+
 static void shutdown_mem_profiling(bool remove_file)
 {
 	if (mem_alloc_profiling_enabled())
@@ -600,7 +607,7 @@ static void shutdown_mem_profiling(bool remove_file)
 		return;
 
 	if (remove_file)
-		remove_proc_entry(ALLOCINFO_FILE_NAME, NULL);
+		schedule_work(&remove_allocinfo_work);
 	mem_profiling_support = false;
 }
 
@@ -848,6 +855,14 @@ static void *reserve_module_tags(struct module *mod, unsigned long size,
 		return ERR_PTR(-EINVAL);
 
 	/*
+	 * Profiling may have been disabled by a concurrent module load.
+	 * Return -EAGAIN so the loader retries with profiling off, laying
+	 * the section out as ordinary module memory.
+	 */
+	if (!mem_profiling_support)
+		return ERR_PTR(-EAGAIN);
+
+	/*
 	 * align is always power of 2, so we can use IS_ALIGNED and ALIGN.
 	 * align 0 or 1 means no alignment, to simplify set to 1.
 	 */
@@ -975,9 +990,13 @@ static int load_module(struct module *mod, struct codetag *start, struct codetag
 	struct alloc_tag *stop_tag;
 	struct alloc_tag *tag;
 
+	/* Profiling disabled: load the module but exclude its tags. */
+	if (!mem_profiling_support)
+		return CODETAG_MODULE_EXCLUDED;
+
 	/* percpu counters for core allocations are already statically allocated */
 	if (!mod)
-		return 0;
+		return CODETAG_MODULE_LOAD;
 
 	start_tag = ct_to_alloc_tag(start);
 	stop_tag = ct_to_alloc_tag(stop);
@@ -1000,7 +1019,7 @@ static int load_module(struct module *mod, struct codetag *start, struct codetag
 		 */
 		kmemleak_ignore_percpu(tag->counters);
 	}
-	return 0;
+	return CODETAG_MODULE_LOAD;
 }
 
 static void replace_module(struct module *mod, struct module *new_mod)
