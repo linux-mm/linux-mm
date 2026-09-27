@@ -21,13 +21,14 @@ static inline bool mm_is_user(struct mm_struct *mm)
 	return mm != &init_mm;
 }
 
-static inline pte_t *contpte_align_down(pte_t *ptep)
+static inline hw_pte_t *contpte_align_down(hw_pte_t *ptep)
 {
 	return PTR_ALIGN_DOWN(ptep, sizeof(*ptep) * CONT_PTES);
 }
 
-static inline pte_t *contpte_align_addr_ptep(unsigned long *start,
-					     unsigned long *end, pte_t *ptep,
+static inline hw_pte_t *contpte_align_addr_ptep(unsigned long *start,
+					     unsigned long *end,
+					     hw_pte_t *ptep,
 					     unsigned int nr)
 {
 	/*
@@ -47,7 +48,7 @@ static inline pte_t *contpte_align_addr_ptep(unsigned long *start,
 }
 
 static void contpte_try_unfold_partial(struct mm_struct *mm, unsigned long addr,
-					pte_t *ptep, unsigned int nr)
+					hw_pte_t *ptep, unsigned int nr)
 {
 	/*
 	 * Unfold any partially covered contpte block at the beginning and end
@@ -59,7 +60,7 @@ static void contpte_try_unfold_partial(struct mm_struct *mm, unsigned long addr,
 
 	if (ptep + nr != contpte_align_down(ptep + nr)) {
 		unsigned long last_addr = addr + PAGE_SIZE * (nr - 1);
-		pte_t *last_ptep = ptep + nr - 1;
+		hw_pte_t *last_ptep = ptep + nr - 1;
 
 		contpte_try_unfold(mm, last_addr, last_ptep,
 				   __ptep_get(last_ptep));
@@ -67,11 +68,11 @@ static void contpte_try_unfold_partial(struct mm_struct *mm, unsigned long addr,
 }
 
 static void contpte_convert(struct mm_struct *mm, unsigned long addr,
-			    pte_t *ptep, pte_t pte)
+			    hw_pte_t *ptep, pte_t pte)
 {
 	struct vm_area_struct vma = TLB_FLUSH_VMA(mm, 0);
 	unsigned long start_addr;
-	pte_t *start_ptep;
+	hw_pte_t *start_ptep;
 	int i;
 
 	start_ptep = ptep = contpte_align_down(ptep);
@@ -227,7 +228,7 @@ static void contpte_convert(struct mm_struct *mm, unsigned long addr,
 }
 
 void __contpte_try_fold(struct mm_struct *mm, unsigned long addr,
-			pte_t *ptep, pte_t pte)
+			hw_pte_t *ptep, pte_t pte)
 {
 	/*
 	 * We have already checked that the virtual and pysical addresses are
@@ -253,7 +254,7 @@ void __contpte_try_fold(struct mm_struct *mm, unsigned long addr,
 	struct folio *folio;
 	struct page *page;
 	unsigned long pfn;
-	pte_t *orig_ptep;
+	hw_pte_t *orig_ptep;
 	pgprot_t prot;
 
 	int i;
@@ -291,7 +292,7 @@ void __contpte_try_fold(struct mm_struct *mm, unsigned long addr,
 EXPORT_SYMBOL_GPL(__contpte_try_fold);
 
 void __contpte_try_unfold(struct mm_struct *mm, unsigned long addr,
-			pte_t *ptep, pte_t pte)
+			hw_pte_t *ptep, pte_t pte)
 {
 	/*
 	 * We have already checked that the ptes are contiguous in
@@ -305,7 +306,7 @@ void __contpte_try_unfold(struct mm_struct *mm, unsigned long addr,
 }
 EXPORT_SYMBOL_GPL(__contpte_try_unfold);
 
-pte_t contpte_ptep_get(pte_t *ptep, pte_t orig_pte)
+pte_t contpte_ptep_get(hw_pte_t *ptep, pte_t orig_pte)
 {
 	/*
 	 * Gather access/dirty bits, which may be populated in any of the ptes
@@ -362,7 +363,7 @@ static inline bool contpte_is_consistent(pte_t pte, unsigned long pfn,
 			pgprot_val(prot) == pgprot_val(orig_prot);
 }
 
-pte_t contpte_ptep_get_lockless(pte_t *orig_ptep)
+pte_t contpte_ptep_get_lockless(hw_pte_t *orig_ptep)
 {
 	/*
 	 * The ptep_get_lockless() API requires us to read and return *orig_ptep
@@ -384,7 +385,7 @@ pte_t contpte_ptep_get_lockless(pte_t *orig_ptep)
 	pgprot_t orig_prot;
 	unsigned long pfn;
 	pte_t orig_pte;
-	pte_t *ptep;
+	hw_pte_t *ptep;
 	pte_t pte;
 	int i;
 
@@ -445,7 +446,8 @@ retry:
 EXPORT_SYMBOL_GPL(contpte_ptep_get_lockless);
 
 void contpte_set_ptes(struct mm_struct *mm, unsigned long addr,
-					pte_t *ptep, pte_t pte, unsigned int nr)
+					hw_pte_t *ptep, pte_t pte,
+					unsigned int nr)
 {
 	unsigned long next;
 	unsigned long end;
@@ -488,7 +490,7 @@ void contpte_set_ptes(struct mm_struct *mm, unsigned long addr,
 EXPORT_SYMBOL_GPL(contpte_set_ptes);
 
 void contpte_clear_full_ptes(struct mm_struct *mm, unsigned long addr,
-				pte_t *ptep, unsigned int nr, int full)
+				hw_pte_t *ptep, unsigned int nr, int full)
 {
 	contpte_try_unfold_partial(mm, addr, ptep, nr);
 	__clear_full_ptes(mm, addr, ptep, nr, full);
@@ -496,7 +498,7 @@ void contpte_clear_full_ptes(struct mm_struct *mm, unsigned long addr,
 EXPORT_SYMBOL_GPL(contpte_clear_full_ptes);
 
 pte_t contpte_get_and_clear_full_ptes(struct mm_struct *mm,
-				unsigned long addr, pte_t *ptep,
+				unsigned long addr, hw_pte_t *ptep,
 				unsigned int nr, int full)
 {
 	contpte_try_unfold_partial(mm, addr, ptep, nr);
@@ -505,7 +507,7 @@ pte_t contpte_get_and_clear_full_ptes(struct mm_struct *mm,
 EXPORT_SYMBOL_GPL(contpte_get_and_clear_full_ptes);
 
 bool contpte_test_and_clear_young_ptes(struct vm_area_struct *vma,
-		unsigned long addr, pte_t *ptep, unsigned int nr)
+		unsigned long addr, hw_pte_t *ptep, unsigned int nr)
 {
 	/*
 	 * ptep_clear_flush_young() technically requires us to clear the access
@@ -531,7 +533,7 @@ bool contpte_test_and_clear_young_ptes(struct vm_area_struct *vma,
 EXPORT_SYMBOL_GPL(contpte_test_and_clear_young_ptes);
 
 bool contpte_clear_flush_young_ptes(struct vm_area_struct *vma,
-		unsigned long addr, pte_t *ptep, unsigned int nr)
+		unsigned long addr, hw_pte_t *ptep, unsigned int nr)
 {
 	bool young;
 
@@ -554,7 +556,7 @@ bool contpte_clear_flush_young_ptes(struct vm_area_struct *vma,
 EXPORT_SYMBOL_GPL(contpte_clear_flush_young_ptes);
 
 void contpte_wrprotect_ptes(struct mm_struct *mm, unsigned long addr,
-					pte_t *ptep, unsigned int nr)
+					hw_pte_t *ptep, unsigned int nr)
 {
 	/*
 	 * If wrprotecting an entire contig range, we can avoid unfolding. Just
@@ -572,7 +574,7 @@ void contpte_wrprotect_ptes(struct mm_struct *mm, unsigned long addr,
 EXPORT_SYMBOL_GPL(contpte_wrprotect_ptes);
 
 void contpte_clear_young_dirty_ptes(struct vm_area_struct *vma,
-				    unsigned long addr, pte_t *ptep,
+				    unsigned long addr, hw_pte_t *ptep,
 				    unsigned int nr, cydp_t flags)
 {
 	/*
@@ -593,9 +595,10 @@ void contpte_clear_young_dirty_ptes(struct vm_area_struct *vma,
 }
 EXPORT_SYMBOL_GPL(contpte_clear_young_dirty_ptes);
 
-static bool contpte_all_subptes_match_access_flags(pte_t *ptep, pte_t entry)
+static bool contpte_all_subptes_match_access_flags(hw_pte_t *ptep,
+						   pte_t entry)
 {
-	pte_t *cont_ptep = contpte_align_down(ptep);
+	hw_pte_t *cont_ptep = contpte_align_down(ptep);
 	/*
 	 * PFNs differ per sub-PTE. Match only bits consumed by
 	 * __ptep_set_access_flags(): AF, DIRTY and write permission.
@@ -615,7 +618,7 @@ static bool contpte_all_subptes_match_access_flags(pte_t *ptep, pte_t entry)
 }
 
 int contpte_ptep_set_access_flags(struct vm_area_struct *vma,
-					unsigned long addr, pte_t *ptep,
+					unsigned long addr, hw_pte_t *ptep,
 					pte_t entry, int dirty)
 {
 	unsigned long start_addr;

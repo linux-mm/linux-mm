@@ -34,8 +34,8 @@ static void *trans_alloc(struct trans_pgd_info *info)
 static int copy_pte(struct trans_pgd_info *info, pmd_t *dst_pmdp,
 		    pmd_t *src_pmdp, unsigned long start, unsigned long end)
 {
-	pte_t *src_ptep;
-	pte_t *dst_ptep;
+	hw_pte_t *src_ptep;
+	hw_pte_t *dst_ptep;
 	unsigned long addr = start;
 
 	dst_ptep = trans_alloc(info);
