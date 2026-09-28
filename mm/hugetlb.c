@@ -32,6 +32,7 @@
 #include <linux/numa.h>
 #include <linux/llist.h>
 #include <linux/cma.h>
+#include <linux/crash_memaction.h>
 #include <linux/migrate.h>
 #include <linux/nospec.h>
 #include <linux/delayacct.h>
@@ -1282,6 +1283,9 @@ static struct folio *dequeue_hugetlb_folio_node_exact(struct hstate *h,
 		folio_clear_hugetlb_freed(folio);
 		h->free_huge_pages--;
 		h->free_huge_pages_node[nid]--;
+
+		crash_memaction_unmark_pfns(folio_pfn(folio),
+					    folio_nr_pages(folio));
 		return folio;
 	}
 
