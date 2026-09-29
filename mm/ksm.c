@@ -1115,7 +1115,8 @@ struct ksm_stable_node *folio_stable_node(const struct folio *folio)
 static inline void folio_set_stable_node(struct folio *folio,
 					 struct ksm_stable_node *stable_node)
 {
-	VM_WARN_ON_FOLIO(folio_test_anon(folio) && PageAnonExclusive(&folio->page), folio);
+	VM_WARN_ON_FOLIO(folio_test_anon(folio) &&
+			 PageAnonExclusive(folio_page(folio, 0)), folio);
 	WRITE_ONCE(folio->mapping,
 		   (void *)((unsigned long)stable_node | FOLIO_MAPPING_KSM));
 }
@@ -1327,7 +1328,7 @@ static int write_protect_page(struct vm_area_struct *vma, struct folio *folio,
 	if (unlikely(!pte_present(entry)))
 		goto out_unlock;
 
-	anon_exclusive = PageAnonExclusive(&folio->page);
+	anon_exclusive = PageAnonExclusive(folio_page(folio, 0));
 	if (pte_write(entry) || pte_dirty(entry) ||
 	    anon_exclusive || mm_tlb_flush_pending(mm)) {
 		swapped = folio_test_swapcache(folio);
@@ -1358,7 +1359,8 @@ static int write_protect_page(struct vm_area_struct *vma, struct folio *folio,
 
 		/* See folio_try_share_anon_rmap_pte(): clear PTE first. */
 		if (anon_exclusive &&
-		    folio_try_share_anon_rmap_pte(folio, &folio->page)) {
+		    folio_try_share_anon_rmap_pte(folio,
+						  folio_page(folio, 0))) {
 			set_pte_at(mm, pvmw.address, pvmw.pte, entry);
 			goto out_unlock;
 		}
@@ -1896,7 +1898,7 @@ again:
 			goto again;
 		}
 
-		ret = memcmp_pages(page, &tree_folio->page);
+		ret = memcmp_pages(page, folio_page(tree_folio, 0));
 		folio_put(tree_folio);
 
 		parent = *new;
@@ -2103,7 +2105,8 @@ again:
 			goto again;
 		}
 
-		ret = memcmp_pages(&kfolio->page, &tree_folio->page);
+		ret = memcmp_pages(folio_page(kfolio, 0),
+				   folio_page(tree_folio, 0));
 		folio_put(tree_folio);
 
 		parent = *new;
@@ -2336,7 +2339,8 @@ static void cmp_and_merge_page(struct page *page, struct ksm_rmap_item *rmap_ite
 		if (kfolio == ERR_PTR(-EBUSY))
 			return;
 
-		err = try_to_merge_with_ksm_page(rmap_item, page, &kfolio->page);
+		err = try_to_merge_with_ksm_page(rmap_item, page,
+						 folio_page(kfolio, 0));
 		if (!err) {
 			/*
 			 * The page was successfully merged:
