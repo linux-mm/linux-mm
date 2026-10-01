@@ -17,10 +17,46 @@
 #define MAX_LINE_LENGTH 500
 #define PAGEMAP_PATH "/proc/self/pagemap"
 #define KPAGEFLAGS_PATH "/proc/kpageflags"
-#define MAX_NR_ORDERS 20
 
 unsigned int __page_size;
 unsigned int __page_shift;
+
+/*
+ * A pagemap file reads the mm of the process that opened it, so a child
+ * inherits a descriptor that describes its parent.  Open a new one whenever
+ * the pid changed since the last open.
+ */
+static int pagemap_fd_get(void)
+{
+	static int fd = -1;
+	static pid_t pid;
+
+	if (fd >= 0 && pid == getpid())
+		return fd;
+
+	if (fd >= 0)
+		close(fd);
+
+	fd = open(PAGEMAP_PATH, O_RDONLY);
+	if (fd < 0)
+		ksft_exit_fail_msg("open pagemap fail\n");
+	pid = getpid();
+
+	return fd;
+}
+
+static int kpageflags_fd_get(void)
+{
+	static int fd = -1;
+
+	if (fd < 0) {
+		fd = open(KPAGEFLAGS_PATH, O_RDONLY);
+		if (fd < 0)
+			ksft_exit_fail_msg("open kpageflags fail\n");
+	}
+
+	return fd;
+}
 
 uint64_t pagemap_get_entry(int fd, char *start)
 {
@@ -157,9 +193,13 @@ bool check_for_pattern(FILE *fp, const char *pattern, char *buf, size_t len)
 
 uint64_t read_pmd_pagesize(void)
 {
+	static uint64_t pmd_pagesize;
 	int fd;
 	char buf[20];
 	ssize_t num_read;
+
+	if (pmd_pagesize)
+		return pmd_pagesize;
 
 	fd = open(PMD_SIZE_FILE_PATH, O_RDONLY);
 	if (fd == -1)
@@ -173,7 +213,8 @@ uint64_t read_pmd_pagesize(void)
 	buf[num_read] = '\0';
 	close(fd);
 
-	return strtoul(buf, NULL, 10);
+	pmd_pagesize = strtoul(buf, NULL, 10);
+	return pmd_pagesize;
 }
 
 unsigned long rss_anon(void)
@@ -195,125 +236,6 @@ unsigned long rss_anon(void)
 err_out:
 	fclose(fp);
 	return rss_anon;
-}
-
-static int vaddr_pageflags_get(char *vaddr, int pagemap_fd, int kpageflags_fd,
-		uint64_t *flags)
-{
-	unsigned long pfn;
-
-	pfn = pagemap_get_pfn(pagemap_fd, vaddr);
-
-	/* non-present PFN */
-	if (pfn == -1UL)
-		return 1;
-
-	if (pageflags_get(pfn, kpageflags_fd, flags))
-		return -1;
-
-	return 0;
-}
-
-/*
- * gather_folio_orders - scan through [vaddr_start, len) and record
- * folio orders
- *
- * @vaddr_start: start vaddr
- * @len: range length
- * @pagemap_fd: file descriptor to /proc/<pid>/pagemap
- * @kpageflags_fd: file descriptor to /proc/kpageflags
- * @orders: output folio order array
- * @nr_orders: folio order array size
- *
- * gather_folio_orders() scan through [vaddr_start, len) and check
- * all folios within the range and record their orders. All order-0 pages will
- * be recorded. Non-present vaddr is skipped.
- *
- * Return: 0 - no error, -1 - unhandled cases
- */
-int gather_folio_orders(char *vaddr_start, size_t len,
-		int pagemap_fd, int kpageflags_fd, int orders[], int nr_orders)
-{
-	uint64_t page_flags = 0;
-	int cur_order = -1;
-	char *vaddr;
-
-	if (pagemap_fd == -1 || kpageflags_fd == -1)
-		return -1;
-	if (!orders)
-		return -1;
-	if (nr_orders <= 0)
-		return -1;
-
-	for (vaddr = vaddr_start; vaddr < vaddr_start + len;) {
-		char *next_folio_vaddr;
-		int status;
-
-		status = vaddr_pageflags_get(vaddr, pagemap_fd, kpageflags_fd,
-				&page_flags);
-		if (status < 0)
-			return -1;
-
-		/* skip non present vaddr */
-		if (status == 1) {
-			vaddr += psize();
-			continue;
-		}
-
-		/* all order-0 pages with possible false postive (non folio) */
-		if (!(page_flags & (KPF_COMPOUND_HEAD | KPF_COMPOUND_TAIL))) {
-			orders[0]++;
-			vaddr += psize();
-			continue;
-		}
-
-		/* skip non thp compound pages */
-		if (!(page_flags & KPF_THP)) {
-			vaddr += psize();
-			continue;
-		}
-
-		/* vpn points to part of a THP at this point */
-		if (page_flags & KPF_COMPOUND_HEAD)
-			cur_order = 1;
-		else {
-			vaddr += psize();
-			continue;
-		}
-
-		next_folio_vaddr = vaddr + (1UL << (cur_order + pshift()));
-
-		if (next_folio_vaddr >= vaddr_start + len)
-			break;
-
-		while ((status = vaddr_pageflags_get(next_folio_vaddr,
-						     pagemap_fd, kpageflags_fd,
-						     &page_flags)) >= 0) {
-			/*
-			 * non present vaddr, next compound head page, or
-			 * order-0 page
-			 */
-			if (status == 1 ||
-			    (page_flags & KPF_COMPOUND_HEAD) ||
-			    !(page_flags & (KPF_COMPOUND_HEAD | KPF_COMPOUND_TAIL))) {
-				if (cur_order < nr_orders) {
-					orders[cur_order]++;
-					cur_order = -1;
-					vaddr = next_folio_vaddr;
-				}
-				break;
-			}
-
-			cur_order++;
-			next_folio_vaddr = vaddr + (1UL << (cur_order + pshift()));
-		}
-
-		if (status < 0)
-			return status;
-	}
-	if (cur_order > 0 && cur_order < nr_orders)
-		orders[cur_order]++;
-	return 0;
 }
 
 char *__get_smap_entry(void *addr, const char *pattern, char *buf, size_t len)
@@ -351,34 +273,68 @@ err_out:
 	return entry;
 }
 
-static bool check_large_folios(int pagemap_fd, int kpageflags_fd,
-		void *addr, size_t len, int nr_hpages,
-		uint64_t hpage_size)
+/**
+ * is_range_backed_by_order() - check that a range is backed by @order folios
+ * @start: start of the range, a multiple of the folio size
+ * @len: length of the range in bytes, a multiple of the folio size
+ * @order: the folio order to check for
+ *
+ * Every folio-sized, folio-aligned part of the range must map one folio of
+ * @order, head to tail, with the head at the start of the part.  A part
+ * backed by several smaller folios fails, and so does a folio mapped off
+ * its natural alignment.
+ *
+ * Returns: true if the whole range is backed that way, false otherwise.
+ */
+static bool is_range_backed_by_order(char *start, size_t len, int order)
 {
-	int order = 0, pagesize = getpagesize();
-	unsigned int nr_pages = hpage_size / pagesize;
-	int orders[MAX_NR_ORDERS], status;
-	bool ret = false;
+	const unsigned long nr_pages = 1UL << order;
+	const size_t folio_size = nr_pages * psize();
+	const int pagemap_fd = pagemap_fd_get();
+	char *vaddr;
 
-	if (!nr_pages)
-		ksft_exit_fail_msg("invalid hugepage size\n");
+	if ((uintptr_t)start % folio_size || len % folio_size)
+		return false;
 
-	order = 31 - __builtin_clz(nr_pages);
-	if (!order || order >= MAX_NR_ORDERS)
-		ksft_exit_fail_msg("invalid order\n");
+	for (vaddr = start; vaddr < start + len; vaddr += folio_size) {
+		const unsigned long pfn = pagemap_get_pfn(pagemap_fd, vaddr);
+		unsigned long i;
 
-	memset(orders, 0, sizeof(int) * MAX_NR_ORDERS);
+		/* Not present, or a tail page */
+		if (pfn == -1UL || pfn % nr_pages)
+			return false;
 
-	status = gather_folio_orders(addr, len, pagemap_fd,
-			kpageflags_fd, orders, MAX_NR_ORDERS);
-	if (status)
-		goto out;
+		for (i = 1; i < nr_pages; i++) {
+			char *page = vaddr + i * psize();
 
-	if (orders[order] == nr_hpages)
-		ret = true;
+			if (pagemap_get_pfn(pagemap_fd, page) != pfn + i)
+				return false;
+		}
 
-out:
-	return ret;
+		if (!is_backed_by_folio(vaddr, order))
+			return false;
+	}
+
+	return true;
+}
+
+/*
+ * How many hpage_size-aligned windows of the range are one folio of that
+ * size each, with the folio's head at the window start.  A folio mapped off
+ * its alignment or split across two windows counts for neither.
+ */
+static int count_windows_at_order(char *start, size_t len, uint64_t hpage_size)
+{
+	const int order = sz2ord(hpage_size, psize());
+	int nr_windows = 0;
+	char *addr;
+
+	for (addr = start; addr + hpage_size <= start + len; addr += hpage_size) {
+		if (is_range_backed_by_order(addr, hpage_size, order))
+			nr_windows++;
+	}
+
+	return nr_windows;
 }
 
 enum check_huge_type {
@@ -403,8 +359,7 @@ static bool check_huge_type(uint64_t categories, enum check_huge_type type)
 static bool __check_huge(void *addr, size_t len, int nr_hpages,
 		uint64_t hpage_size, enum check_huge_type type)
 {
-	bool ret = false;
-	int pagemap_fd, kpageflags_fd;
+	int pagemap_fd;
 	int nr_pmd_mappings = 0;
 	uint64_t pmd_pagesize, scan_mapping_size;
 	uint64_t categories;
@@ -422,42 +377,31 @@ static bool __check_huge(void *addr, size_t len, int nr_hpages,
 	/* Some mTHP tests check a partially populated PMD-sized range. */
 	allow_nonpresent = (uint64_t)nr_hpages * hpage_size < len;
 
-	pagemap_fd = open(PAGEMAP_PATH, O_RDONLY);
-	if (pagemap_fd < 0)
-		ksft_exit_fail_msg("open pagemap fail\n");
-
-	kpageflags_fd = open(KPAGEFLAGS_PATH, O_RDONLY);
-	if (kpageflags_fd < 0)
-		ksft_exit_fail_msg("open kpageflags fail\n");
+	pagemap_fd = pagemap_fd_get();
 
 	if (!check_pmd_mapping &&
-	    !check_large_folios(pagemap_fd, kpageflags_fd,
-				addr, len, nr_hpages, hpage_size))
-		goto out;
+	    nr_hpages != count_windows_at_order(start, len, hpage_size))
+		return false;
 
 	for (; start < end; start += scan_mapping_size) {
 		categories = pagemap_scan_get_categories(pagemap_fd, start);
 		pfn = pagemap_get_pfn(pagemap_fd, start);
 		if (pfn == -1UL) {
 			if (!allow_nonpresent)
-				goto out;
+				return false;
 			else
 				continue;
 		}
 		if (check_pmd_mapping && (categories & PAGE_IS_HUGE))
 			nr_pmd_mappings++;
 		if (!check_huge_type(categories, type))
-			goto out;
+			return false;
 	}
 
 	if (check_pmd_mapping && (nr_pmd_mappings != nr_hpages))
-		goto out;
-	ret = true;
+		return false;
 
-out:
-	close(pagemap_fd);
-	close(kpageflags_fd);
-	return ret;
+	return true;
 }
 
 bool check_huge_anon(void *addr, size_t len, int nr_hpages, uint64_t hpage_size)
@@ -511,12 +455,13 @@ int pageflags_get(unsigned long pfn, int kpageflags_fd, uint64_t *flags)
 	return 0;
 }
 
-bool is_backed_by_folio(char *vaddr, int order, int pagemap_fd,
-			int kpageflags_fd)
+bool is_backed_by_folio(char *vaddr, int order)
 {
 	const uint64_t folio_head_flags = KPF_THP | KPF_COMPOUND_HEAD;
 	const uint64_t folio_tail_flags = KPF_THP | KPF_COMPOUND_TAIL;
 	const unsigned long nr_pages = 1UL << order;
+	const int pagemap_fd = pagemap_fd_get();
+	const int kpageflags_fd = kpageflags_fd_get();
 	unsigned long pfn_head;
 	uint64_t pfn_flags;
 	unsigned long pfn;
@@ -570,53 +515,6 @@ bool is_backed_by_folio(char *vaddr, int order, int pagemap_fd,
 	return (pfn_flags & folio_tail_flags) != folio_tail_flags;
 fail:
 	ksft_exit_fail_msg("Failed to get folio info\n");
-}
-
-/**
- * is_range_backed_by_order() - check that a range is backed by @order folios
- * @start: start of the range, a multiple of the folio size
- * @len: length of the range in bytes, a multiple of the folio size
- * @order: the folio order to check for
- * @pagemap_fd: open /proc/<pid>/pagemap of the range's owner
- * @kpageflags_fd: open /proc/kpageflags
- *
- * Every folio-sized, folio-aligned part of the range must map one folio of
- * @order, head to tail, with the head at the start of the part.  A part
- * backed by several smaller folios fails, and so does a folio mapped off
- * its natural alignment.
- *
- * Returns: true if the whole range is backed that way, false otherwise.
- */
-bool is_range_backed_by_order(char *start, size_t len, int order,
-			      int pagemap_fd, int kpageflags_fd)
-{
-	const unsigned long nr_pages = 1UL << order;
-	const size_t folio_size = nr_pages * psize();
-	char *vaddr;
-
-	if ((uintptr_t)start % folio_size || len % folio_size)
-		return false;
-
-	for (vaddr = start; vaddr < start + len; vaddr += folio_size) {
-		const unsigned long pfn = pagemap_get_pfn(pagemap_fd, vaddr);
-		unsigned long i;
-
-		/* Not present, or a tail page */
-		if (pfn == -1UL || pfn % nr_pages)
-			return false;
-
-		for (i = 1; i < nr_pages; i++) {
-			char *page = vaddr + i * psize();
-
-			if (pagemap_get_pfn(pagemap_fd, page) != pfn + i)
-				return false;
-		}
-
-		if (!is_backed_by_folio(vaddr, order, pagemap_fd, kpageflags_fd))
-			return false;
-	}
-
-	return true;
 }
 
 #define TRACEFS_ROOT "/sys/kernel/tracing"
