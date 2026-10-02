@@ -38,6 +38,7 @@ struct file;
 struct inode;
 struct dentry;
 struct task_struct;
+struct cred;
 struct user_namespace;
 struct mnt_idmap;
 
@@ -112,6 +113,11 @@ static inline bool cap_isidentical(const kernel_cap_t a, const kernel_cap_t b)
 static inline bool cap_issubset(const kernel_cap_t a, const kernel_cap_t set)
 {
 	return !(a.val & ~set.val);
+}
+
+static inline kernel_cap_t mk_kernel_cap(u32 low, u32 high)
+{
+	return (kernel_cap_t) { (low | ((u64)high << 32)) & CAP_VALID_MASK };
 }
 
 /* Used to decide between falling back on the old suser() or fsuser(). */
@@ -192,6 +198,10 @@ bool capable_wrt_inode_uidgid(struct mnt_idmap *idmap,
 			      const struct inode *inode, int cap);
 extern bool file_ns_capable(const struct file *file, struct user_namespace *ns, int cap);
 extern bool ptracer_capable(struct task_struct *tsk, struct user_namespace *ns);
+extern kernel_cap_t cap_bset_effective(const struct task_struct *task,
+				       const struct cred *cred);
+extern void cap_bset_drop_fork(struct task_struct *p);
+
 static inline bool perfmon_capable(void)
 {
 	return capable(CAP_PERFMON) || capable(CAP_SYS_ADMIN);
