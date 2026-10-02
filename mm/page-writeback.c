@@ -2850,20 +2850,12 @@ void __folio_cancel_dirty(struct folio *folio)
 EXPORT_SYMBOL(__folio_cancel_dirty);
 
 /*
- * Clear a folio's dirty flag, while caring for dirty memory accounting.
- * Returns true if the folio was previously dirty.
- *
- * This is for preparing to put the folio under writeout.  We leave
- * the folio tagged as dirty in the xarray so that a concurrent
- * write-for-sync can discover it via a PAGECACHE_TAG_DIRTY walk.
- * The ->writepage implementation will run either folio_start_writeback()
- * or folio_mark_dirty(), at which stage we bring the folio's dirty flag
- * and xarray dirty tag back into sync.
- *
- * This incoherency between the folio's dirty flag and xarray tag is
- * unfortunate, but it only exists while the folio is locked.
+ * Internal helper to take care of clearing dirty bit on a folio in preparation
+ * of an IO. For some cases we might not want to do mkclean, eg, if we've
+ * already taken care of it, hence pass the should_mkclean flag to indicate if
+ * its needed.
  */
-bool folio_clear_dirty_for_io(struct folio *folio)
+static bool __folio_clear_dirty_for_io(struct folio *folio, bool should_mkclean)
 {
 	struct address_space *mapping = folio_mapping(folio);
 	bool ret = false;
@@ -2900,7 +2892,7 @@ bool folio_clear_dirty_for_io(struct folio *folio)
 		 * as a serialization point for all the different
 		 * threads doing their things.
 		 */
-		if (folio_mkclean(folio))
+		if (should_mkclean && folio_mkclean(folio))
 			folio_mark_dirty(folio);
 		/*
 		 * We carefully synchronise fault handlers against
@@ -2925,7 +2917,36 @@ bool folio_clear_dirty_for_io(struct folio *folio)
 	}
 	return folio_test_clear_dirty(folio);
 }
+
+/*
+ * Clear a folio's dirty flag, while caring for dirty memory accounting.
+ * Returns true if the folio was previously dirty.
+ *
+ * This is for preparing to put the folio under writeout.  We leave
+ * the folio tagged as dirty in the xarray so that a concurrent
+ * write-for-sync can discover it via a PAGECACHE_TAG_DIRTY walk.
+ * The ->writepage implementation will run either folio_start_writeback()
+ * or folio_mark_dirty(), at which stage we bring the folio's dirty flag
+ * and xarray dirty tag back into sync.
+ *
+ * This incoherency between the folio's dirty flag and xarray tag is
+ * unfortunate, but it only exists while the folio is locked.
+ */
+bool folio_clear_dirty_for_io(struct folio *folio)
+{
+	return __folio_clear_dirty_for_io(folio, true);
+}
 EXPORT_SYMBOL(folio_clear_dirty_for_io);
+
+/*
+ * Clear folio dirty in preparation of writethrough. Note that for writethrough
+ * we have already done folkio_mkclean so we avoid it here
+ */
+bool folio_clear_dirty_for_writethrough(struct folio *folio)
+{
+	return __folio_clear_dirty_for_io(folio, false);
+}
+EXPORT_SYMBOL(folio_clear_dirty_for_writethrough);
 
 static void wb_inode_writeback_start(struct bdi_writeback *wb)
 {
@@ -2965,11 +2986,18 @@ bool __folio_end_writeback(struct folio *folio)
 		__xa_clear_mark(&mapping->i_pages, folio->index,
 					PAGECACHE_TAG_WRITEBACK);
 
+		/*
+		 * With RWF_WRITETHROUGH, we might not have a writeback
+		 * associated with the inode
+		 */
 		wb = inode_to_wb(inode);
-		wb_stat_mod(wb, WB_WRITEBACK, -nr);
-		__wb_writeout_add(wb, nr);
+		if (wb) {
+			wb_stat_mod(wb, WB_WRITEBACK, -nr);
+			__wb_writeout_add(wb, nr);
+		}
 		if (!mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK)) {
-			wb_inode_writeback_end(wb);
+			if (wb)
+				wb_inode_writeback_end(wb);
 			if (mapping->host)
 				sb_clear_inode_writeback(mapping->host);
 		}
@@ -3009,10 +3037,17 @@ void __folio_start_writeback(struct folio *folio, bool keep_write)
 		on_wblist = mapping_tagged(mapping, PAGECACHE_TAG_WRITEBACK);
 
 		xas_set_mark(&xas, PAGECACHE_TAG_WRITEBACK);
+
+		/*
+		 * With RWF_WRITETHROUGH, we might not have a writeback
+		 * associated with the inode
+		 */
 		wb = inode_to_wb(inode);
-		wb_stat_mod(wb, WB_WRITEBACK, nr);
+		if (wb)
+			wb_stat_mod(wb, WB_WRITEBACK, nr);
 		if (!on_wblist) {
-			wb_inode_writeback_start(wb);
+			if (wb)
+				wb_inode_writeback_start(wb);
 			/*
 			 * We can come through here when swapping anonymous
 			 * folios, so we don't necessarily have an inode to
