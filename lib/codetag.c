@@ -240,7 +240,9 @@ static int codetag_module_init(struct codetag_type *cttype, struct module *mod)
 
 	if (err < 0) {
 		kfree(cmod);
-		return err;
+		/* -EOPNOTSUPP means we can load the module without its tag. */
+		if (err != -EOPNOTSUPP)
+			return err;
 	}
 
 	return 0;
@@ -388,7 +390,11 @@ void codetag_unload_module(struct module *mod)
 			++cttype->content_id;
 		}
 		up_write(&cttype->mod_lock);
-		if (found && cttype->desc.free_section_mem)
+		/*
+		 * A module whose module_load() returned -EOPNOTSUPP is not
+		 * in the idr but may still hold reserved section memory.
+		 */
+		if (cttype->desc.free_section_mem)
 			cttype->desc.free_section_mem(mod, true);
 	}
 	mutex_unlock(&codetag_lock);
@@ -422,4 +428,30 @@ codetag_register_type(const struct codetag_type_desc *desc)
 	mutex_unlock(&codetag_lock);
 
 	return cttype;
+}
+
+/**
+ * codetag_unregister_type - unregister a codetag type
+ * @cttype: the codetag type to unregister
+ *
+ * Undo codetag_register_type() and free @cttype. The caller must make
+ * sure no lockless reader still uses @cttype, e.g. clear the pointer
+ * to it and wait for an RCU grace period first.
+ */
+void __init codetag_unregister_type(struct codetag_type *cttype)
+{
+	struct codetag_module *cmod;
+	unsigned long id, tmp;
+
+	mutex_lock(&codetag_lock);
+	list_del(&cttype->link);
+	mutex_unlock(&codetag_lock);
+
+	down_write(&cttype->mod_lock);
+	idr_for_each_entry_ul(&cttype->mod_idr, cmod, tmp, id)
+		kfree(cmod);
+	idr_destroy(&cttype->mod_idr);
+	up_write(&cttype->mod_lock);
+
+	kfree(cttype);
 }
