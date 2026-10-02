@@ -1035,6 +1035,8 @@ static int zswap_writeback_entry(struct zswap_entry *entry,
 
 	folio_clear_active(folio);
 
+	folio_clear_active(folio);
+
 	/*
 	 * folio is locked, and the swapcache is now secured against
 	 * concurrent swapping to and from the slot, and concurrent
