@@ -110,6 +110,7 @@ bool hibernation_available(void)
 {
 	return nohibernate == 0 &&
 		!security_locked_down(LOCKDOWN_HIBERNATION) &&
+		!debug_pagealloc_enabled() &&
 		!secretmem_active() && !cxl_mem_active();
 }
 
@@ -420,6 +421,11 @@ int hibernation_snapshot(int platform_mode)
 	error = freeze_kernel_threads();
 	if (error)
 		goto Cleanup;
+
+	if (!hibernation_available()) {
+		error = -EBUSY;
+		goto Thaw;
+	}
 
 	if (hibernation_test(TEST_FREEZER)) {
 
