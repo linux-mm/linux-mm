@@ -232,7 +232,14 @@ void notrace __sanitizer_cov_trace_pc(void)
 EXPORT_SYMBOL(__sanitizer_cov_trace_pc);
 
 #ifdef CONFIG_KCOV_ENABLE_COMPARISONS
-static void notrace write_comp_data(u64 type, u64 arg1, u64 arg2, u64 ip)
+/*
+ * Mainline kcov comparison writer: appends to the task's own kcov buffer, and
+ * only in KCOV_MODE_TRACE_CMP. The fan-out that also feeds the kcov-dataflow
+ * buffer lives in kcov_trace_cmp() in <linux/kcov.h>, so kcov.c never references
+ * the dataflow side itself. This writer is only non-static so that header helper
+ * (which the cmp callbacks below call) can reach it.
+ */
+void notrace write_comp_data(u64 type, u64 arg1, u64 arg2, u64 ip)
 {
 	struct task_struct *t;
 	u64 *area;
@@ -267,55 +274,59 @@ static void notrace write_comp_data(u64 type, u64 arg1, u64 arg2, u64 ip)
 	}
 }
 
+/*
+ * The __sanitizer_cov_trace_cmp*() callbacks stay here in kcov.c (one shared,
+ * compiler-emitted symbol per comparison -- no separate df_cmp symbol, no
+ * compiler change). Each routes its operand pair through kcov_trace_cmp()
+ * (defined in <linux/kcov.h>), which records into mainline kcov and, when this
+ * task has a dataflow session, into kcov-dataflow too. kcov.c never names the
+ * dataflow side; that fan-out lives entirely in the header.
+ */
 void notrace __sanitizer_cov_trace_cmp1(u8 arg1, u8 arg2)
 {
-	write_comp_data(KCOV_CMP_SIZE(0), arg1, arg2, _RET_IP_);
+	kcov_trace_cmp(KCOV_CMP_SIZE(0), arg1, arg2, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_cmp1);
 
 void notrace __sanitizer_cov_trace_cmp2(u16 arg1, u16 arg2)
 {
-	write_comp_data(KCOV_CMP_SIZE(1), arg1, arg2, _RET_IP_);
+	kcov_trace_cmp(KCOV_CMP_SIZE(1), arg1, arg2, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_cmp2);
 
 void notrace __sanitizer_cov_trace_cmp4(u32 arg1, u32 arg2)
 {
-	write_comp_data(KCOV_CMP_SIZE(2), arg1, arg2, _RET_IP_);
+	kcov_trace_cmp(KCOV_CMP_SIZE(2), arg1, arg2, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_cmp4);
 
 void notrace __sanitizer_cov_trace_cmp8(kcov_u64 arg1, kcov_u64 arg2)
 {
-	write_comp_data(KCOV_CMP_SIZE(3), arg1, arg2, _RET_IP_);
+	kcov_trace_cmp(KCOV_CMP_SIZE(3), arg1, arg2, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_cmp8);
 
 void notrace __sanitizer_cov_trace_const_cmp1(u8 arg1, u8 arg2)
 {
-	write_comp_data(KCOV_CMP_SIZE(0) | KCOV_CMP_CONST, arg1, arg2,
-			_RET_IP_);
+	kcov_trace_cmp(KCOV_CMP_SIZE(0) | KCOV_CMP_CONST, arg1, arg2, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_const_cmp1);
 
 void notrace __sanitizer_cov_trace_const_cmp2(u16 arg1, u16 arg2)
 {
-	write_comp_data(KCOV_CMP_SIZE(1) | KCOV_CMP_CONST, arg1, arg2,
-			_RET_IP_);
+	kcov_trace_cmp(KCOV_CMP_SIZE(1) | KCOV_CMP_CONST, arg1, arg2, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_const_cmp2);
 
 void notrace __sanitizer_cov_trace_const_cmp4(u32 arg1, u32 arg2)
 {
-	write_comp_data(KCOV_CMP_SIZE(2) | KCOV_CMP_CONST, arg1, arg2,
-			_RET_IP_);
+	kcov_trace_cmp(KCOV_CMP_SIZE(2) | KCOV_CMP_CONST, arg1, arg2, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_const_cmp4);
 
 void notrace __sanitizer_cov_trace_const_cmp8(kcov_u64 arg1, kcov_u64 arg2)
 {
-	write_comp_data(KCOV_CMP_SIZE(3) | KCOV_CMP_CONST, arg1, arg2,
-			_RET_IP_);
+	kcov_trace_cmp(KCOV_CMP_SIZE(3) | KCOV_CMP_CONST, arg1, arg2, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_const_cmp8);
 
@@ -344,7 +355,7 @@ void notrace __sanitizer_cov_trace_switch(kcov_u64 val, void *arg)
 		return;
 	}
 	for (i = 0; i < count; i++)
-		write_comp_data(type, cases[i + 2], val, _RET_IP_);
+		kcov_trace_cmp(type, cases[i + 2], val, _RET_IP_);
 }
 EXPORT_SYMBOL(__sanitizer_cov_trace_switch);
 #endif /* ifdef CONFIG_KCOV_ENABLE_COMPARISONS */
@@ -585,23 +596,6 @@ static void kcov_fault_in_area(struct kcov *kcov)
 
 	for (offset = 0; offset < kcov->size; offset += stride)
 		READ_ONCE(area[offset]);
-}
-
-static inline bool kcov_check_handle(u64 handle, bool common_valid,
-				bool uncommon_valid, bool zero_valid)
-{
-	if (handle & ~(KCOV_SUBSYSTEM_MASK | KCOV_INSTANCE_MASK))
-		return false;
-	switch (handle & KCOV_SUBSYSTEM_MASK) {
-	case KCOV_SUBSYSTEM_COMMON:
-		return (handle & KCOV_INSTANCE_MASK) ?
-			common_valid : zero_valid;
-	case KCOV_SUBSYSTEM_USB:
-		return uncommon_valid;
-	default:
-		return false;
-	}
-	return false;
 }
 
 static int kcov_ioctl_locked(struct kcov *kcov, unsigned int cmd,
