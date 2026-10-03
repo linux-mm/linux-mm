@@ -41,6 +41,24 @@ config PACKING_KUNIT_TEST
 
 	  When in doubt, say N.
 
+config REFCOUNT_TRACE_FINAL_PUT
+	bool "Trace final puts on multiple refcount implementations"
+	depends on TRACEPOINTS && DEBUG_KERNEL
+	help
+	  Trace when a refcount implementation considers refcounted object dead.
+
+	  If unsure, say N.
+
+config REFCOUNT_TRACE_KUNIT_TEST
+	tristate "refcount trace kunit test" if !KUNIT_ALL_TESTS
+	depends on REFCOUNT_TRACE_FINAL_PUT && KUNIT && TRACEPOINTS
+	default KUNIT_ALL_TESTS
+	help
+	  This option enables the KUnit test suite for the refcount_final_put
+	  tracepoint.
+
+	  If unsure, say N.
+
 config BITREVERSE
 	tristate
 	select GENERIC_BITREVERSE if !HAVE_ARCH_BITREVERSE
