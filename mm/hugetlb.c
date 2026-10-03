@@ -3303,17 +3303,6 @@ static void __init prep_and_add_bootmem_folios(struct hstate *h,
 	hugetlb_vmemmap_optimize_bootmem_folios(h, folio_list);
 
 	list_for_each_entry_safe(folio, tmp_f, folio_list, lru) {
-		if (!folio_test_hugetlb_vmemmap_optimized(folio)) {
-			/*
-			 * If HVO fails, initialize all tail struct pages
-			 * We do not worry about potential long lock hold
-			 * time as this is early in boot and there should
-			 * be no contention.
-			 */
-			hugetlb_folio_init_tail_vmemmap(folio, h,
-					HUGETLB_VMEMMAP_RESERVE_PAGES,
-					pages_per_huge_page(h));
-		}
 		hugetlb_bootmem_init_migratetype(folio, h);
 		/* Subdivide locks to achieve better parallel performance */
 		spin_lock_irqsave(&hugetlb_lock, flags);
@@ -3337,6 +3326,7 @@ static void __init gather_bootmem_prealloc_node(unsigned long nid)
 		struct page *page = virt_to_page(m);
 		struct folio *folio = (void *)page;
 		const unsigned long pfn = folio_pfn(folio);
+		bool pre_hvo;
 
 		h = m->hstate;
 		/*
@@ -3350,11 +3340,23 @@ static void __init gather_bootmem_prealloc_node(unsigned long nid)
 		VM_BUG_ON(!hstate_is_gigantic(h));
 		WARN_ON(folio_ref_count(folio) != 1);
 
+		pre_hvo = vmemmap_optimizable_order(pfn_to_section_compound_order(pfn));
+
+		/*
+		 * Pre-HVOed folios have their tail struct pages mirrored from
+		 * the shared tail page, so only the first vmemmap page needs
+		 * initializing. Otherwise, the tail struct pages (marked noinit
+		 * in alloc_bootmem()) must all be initialized now: the folio
+		 * may still be HVOed via the regular remap path (e.g. if the
+		 * architecture could not determine HVO support at bootmem
+		 * allocation time), which expects valid tail pages.
+		 */
 		hugetlb_folio_init_vmemmap(folio, h,
-					   HUGETLB_VMEMMAP_RESERVE_PAGES);
+					   pre_hvo ? HUGETLB_VMEMMAP_RESERVE_PAGES :
+						     pages_per_huge_page(h));
 		init_new_hugetlb_folio(folio);
 
-		if (vmemmap_optimizable_order(pfn_to_section_compound_order(pfn)))
+		if (pre_hvo)
 			folio_set_hugetlb_vmemmap_optimized(folio);
 		section_set_compound_order_range(pfn, folio_nr_pages(folio), 0);
 
