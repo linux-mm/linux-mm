@@ -763,6 +763,21 @@ static int __init hugetlb_vmemmap_init(void)
 	/* HUGETLB_VMEMMAP_RESERVE_SIZE should cover all used struct pages */
 	BUILD_BUG_ON(__NR_USED_SUBPAGE > HUGETLB_VMEMMAP_RESERVE_PAGES);
 
+	/*
+	 * Architectures that need to probe CPU support for HVO have done
+	 * such probing now. arch_hugetlb_vmemmap_optimization_supported()
+	 * will return the correct value.
+	 */
+	if (!arch_hugetlb_vmemmap_optimization_supported()) {
+		if (vmemmap_optimize_enabled)
+			pr_info("vmemmap optimization not supported by hardware\n");
+		/*
+		 * Return early to avoid setting up the hugetlb vmemmap
+		 * sysctls; HVO is not usable.
+		 */
+		return 0;
+	}
+
 	for_each_hstate(h) {
 		if (hugetlb_vmemmap_optimizable(h)) {
 			register_sysctl_init("vm", hugetlb_vmemmap_sysctls);
