@@ -2618,7 +2618,8 @@ static int __init reserved_mem_preserve(void)
 	for (unsigned int i = 0; i < reserved_mem_count; i++, nr_preserved++) {
 		struct reserve_mem_table *map = &reserved_mem_table[i];
 		struct page *page = phys_to_page(map->start);
-		unsigned int nr_pages = map->size >> PAGE_SHIFT;
+		unsigned int nr_pages = PFN_UP(map->start + map->size) -
+					PFN_DOWN(map->start);
 
 		err = kho_preserve_pages(page, nr_pages);
 		if (err)
@@ -2631,7 +2632,8 @@ err_unpreserve:
 	for (unsigned int i = 0; i < nr_preserved; i++) {
 		struct reserve_mem_table *map = &reserved_mem_table[i];
 		struct page *page = phys_to_page(map->start);
-		unsigned int nr_pages = map->size >> PAGE_SHIFT;
+		unsigned int nr_pages = PFN_UP(map->start + map->size) -
+					PFN_DOWN(map->start);
 
 		kho_unpreserve_pages(page, nr_pages);
 	}
