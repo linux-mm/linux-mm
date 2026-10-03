@@ -10,6 +10,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/dmapool.h>
 #include <linux/ethtool_netlink.h>
+#include <linux/dma-pmd.h>
 #include <linux/netdevice.h>
 #include <linux/net_tstamp.h>
 #include <linux/pci.h>
@@ -17,6 +18,7 @@
 #include <linux/ptp_clock_kernel.h>
 #include <linux/u64_stats_sync.h>
 #include <net/page_pool/helpers.h>
+#include <net/tcp.h>
 #include <net/xdp.h>
 
 #include "gve_desc.h"
@@ -258,6 +260,7 @@ struct gve_rx_ring {
 			u32 qpl_copy_pool_mask;
 			u32 qpl_copy_pool_head;
 			struct gve_rx_slot_page_info *qpl_copy_pool;
+			struct dma_pmd_pool *dma_pmd_pool;
 		};
 
 		/* DQO fields. */
@@ -640,6 +643,8 @@ struct gve_tx_ring {
 			};
 		} dqo;
 	} ____cacheline_aligned;
+	void *tx_hdr_bufs;
+	dma_addr_t tx_hdr_bufs_dma;
 	struct netdev_queue *netdev_txq;
 	struct gve_queue_resources *q_resources; /* head and tail pointer idx */
 	struct device *dev;
