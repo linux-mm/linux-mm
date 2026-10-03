@@ -1613,9 +1613,14 @@ static void bulk_vmemmap_restore_error(struct hstate *h,
 		 * page is made a surplus page and removed from the list.
 		 * If are able to restore vmemmap and free one hugetlb page, we
 		 * quit processing the list to retry the bulk operation.
+		 *
+		 * Folios whose vmemmap was never optimized (e.g. because HVO
+		 * failed when they were allocated) can be freed right away;
+		 * remove_hugetlb_folio() has already cleared their hugetlb flag.
 		 */
 		list_for_each_entry_safe(folio, t_folio, folio_list, lru)
-			if (hugetlb_vmemmap_restore_folio(h, folio)) {
+			if (folio_test_hugetlb_vmemmap_optimized(folio) &&
+			    hugetlb_vmemmap_restore_folio(h, folio)) {
 				list_del(&folio->lru);
 				spin_lock_irq(&hugetlb_lock);
 				add_hugetlb_folio(h, folio, true);
