@@ -475,6 +475,15 @@ config ARCH_WANT_OPTIMIZE_DAX_VMEMMAP
 config ARCH_WANT_OPTIMIZE_HUGETLB_VMEMMAP
 	bool
 
+#
+# Select this config option from the architecture Kconfig if HugeTLB vmemmap
+# optimization may only be enabled or disabled on the kernel command line, e.g.
+# because the architecture configures the system at boot based on whether it
+# is enabled. This makes the hugetlb_optimize_vmemmap sysctl read-only.
+#
+config ARCH_WANT_HUGETLB_VMEMMAP_RO_AFTER_INIT
+	bool
+
 config HAVE_MEMBLOCK_PHYS_MAP
 	bool
 
