@@ -428,7 +428,20 @@ static int vmemmap_remap_alloc(const struct hstate *h, struct folio *folio,
 	return ret;
 }
 
-static bool vmemmap_optimize_enabled = IS_ENABLED(CONFIG_HUGETLB_PAGE_OPTIMIZE_VMEMMAP_DEFAULT_ON);
+/*
+ * Architectures selecting CONFIG_ARCH_WANT_HUGETLB_VMEMMAP_RO_AFTER_INIT rely on
+ * HVO only being enabled or disabled on the kernel command line.
+ */
+#ifdef CONFIG_ARCH_WANT_HUGETLB_VMEMMAP_RO_AFTER_INIT
+#define __vmemmap_optimize_enabled_attr	__ro_after_init
+#define HUGETLB_VMEMMAP_SYSCTL_MODE	0444
+#else
+#define __vmemmap_optimize_enabled_attr
+#define HUGETLB_VMEMMAP_SYSCTL_MODE	0644
+#endif
+
+static bool vmemmap_optimize_enabled __vmemmap_optimize_enabled_attr =
+	IS_ENABLED(CONFIG_HUGETLB_PAGE_OPTIMIZE_VMEMMAP_DEFAULT_ON);
 static int __init hugetlb_vmemmap_optimize_param(char *buf)
 {
 	return kstrtobool(buf, &vmemmap_optimize_enabled);
@@ -751,7 +764,7 @@ static const struct ctl_table hugetlb_vmemmap_sysctls[] = {
 		.procname	= "hugetlb_optimize_vmemmap",
 		.data		= &vmemmap_optimize_enabled,
 		.maxlen		= sizeof(vmemmap_optimize_enabled),
-		.mode		= 0644,
+		.mode		= HUGETLB_VMEMMAP_SYSCTL_MODE,
 		.proc_handler	= proc_dobool,
 	},
 };
