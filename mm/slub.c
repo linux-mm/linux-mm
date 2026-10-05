@@ -3181,7 +3181,7 @@ static struct slab_sheaf *barn_get_empty_sheaf(struct node_barn *barn,
 
 	if (likely(allow_spin))
 		spin_lock_irqsave(&barn->lock, flags);
-	else if (!spin_trylock_irqsave(&barn->lock, flags))
+	else if (!spin_trylock_nolock_irqsave(&barn->lock, flags))
 		return NULL;
 
 	if (likely(barn->nr_empty)) {
@@ -3270,7 +3270,7 @@ barn_replace_empty_sheaf(struct node_barn *barn, struct slab_sheaf *empty,
 
 	if (likely(allow_spin))
 		spin_lock_irqsave(&barn->lock, flags);
-	else if (!spin_trylock_irqsave(&barn->lock, flags))
+	else if (!spin_trylock_nolock_irqsave(&barn->lock, flags))
 		return NULL;
 
 	if (likely(barn->nr_full)) {
@@ -3306,7 +3306,7 @@ barn_replace_full_sheaf(struct node_barn *barn, struct slab_sheaf *full,
 
 	if (likely(allow_spin))
 		spin_lock_irqsave(&barn->lock, flags);
-	else if (!spin_trylock_irqsave(&barn->lock, flags))
+	else if (!spin_trylock_nolock_irqsave(&barn->lock, flags))
 		return ERR_PTR(-EBUSY);
 
 	if (likely(barn->nr_empty)) {
@@ -3821,7 +3821,7 @@ static void *alloc_single_from_new_slab(struct kmem_cache *s, struct slab *slab,
 	n = get_node(s, slab_nid(slab));
 	if (allow_spin) {
 		spin_lock_irqsave(&n->list_lock, flags);
-	} else if (!spin_trylock_irqsave(&n->list_lock, flags)) {
+	} else if (!spin_trylock_nolock_irqsave(&n->list_lock, flags)) {
 		/*
 		 * Unlucky, discard newly allocated slab.
 		 * The slab is not fully free, but it's fine as
@@ -3866,7 +3866,7 @@ static bool get_partial_node_bulk(struct kmem_cache *s,
 
 	if (allow_spin)
 		spin_lock_irqsave(&n->list_lock, flags);
-	else if (!spin_trylock_irqsave(&n->list_lock, flags))
+	else if (!spin_trylock_nolock_irqsave(&n->list_lock, flags))
 		return false;
 
 	list_for_each_entry_safe(slab, slab2, &n->partial, slab_list) {
@@ -3939,7 +3939,7 @@ static void *get_from_partial_node(struct kmem_cache *s,
 
 	if (alloc_flags_allow_spinning(ac->alloc_flags))
 		spin_lock_irqsave(&n->list_lock, flags);
-	else if (!spin_trylock_irqsave(&n->list_lock, flags))
+	else if (!spin_trylock_nolock_irqsave(&n->list_lock, flags))
 		return NULL;
 	list_for_each_entry_safe(slab, slab2, &n->partial, slab_list) {
 
@@ -4543,7 +4543,7 @@ static unsigned int alloc_from_new_slab(struct kmem_cache *s, struct slab *slab,
 
 		if (allow_spin) {
 			spin_lock_irqsave(&n->list_lock, flags);
-		} else if (!spin_trylock_irqsave(&n->list_lock, flags)) {
+		} else if (!spin_trylock_nolock_irqsave(&n->list_lock, flags)) {
 			/*
 			 * Unlucky, discard newly allocated slab.
 			 * The slab is not fully free, but it's fine as
@@ -4739,6 +4739,15 @@ bool slab_post_alloc_hook(struct kmem_cache *s, gfp_t flags, size_t size,
 	return memcg_slab_post_alloc_hook(s, flags, size, p, ac);
 }
 
+static __always_inline bool
+cpu_sheaves_trylock(struct kmem_cache *s, bool allow_spin)
+{
+	if (allow_spin)
+		return local_trylock(&s->cpu_sheaves->lock);
+
+	return mm_local_trylock_nolock(&s->cpu_sheaves->lock);
+}
+
 /*
  * Replace the empty main sheaf with a (at least partially) full sheaf.
  *
@@ -4864,6 +4873,7 @@ static __fastpath_inline
 void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, unsigned int alloc_flags, int node)
 {
 	struct slub_percpu_sheaves *pcs;
+	bool allow_spin = alloc_flags_allow_spinning(alloc_flags);
 	bool node_requested;
 	void *object;
 
@@ -4878,7 +4888,7 @@ void *alloc_from_pcs(struct kmem_cache *s, gfp_t gfp, unsigned int alloc_flags, 
 		return NULL;
 	}
 
-	if (!local_trylock(&s->cpu_sheaves->lock))
+	if (!cpu_sheaves_trylock(s, allow_spin))
 		return NULL;
 
 	pcs = this_cpu_ptr(s->cpu_sheaves);
@@ -5594,7 +5604,7 @@ retry:
 		 * But debug caches don't use that and only rely on
 		 * kmem_cache_node->list_lock, so kmalloc_nolock() can attempt
 		 * to allocate from debug caches by
-		 * spin_trylock_irqsave(&n->list_lock, ...)
+		 * spin_trylock_nolock_irqsave(&n->list_lock, ...)
 		 */
 		return NULL;
 
@@ -6101,7 +6111,7 @@ alloc_empty:
 	if (!sheaf_try_flush_main(s))
 		return NULL;
 
-	if (!local_trylock(&s->cpu_sheaves->lock))
+	if (!cpu_sheaves_trylock(s, allow_spin))
 		return NULL;
 
 	pcs = this_cpu_ptr(s->cpu_sheaves);
@@ -6137,7 +6147,7 @@ bool free_to_pcs(struct kmem_cache *s, void *object, bool allow_spin)
 {
 	struct slub_percpu_sheaves *pcs;
 
-	if (!local_trylock(&s->cpu_sheaves->lock))
+	if (!cpu_sheaves_trylock(s, allow_spin))
 		return false;
 
 	pcs = this_cpu_ptr(s->cpu_sheaves);
@@ -6241,7 +6251,7 @@ bool __kfree_rcu_sheaf(struct kmem_cache *s, void *obj, unsigned int free_flags)
 	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
 		lock_map_acquire_try(&kfree_rcu_sheaf_map);
 
-	if (!local_trylock(&s->cpu_sheaves->lock))
+	if (!cpu_sheaves_trylock(s, allow_spin))
 		goto fail;
 
 	pcs = this_cpu_ptr(s->cpu_sheaves);
@@ -6284,7 +6294,7 @@ bool __kfree_rcu_sheaf(struct kmem_cache *s, void *obj, unsigned int free_flags)
 		if (!empty)
 			goto fail;
 
-		if (!local_trylock(&s->cpu_sheaves->lock)) {
+		if (!cpu_sheaves_trylock(s, allow_spin)) {
 			__free_empty_sheaf(s, empty, free_flags);
 			goto fail;
 		}
