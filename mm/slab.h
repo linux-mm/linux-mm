@@ -422,6 +422,22 @@ static inline unsigned int size_index_elem(unsigned int bytes)
 }
 
 /*
+ * Which set of buckets to use for the given kmalloc_cache_type. A bucket set
+ * mirrors the KMALLOC_NORMAL caches, and also serves accounted allocations:
+ * memcg charges each object on its own, in any cache. Types that need
+ * different pages (DMA, reclaimable) or no obj_exts fall back to the
+ * general caches.
+ */
+static inline kmem_buckets *
+kmalloc_choose_bucket(kmem_buckets *bucket, enum kmalloc_cache_type type)
+{
+	if (bucket && (type <= KMALLOC_PARTITION_END || type == KMALLOC_CGROUP))
+		return bucket;
+
+	return &kmalloc_caches[type];
+}
+
+/*
  * Find the kmem_cache structure that serves a given size of
  * allocation
  *
@@ -438,8 +454,7 @@ kmalloc_slab(size_t size, kmem_buckets *b, gfp_t flags, kmalloc_token_t token,
 	if (alloc_flags & SLAB_ALLOC_NO_OBJ_EXT)
 		type = KMALLOC_NO_OBJ_EXT;
 
-	if (!b)
-		b = &kmalloc_caches[type];
+	b = kmalloc_choose_bucket(b, type);
 	if (size <= 192)
 		index = kmalloc_size_index[size_index_elem(size)];
 	else

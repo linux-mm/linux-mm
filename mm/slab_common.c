@@ -420,6 +420,11 @@ static struct kmem_cache *kmem_buckets_cache __ro_after_init;
  * @usersize: How many bytes, starting at @useroffset, may be copied
  *		to/from userspace.
  *
+ * Accounted (__GFP_ACCOUNT) allocations are served by the set like any
+ * other. Allocations that need DMA or reclaimable memory are served by the
+ * general kmalloc caches instead, without the set's isolation or usercopy
+ * region.
+ *
  * Context: Cannot be called within an interrupt, but can be interrupted.
  *
  * Return: a pointer to the cache on success, NULL on failure. When
