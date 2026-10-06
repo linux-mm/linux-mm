@@ -415,12 +415,10 @@ static struct kmem_cache *kmem_buckets_cache __ro_after_init;
  *			 allocations via kmem_buckets_alloc()
  * @name: A prefix string which is used in /proc/slabinfo to identify this
  *	  cache. The individual caches with have their sizes as the suffix.
- * @flags: SLAB flags (see kmem_cache_create() for details).
  * @useroffset: Starting offset within an allocation that may be copied
  *		to/from userspace.
  * @usersize: How many bytes, starting at @useroffset, may be copied
  *		to/from userspace.
- * @ctor: A constructor for the objects, run when new allocations are made.
  *
  * Context: Cannot be called within an interrupt, but can be interrupted.
  *
@@ -429,10 +427,8 @@ static struct kmem_cache *kmem_buckets_cache __ro_after_init;
  * subsequent calls to kmem_buckets_alloc() will fall back to kmalloc().
  * (i.e. callers only need to check for NULL on failure.)
  */
-kmem_buckets *kmem_buckets_create(const char *name, slab_flags_t flags,
-				  unsigned int useroffset,
-				  unsigned int usersize,
-				  void (*ctor)(void *))
+kmem_buckets *kmem_buckets_create(const char *name, unsigned int useroffset,
+				  unsigned int usersize)
 {
 	unsigned long mask = 0;
 	unsigned int idx;
@@ -454,8 +450,6 @@ kmem_buckets *kmem_buckets_create(const char *name, slab_flags_t flags,
 	b = kmem_cache_alloc(kmem_buckets_cache, GFP_KERNEL|__GFP_ZERO);
 	if (WARN_ON(!b))
 		return NULL;
-
-	flags |= SLAB_NO_MERGE;
 
 	for (idx = 0; idx < ARRAY_SIZE(kmalloc_caches[KMALLOC_NORMAL]); idx++) {
 		char *short_size, *cache_name;
@@ -487,8 +481,8 @@ kmem_buckets *kmem_buckets_create(const char *name, slab_flags_t flags,
 			if (WARN_ON(!cache_name))
 				goto fail;
 			(*b)[aligned_idx] = kmem_cache_create_usercopy(cache_name, size,
-					0, flags, cache_useroffset,
-					cache_usersize, ctor);
+					0, SLAB_NO_MERGE, cache_useroffset,
+					cache_usersize, NULL);
 			kfree(cache_name);
 			if (WARN_ON(!(*b)[aligned_idx]))
 				goto fail;
