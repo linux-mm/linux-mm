@@ -6,6 +6,7 @@
 #include <linux/kasan-enabled.h>
 #include <linux/kasan-tags.h>
 #include <linux/kernel.h>
+#include <linux/pgtable.h>
 #include <linux/static_key.h>
 #include <linux/types.h>
 
@@ -35,8 +36,6 @@ typedef unsigned int __bitwise kasan_vmalloc_flags_t;
 
 #if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
 
-#include <linux/pgtable.h>
-
 /* Software KASAN implementations use shadow memory. */
 
 #ifdef CONFIG_KASAN_SW_TAGS
@@ -51,7 +50,7 @@ typedef unsigned int __bitwise kasan_vmalloc_flags_t;
 #endif
 
 extern unsigned char kasan_early_shadow_page[PAGE_SIZE];
-extern pte_t kasan_early_shadow_pte[MAX_PTRS_PER_PTE + PTE_HWTABLE_PTRS];
+extern hw_pte_t kasan_early_shadow_pte[MAX_PTRS_PER_PTE + PTE_HWTABLE_PTRS];
 extern pmd_t kasan_early_shadow_pmd[MAX_PTRS_PER_PMD];
 extern pud_t kasan_early_shadow_pud[MAX_PTRS_PER_PUD];
 extern p4d_t kasan_early_shadow_p4d[MAX_PTRS_PER_P4D];
@@ -132,6 +131,20 @@ static __always_inline void kasan_poison_slab(struct slab *slab)
 {
 	if (kasan_enabled())
 		__kasan_poison_slab(slab);
+}
+
+void __kasan_poison_pte(hw_pte_t *pte, int nr);
+static __always_inline void kasan_poison_pte(hw_pte_t *pte, int nr)
+{
+	if (kasan_enabled())
+		__kasan_poison_pte(pte, nr);
+}
+
+void __kasan_unpoison_pte(hw_pte_t *pte, int nr);
+static __always_inline void kasan_unpoison_pte(hw_pte_t *pte, int nr)
+{
+	if (kasan_enabled())
+		__kasan_unpoison_pte(pte, nr);
 }
 
 void __kasan_unpoison_new_object(struct kmem_cache *cache, void *object);
@@ -414,6 +427,8 @@ static inline bool kasan_unpoison_pages(struct page *page, unsigned int order,
 	return false;
 }
 static inline void kasan_poison_slab(struct slab *slab) {}
+static inline void kasan_poison_pte(hw_pte_t *pte, int nr) {}
+static inline void kasan_unpoison_pte(hw_pte_t *pte, int nr) {}
 static inline void kasan_unpoison_new_object(struct kmem_cache *cache,
 					void *object) {}
 static inline void kasan_poison_new_object(struct kmem_cache *cache,
