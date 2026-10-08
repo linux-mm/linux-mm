@@ -160,11 +160,11 @@ struct crypto_acomp_ctx {
 struct zswap_pool {
 	struct zs_pool *zs_pool;
 	struct crypto_acomp_ctx __percpu *acomp_ctx;
-	u8 compr_batch_size;
 	struct percpu_ref ref;
-	struct rcu_work release_rwork;
-	struct hlist_node node;
 	u8 idx;
+	u8 compr_batch_size;
+	struct hlist_node node;
+	struct rcu_work release_rwork;
 	char tfm_name[CRYPTO_MAX_ALG_NAME];
 };
 
@@ -202,10 +202,10 @@ static struct shrinker *zswap_shrinker;
  *              logic if referenced is unset. See comments in the shrinker
  *              section for context.
  * nid - NUMA node id of the page for which this is the zswap entry.
- * pool_idx - id of the zswap_pool that the entry's data is in.
  * handle - zsmalloc allocation handle that stores the compressed page data
  * objcg - the obj_cgroup that the compressed memory is charged to
  * lru - handle to the pool's lru used to evict pages.
+ * pool_idx - id of the zswap_pool that the entry's data is in.
  */
 struct zswap_entry {
 	swp_entry_t swpentry;
@@ -214,10 +214,10 @@ struct zswap_entry {
 		bool referenced:1;
 	};
 	int nid;
-	u8 pool_idx;
 	unsigned long handle;
 	struct obj_cgroup *objcg;
 	struct list_head lru;
+	u8 pool_idx;
 };
 
 /*
