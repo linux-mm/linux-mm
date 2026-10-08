@@ -2630,7 +2630,6 @@ static int __mmap_new_file_vma(struct mmap_state *map,
 
 		if (map_same_file(map))
 			fput(map->vm_file);
-		vma->vm_file = NULL;
 		return error;
 	}
 
