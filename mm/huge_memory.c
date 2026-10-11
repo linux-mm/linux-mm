@@ -1664,7 +1664,8 @@ static vm_fault_t insert_pmd(struct vm_area_struct *vma, unsigned long addr,
 			entry = pmd_mkspecial(entry);
 		} else {
 			folio_get(fop.folio);
-			folio_add_file_rmap_pmd(fop.folio, &fop.folio->page, vma);
+			folio_add_file_rmap_pmd(fop.folio,
+						folio_page(fop.folio, 0), vma);
 			add_mm_counter(mm, mm_counter_file(fop.folio), HPAGE_PMD_NR);
 		}
 	} else {
@@ -1786,7 +1787,8 @@ static vm_fault_t insert_pud(struct vm_area_struct *vma, unsigned long addr,
 		entry = folio_mk_pud(fop.folio, vma->vm_page_prot);
 
 		folio_get(fop.folio);
-		folio_add_file_rmap_pud(fop.folio, &fop.folio->page, vma);
+		folio_add_file_rmap_pud(fop.folio,
+					folio_page(fop.folio, 0), vma);
 		add_mm_counter(mm, mm_counter_file(fop.folio), HPAGE_PUD_NR);
 	} else {
 		entry = pud_mkhuge(pfn_pud(fop.pfn, prot));
@@ -1935,7 +1937,7 @@ static void copy_huge_non_present_pmd(
 		 * folio_try_dup_anon_rmap_pmd does not fail for
 		 * device private entries.
 		 */
-		folio_try_dup_anon_rmap_pmd(src_folio, &src_folio->page,
+		folio_try_dup_anon_rmap_pmd(src_folio, folio_page(src_folio, 0),
 					    dst_vma, src_vma);
 	}
 
@@ -2487,7 +2489,7 @@ static void zap_huge_pmd_folio(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	/* Present and device private folios are rmappable. */
 	if (is_present || is_device_private)
-		folio_remove_rmap_pmd(folio, &folio->page, vma);
+		folio_remove_rmap_pmd(folio, folio_page(folio, 0), vma);
 
 	if (folio_test_anon(folio)) {
 		add_mm_counter(mm, MM_ANONPAGES, -HPAGE_PMD_NR);
@@ -2572,7 +2574,7 @@ bool zap_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
 
 	spin_unlock(ptl);
 	if (is_present && folio)
-		tlb_remove_page_size(tlb, &folio->page, HPAGE_PMD_SIZE);
+		tlb_remove_page_size(tlb, folio_page(folio, 0), HPAGE_PMD_SIZE);
 	return true;
 }
 
@@ -2947,7 +2949,7 @@ int move_pages_huge_pmd(struct mm_struct *mm, pmd_t *dst_pmd, pmd_t *src_pmd, pm
 	}
 	if (src_folio) {
 		if (folio_maybe_dma_pinned(src_folio) ||
-		    !PageAnonExclusive(&src_folio->page)) {
+		    !PageAnonExclusive(folio_page(src_folio, 0))) {
 			err = -EBUSY;
 			goto unlock_ptls;
 		}
@@ -3709,7 +3711,7 @@ static void __split_folio_to_order(struct folio *folio, int old_order,
 	 * the flags from the original folio.
 	 */
 	for (i = new_nr_pages; i < nr_pages; i += new_nr_pages) {
-		struct page *new_head = &folio->page + i;
+		struct page *new_head = folio_page(folio, i);
 		/*
 		 * Careful: new_folio is not a "real" folio before we cleared PageTail.
 		 * Don't pass it around before clear_compound_head().
@@ -3806,7 +3808,7 @@ static void __split_folio_to_order(struct folio *folio, int old_order,
 	if (new_order)
 		folio_set_order(folio, new_order);
 	else
-		ClearPageCompound(&folio->page);
+		ClearPageCompound(folio_page(folio, 0));
 }
 
 /**
@@ -3896,7 +3898,7 @@ static int __split_frozen_folio(struct folio *folio, int new_order,
 		}
 
 		folio_split_memcg_refs(folio, old_order, split_order);
-		split_page_owner(&folio->page, old_order, split_order);
+		split_page_owner(folio_page(folio, 0), old_order, split_order);
 		pgalloc_tag_split(folio, old_order, split_order);
 		__split_folio_to_order(folio, old_order, split_order);
 
@@ -4392,7 +4394,7 @@ int folio_split_unmapped(struct folio *folio, unsigned int new_order)
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_large(folio), folio);
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_anon(folio), folio);
 
-	return __folio_freeze_split_anon(folio, new_order, &folio->page,
+	return __folio_freeze_split_anon(folio, new_order, folio_page(folio, 0),
 					 false, NULL, SPLIT_TYPE_UNIFORM);
 }
 
@@ -4448,7 +4450,7 @@ int __split_huge_page_to_list_to_order(struct page *page, struct list_head *list
 {
 	struct folio *folio = page_folio(page);
 
-	return __folio_split(folio, new_order, &folio->page, page, list,
+	return __folio_split(folio, new_order, folio_page(folio, 0), page, list,
 			     SPLIT_TYPE_UNIFORM);
 }
 
@@ -4479,8 +4481,8 @@ int __split_huge_page_to_list_to_order(struct page *page, struct list_head *list
 int folio_split(struct folio *folio, unsigned int new_order,
 		struct page *split_at, struct list_head *list)
 {
-	return __folio_split(folio, new_order, split_at, &folio->page, list,
-			     SPLIT_TYPE_NON_UNIFORM);
+	return __folio_split(folio, new_order, split_at, folio_page(folio, 0),
+			     list, SPLIT_TYPE_NON_UNIFORM);
 }
 
 /**
@@ -4512,7 +4514,7 @@ unsigned int min_order_for_split(struct folio *folio)
 
 int split_folio_to_list(struct folio *folio, struct list_head *list)
 {
-	return split_huge_page_to_list_to_order(&folio->page, list, 0);
+	return split_huge_page_to_list_to_order(folio_page(folio, 0), list, 0);
 }
 
 /*
@@ -5186,12 +5188,13 @@ void remove_migration_pmd(struct page_vma_mapped_walk *pvmw, struct folio *folio
 		if (!softleaf_is_migration_read(entry))
 			rmap_flags |= RMAP_EXCLUSIVE;
 
-		folio_add_anon_rmap_pmd(folio, &folio->page, vma, haddr, rmap_flags);
+		folio_add_anon_rmap_pmd(folio, folio_page(folio, 0), vma,
+					haddr, rmap_flags);
 	} else {
-		folio_add_file_rmap_pmd(folio, &folio->page, vma);
+		folio_add_file_rmap_pmd(folio, folio_page(folio, 0), vma);
 	}
 	VM_WARN_ON_ONCE(pmd_write(pmde) && folio_test_anon(folio) &&
-			!PageAnonExclusive(&folio->page));
+			!PageAnonExclusive(folio_page(folio, 0)));
 	set_pmd_at(mm, haddr, pvmw->pmd, pmde);
 
 	/* No need to invalidate - it was non-present before */
