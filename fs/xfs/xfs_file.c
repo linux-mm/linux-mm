@@ -450,7 +450,7 @@ xfs_file_write_checks(
 	struct xfs_zone_alloc_ctx *ac)
 {
 	struct inode		*inode = iocb->ki_filp->f_mapping->host;
-	size_t			count = iov_iter_count(from);
+	size_t			orig_count = iov_iter_count(from);
 	bool			drained_dio = false;
 	ssize_t			error;
 
@@ -482,6 +482,7 @@ restart:
 			*iolock = 0;
 			return error;
 		}
+		iov_iter_reexpand(from, orig_count);
 		goto restart;
 	}
 
@@ -496,7 +497,7 @@ restart:
 	 * the slow path when we are at or beyond the current EOF.
 	 */
 	if (iocb->ki_pos > i_size_read(inode)) {
-		error = xfs_file_write_zero_eof(iocb, from, iolock, count,
+		error = xfs_file_write_zero_eof(iocb, from, iolock, orig_count,
 				&drained_dio, ac);
 		if (error == 1)
 			goto restart;
@@ -505,6 +506,45 @@ restart:
 	}
 
 	return kiocb_modified(iocb);
+}
+
+STATIC ssize_t
+xfs_file_writethrough_checks(
+	struct kiocb		*iocb,
+	struct iov_iter		*from,
+	unsigned int		*iolock,
+	struct xfs_zone_alloc_ctx *ac)
+{
+	struct inode		*inode = iocb->ki_filp->f_mapping->host;
+	size_t			orig_count = iov_iter_count(from);
+	xfs_fsize_t		isize = i_size_read(inode);
+	ssize_t		error;
+
+restart:
+	error =  xfs_file_write_checks(iocb, from, iolock, ac);
+	if (error < 0)
+		return error;
+
+	if (*iolock == XFS_IOLOCK_EXCL)
+		return 0;
+
+	 /* Extending IO needs exclusive lock for i_size change */
+	if (iocb->ki_pos + iov_iter_count(from) > isize)
+		goto upgrade_excl;
+
+	return 0;
+
+upgrade_excl:
+	xfs_iunlock(XFS_I(inode), *iolock);
+	*iolock = XFS_IOLOCK_EXCL;
+	error = xfs_ilock_iocb(iocb, *iolock);
+	if (error) {
+		*iolock = 0;
+		return error;
+	}
+	iov_iter_reexpand(from, orig_count);
+	goto restart;
+
 }
 
 static ssize_t
@@ -688,6 +728,48 @@ out:
 static const struct iomap_dio_ops xfs_dio_write_ops = {
 	.end_io		= xfs_dio_write_end_io,
 };
+
+static int
+xfs_writethrough_end_io(
+	struct iomap_writethrough_ctx	*wt_ctx,
+	ssize_t				size,
+	int				error,
+	unsigned int			flags)
+{
+	struct xfs_inode *ip = XFS_I(wt_ctx->inode);
+	xfs_off_t offset = wt_ctx->iocb->ki_pos;
+
+	if (unlikely(error))
+		goto error;
+
+	/*
+	 * writethrough completions are handled same as dio with the exception
+	 * that we need to explicitly change the i_disk_size. This is because
+	 * unlike dio, we have already updated the i_size and hence the
+	 * (i_disk_size < i_size) check will fail in dio code
+	 */
+	error = xfs_dio_write_end_io(wt_ctx->iocb, size, error, flags);
+	if (error)
+		goto error;
+	if (!size)
+		goto out;
+
+	/* Fast lockless check similar to how we do in buffered endio */
+	if (offset + size > ip->i_disk_size) {
+		error = xfs_setfilesize(ip, offset, size);
+		if (error)
+			goto error;
+	}
+
+	return 0;
+
+error:
+	if (wt_ctx->flags & IOMAP_DIO_COW)
+		xfs_reflink_cancel_cow_range(ip, offset, size, true);
+
+out:
+	return error;
+}
 
 static void
 xfs_dio_zoned_submit_io(
@@ -1020,6 +1102,39 @@ out:
 	return ret;
 }
 
+static int
+xfs_writethrough_submit(
+	struct inode		*inode,
+	struct iomap		*iomap,
+	loff_t			offset,
+	u64			count)
+{
+	int error = 0;
+	unsigned int		nofs_flag;
+
+	/*
+	 * Convert CoW extents to regular.
+	 *
+	 * We are under writethrough context with folio lock possibly held. To
+	 * avoid memory allocation deadlocks, set the task-wide nofs context.
+	 */
+	if (iomap->flags & IOMAP_F_SHARED) {
+		nofs_flag = memalloc_nofs_save();
+		error = xfs_reflink_convert_cow(XFS_I(inode), offset, count);
+		memalloc_nofs_restore(nofs_flag);
+	}
+
+	return error;
+}
+
+const struct iomap_writethrough_ops xfs_writethrough_ops = {
+	.ops			= &xfs_direct_write_iomap_ops,
+	.write_ops		= &xfs_iomap_write_ops,
+	.end_io		= xfs_writethrough_end_io,
+	.writethrough_submit	= &xfs_writethrough_submit
+};
+
+
 STATIC ssize_t
 xfs_file_buffered_write(
 	struct kiocb		*iocb,
@@ -1032,19 +1147,29 @@ xfs_file_buffered_write(
 	unsigned int		iolock;
 
 write_retry:
-	iolock = XFS_IOLOCK_EXCL;
+	if (iocb->ki_flags & IOCB_NOSERIAL)
+		iolock = XFS_IOLOCK_SHARED;
+	else
+		iolock = XFS_IOLOCK_EXCL;
 	ret = xfs_ilock_iocb(iocb, iolock);
 	if (ret)
 		return ret;
 
-	ret = xfs_file_write_checks(iocb, from, &iolock, NULL);
-	if (ret)
-		goto out;
-
 	trace_xfs_file_buffered_write(iocb, from);
-	ret = iomap_file_buffered_write(iocb, from,
-			&xfs_buffered_write_iomap_ops, &xfs_iomap_write_ops,
-			NULL);
+	if (iocb->ki_flags & IOCB_WRITETHROUGH) {
+		ret = xfs_file_writethrough_checks(iocb, from, &iolock, NULL);
+		if (ret)
+			goto out;
+		ret = iomap_file_writethrough_write(iocb, from,
+						    &xfs_writethrough_ops, NULL);
+	} else {
+		ret = xfs_file_write_checks(iocb, from, &iolock, NULL);
+		if (ret)
+			goto out;
+		ret = iomap_file_buffered_write(iocb, from,
+						&xfs_buffered_write_iomap_ops,
+						&xfs_iomap_write_ops, NULL);
+	}
 
 	/*
 	 * If we hit a space limit, try to free up some lingering preallocated
@@ -1079,8 +1204,12 @@ out:
 
 	if (ret > 0) {
 		XFS_STATS_ADD(ip->i_mount, xs_write_bytes, ret);
-		/* Handle various SYNC-type writes */
-		ret = generic_write_sync(iocb, ret);
+		/*
+		 * Handle various SYNC-type writes.
+		 * For writethrough, we handle sync during completion.
+		 */
+		if (!(iocb->ki_flags & IOCB_WRITETHROUGH))
+			ret = generic_write_sync(iocb, ret);
 	}
 	return ret;
 }
@@ -2175,7 +2304,7 @@ const struct file_operations xfs_file_operations = {
 	.remap_file_range = xfs_file_remap_range,
 	.fop_flags	= FOP_MMAP_SYNC | FOP_BUFFER_RASYNC |
 			  FOP_BUFFER_WASYNC | FOP_DIO_PARALLEL_WRITE |
-			  FOP_DONTCACHE,
+			  FOP_DONTCACHE | FOP_WRITETHROUGH,
 	.setlease	= generic_setlease,
 };
 
