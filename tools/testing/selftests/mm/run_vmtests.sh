@@ -77,6 +77,8 @@ separated by spaces:
 	test transparent huge pages
 - hugetlb
 	test hugetlbfs huge pages
+- hugetlb_vmemmap
+	test the hugetlb vmemmap optimization
 - migration
 	invoke move_pages(2) to exercise the migration entry code
 	paths in the kernel
@@ -311,6 +313,8 @@ CATEGORY="hugetlb" run_test ./hugetlb-soft-offline
 echo "$enable_soft_offline" > /proc/sys/vm/enable_soft_offline
 CATEGORY="hugetlb" run_test ./hugetlb-read-hwpoison
 fi
+
+CATEGORY="hugetlb_vmemmap" run_test ./hugetlb_vmemmap_stress.sh
 
 if [ $VADDR64 -ne 0 ]; then
 	# va high address boundary switch test
