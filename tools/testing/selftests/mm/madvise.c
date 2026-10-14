@@ -88,10 +88,11 @@ static char *map_aligned_pages(struct __test_metadata *_metadata, size_t size)
 }
 
 /*
- * Collapse a PMD-aligned range into PMD-mapped anonymous THPs. MADV_COLLAPSE
- * may fail transiently with EAGAIN.
+ * Collapse a PMD-aligned range into PMD-mapped THPs, and confirm the result
+ * with check_huge(). MADV_COLLAPSE may fail transiently with EAGAIN.
  */
-static bool collapse(char *mapping, size_t size)
+static bool collapse(char *mapping, size_t size,
+		     bool (*check_huge)(void *, size_t, int, uint64_t))
 {
 	int nr_hpages = size / pmd_size;
 	int retry;
@@ -100,8 +101,7 @@ static bool collapse(char *mapping, size_t size)
 		if (madvise(mapping, size, MADV_COLLAPSE)) {
 			if (errno != EAGAIN)
 				return false;
-		} else if (check_huge_anon(mapping, size, nr_hpages,
-					   pmd_size)) {
+		} else if (check_huge(mapping, size, nr_hpages, pmd_size)) {
 			return true;
 		}
 		usleep(10000);
@@ -118,7 +118,7 @@ static char *map_thp(struct __test_metadata *_metadata)
 	if (!pmd_size)
 		return NULL;
 	mapping = map_aligned_pages(_metadata, pmd_size);
-	if (collapse(mapping, pmd_size))
+	if (collapse(mapping, pmd_size, check_huge_anon))
 		return mapping;
 	ASSERT_EQ(munmap(mapping, pmd_size), 0);
 	return NULL;
@@ -145,6 +145,33 @@ static void pte_map_thp(struct __test_metadata *_metadata, char *mapping,
 	ASSERT_NE(pfn, -1UL);
 	ASSERT_EQ(pageflags_get(pfn, kpageflags_fd, &flags), 0);
 	ASSERT_TRUE(flags & KPF_COMPOUND_HEAD);
+}
+
+static char *map_aligned_file(struct __test_metadata *_metadata, int fd,
+			      size_t size, int flags)
+{
+	char *mapping = reserve_aligned(_metadata, size);
+
+	ASSERT_EQ(mmap(mapping, size, PROT_READ | PROT_WRITE, flags | MAP_FIXED,
+		       fd, 0), mapping);
+
+	return mapping;
+}
+
+/* Create a PMD-sized shmem file filled with 1s. */
+static int create_shmem_file(struct __test_metadata *_metadata)
+{
+	char *shared;
+	int fd;
+
+	fd = memfd_create("madvise-pageout", 0);
+	ASSERT_GE(fd, 0);
+	ASSERT_EQ(ftruncate(fd, pmd_size), 0);
+	shared = map_aligned_file(_metadata, fd, pmd_size, MAP_SHARED);
+	memset(shared, 1, pmd_size);
+	ASSERT_EQ(munmap(shared, pmd_size), 0);
+
+	return fd;
 }
 
 static void assert_filled(struct __test_metadata *_metadata,
@@ -732,6 +759,88 @@ TEST_F(madvise, pageout_private_file_reclaims_only_cow)
 		SKIP(return, "MADV_PAGEOUT did not swap the COW page");
 
 	ASSERT_EQ(munmap(mapping, 2 * page_size), 0);
+}
+
+/*
+ * An unauthorized caller must not page out a large file folio of a private
+ * mapping, even when the advised range only partly covers it. See
+ * pageout_stays_within_range about other unmapping.
+ */
+TEST_F(madvise, pageout_private_file_skips_large_file_folio)
+{
+	char *mapping;
+	size_t offset;
+	int fd;
+
+	if (!pmd_size)
+		SKIP(return, "PMD-sized THPs are not supported");
+	if (geteuid())
+		SKIP(return, "requires root to change credentials");
+	fd = create_shmem_file(_metadata);
+	mapping = map_aligned_file(_metadata, fd, pmd_size, MAP_PRIVATE);
+	if (!collapse(mapping, pmd_size, check_huge_file))
+		SKIP(return, "could not allocate a PMD-sized shmem THP");
+	ASSERT_EQ(fchmod(fd, 0400), 0);
+	if (!drop_privileges())
+		SKIP(return, "could not drop privileges");
+
+	ASSERT_EQ(madvise(mapping, pmd_size / 2, MADV_PAGEOUT), 0);
+	for (offset = 0; offset < pmd_size; offset += page_size)
+		ASSERT_TRUE(page_is_present(self->pagemap_fd,
+					    mapping + offset));
+	assert_filled(_metadata, mapping, pmd_size);
+
+	ASSERT_EQ(munmap(mapping, pmd_size), 0);
+	close(fd);
+}
+
+/*
+ * An unauthorized caller must not page out a large file folio that a private
+ * mapping maps with PTEs, even when the advised range covers only part of it.
+ * See pageout_stays_within_range about other unmapping.
+ */
+TEST_F(madvise, pageout_private_file_skips_pte_mapped_file_folio)
+{
+	const size_t size = pmd_size / 2;
+	char *mapping, *shared;
+	unsigned long pfn;
+	uint64_t flags;
+	size_t offset;
+	int fd;
+
+	if (!pmd_size)
+		SKIP(return, "PMD-sized THPs are not supported");
+	if (geteuid())
+		SKIP(return, "requires root to change credentials");
+	if (self->kpageflags_fd < 0)
+		SKIP(return, "requires root to read page flags");
+	fd = create_shmem_file(_metadata);
+	shared = map_aligned_file(_metadata, fd, pmd_size, MAP_SHARED);
+	if (!collapse(shared, pmd_size, check_huge_file))
+		SKIP(return, "could not allocate a PMD-sized shmem THP");
+	ASSERT_EQ(munmap(shared, pmd_size), 0);
+
+	/* Mapping half of the folio leaves it mapped by PTEs. */
+	mapping = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+	ASSERT_NE(mapping, MAP_FAILED);
+	assert_filled(_metadata, mapping, size);
+	pfn = pagemap_get_pfn(self->pagemap_fd, mapping);
+	ASSERT_NE(pfn, -1UL);
+	ASSERT_EQ(pageflags_get(pfn, self->kpageflags_fd, &flags), 0);
+	if (!(flags & KPF_COMPOUND_HEAD))
+		SKIP(return, "the shmem THP was split");
+	ASSERT_EQ(fchmod(fd, 0400), 0);
+	if (!drop_privileges())
+		SKIP(return, "could not drop privileges");
+
+	ASSERT_EQ(madvise(mapping, size / 2, MADV_PAGEOUT), 0);
+	for (offset = 0; offset < size; offset += page_size)
+		ASSERT_TRUE(page_is_present(self->pagemap_fd,
+					    mapping + offset));
+	assert_filled(_metadata, mapping, size);
+
+	ASSERT_EQ(munmap(mapping, size), 0);
+	close(fd);
 }
 
 TEST_HARNESS_MAIN
