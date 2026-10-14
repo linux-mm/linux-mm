@@ -512,39 +512,47 @@ static unsigned long maximum_alignment(struct elf_phdr *cmds, int nr)
  *
  * Loads ELF program headers from the binary file elf_file, which has the ELF
  * header pointed to by elf_ex, into a newly allocated array. The caller is
- * responsible for freeing the allocated data. Returns NULL upon failure.
+ * responsible for freeing the allocated data. Returns an ERR_PTR upon failure:
+ * -ENOEXEC for a malformed header or when the read reaches the end of the
+ * file, the allocation or read error otherwise.
  */
 static struct elf_phdr *load_elf_phdrs(const struct elfhdr *elf_ex,
 				       struct file *elf_file)
 {
-	struct elf_phdr *elf_phdata = NULL;
-	int retval = -1;
-	unsigned int size;
+	struct elf_phdr *elf_phdata;
+	unsigned int size, done;
+	loff_t pos;
+	ssize_t rv;
 
 	/*
 	 * If the size of this structure has changed, then punt, since
 	 * we will be doing the wrong thing.
 	 */
 	if (elf_ex->e_phentsize != sizeof(struct elf_phdr))
-		goto out;
+		return ERR_PTR(-ENOEXEC);
 
 	/* Sanity check the number of program headers... */
-	/* ...and their total size. */
+	/* ...their total size and their offset. */
 	size = sizeof(struct elf_phdr) * elf_ex->e_phnum;
-	if (size == 0 || size > 65536)
-		goto out;
+	if (size == 0 || size > 65536 || elf_ex->e_phoff > LLONG_MAX - size)
+		return ERR_PTR(-ENOEXEC);
 
 	elf_phdata = kmalloc(size, GFP_KERNEL);
 	if (!elf_phdata)
-		goto out;
+		return ERR_PTR(-ENOMEM);
 
-	/* Read in the program headers */
-	retval = elf_read(elf_file, elf_phdata, size, elf_ex->e_phoff);
-
-out:
-	if (retval) {
-		kfree(elf_phdata);
-		elf_phdata = NULL;
+	/*
+	 * Read in the program headers. A read that fails part way returns
+	 * what it got, so read on to see the error or the end of the file.
+	 */
+	pos = elf_ex->e_phoff;
+	for (done = 0; done < size; done += rv) {
+		rv = kernel_read(elf_file, (char *)elf_phdata + done,
+				 size - done, &pos);
+		if (rv <= 0) {
+			kfree(elf_phdata);
+			return ERR_PTR(rv ? rv : -ENOEXEC);
+		}
 	}
 	return elf_phdata;
 }
@@ -864,8 +872,10 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		goto out;
 
 	elf_phdata = load_elf_phdrs(elf_ex, bprm->file);
-	if (!elf_phdata)
+	if (IS_ERR(elf_phdata)) {
+		retval = PTR_ERR(elf_phdata);
 		goto out;
+	}
 
 	elf_ppnt = elf_phdata;
 	for (i = 0; i < elf_ex->e_phnum; i++, elf_ppnt++) {
@@ -968,8 +978,12 @@ out_free_interp:
 		/* Load the interpreter program headers */
 		interp_elf_phdata = load_elf_phdrs(interp_elf_ex,
 						   interpreter);
-		if (!interp_elf_phdata)
+		if (IS_ERR(interp_elf_phdata)) {
+			if (PTR_ERR(interp_elf_phdata) != -ENOEXEC)
+				retval = PTR_ERR(interp_elf_phdata);
+			interp_elf_phdata = NULL;
 			goto out_free_dentry;
+		}
 
 		/* Pass PT_LOPROC..PT_HIPROC headers to arch code */
 		elf_property_phdata = NULL;
