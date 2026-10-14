@@ -55,6 +55,19 @@ const char *cma_get_name(const struct cma *cma)
 }
 EXPORT_SYMBOL_GPL(cma_get_name);
 
+/**
+ * cma_has_fixed_base() - was the area placed at an address it did not choose?
+ * @cma: Contiguous memory region
+ *
+ * Such an area is described outside the kernel, typically by a device tree
+ * reserved-memory node, and so lands at the same address in every kernel
+ * booted with that description.
+ */
+bool cma_has_fixed_base(const struct cma *cma)
+{
+	return test_bit(CMA_FIXED_BASE, &cma->flags);
+}
+
 static unsigned long cma_bitmap_aligned_mask(const struct cma *cma,
 					     unsigned int align_order)
 {
@@ -304,6 +317,7 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	cma->ranges[0].count = cma->count;
 	cma->nranges = 1;
 	cma->nid = NUMA_NO_NODE;
+	set_bit(CMA_FIXED_BASE, &cma->flags);
 
 	*res_cma = cma;
 
@@ -517,6 +531,8 @@ static int __init __cma_declare_contiguous_nid(phys_addr_t *basep,
 	}
 
 	(*res_cma)->nid = nid;
+	if (!fixed)
+		clear_bit(CMA_FIXED_BASE, &(*res_cma)->flags);
 	*basep = base;
 
 	return 0;
