@@ -407,6 +407,37 @@ static int madvise_lru_split_folio(struct folio *folio)
 	return err;
 }
 
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+static void madvise_cold_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
+		pmd_t *pmd, unsigned long addr, pmd_t orig_pmd)
+{
+	if (!pmd_young(orig_pmd))
+		return;
+
+	pmdp_test_and_clear_young(vma, addr, pmd);
+	tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
+}
+
+/* Return the folio mapped by a huge PMD if it should be advised. */
+static struct folio *madvise_lru_huge_pmd_folio(struct vm_area_struct *vma,
+		unsigned long addr, pmd_t orig_pmd, bool pageout_anon_only)
+{
+	struct folio *folio;
+
+	if (unlikely(!pmd_present(orig_pmd))) {
+		VM_WARN_ON_ONCE(!pmd_is_valid_softleaf(orig_pmd));
+		return NULL;
+	}
+
+	folio = vm_normal_folio_pmd(vma, addr, orig_pmd);
+	if (!folio || folio_is_zone_device(folio))
+		return NULL;
+	if (madvise_lru_folio_is_filtered(folio, pageout_anon_only))
+		return NULL;
+	return folio;
+}
+#endif
+
 static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
 		unsigned long end, struct mm_walk *walk)
 {
@@ -432,6 +463,7 @@ static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
 	if (pmd_trans_huge(*pmd)) {
 		pmd_t orig_pmd;
 		unsigned long next = pmd_addr_end(addr, end);
+		const bool spans_pmd = next - addr == HPAGE_PMD_SIZE;
 
 		tlb_change_page_size(tlb, HPAGE_PMD_SIZE);
 		ptl = pmd_trans_huge_lock(pmd, vma);
@@ -439,22 +471,12 @@ static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
 			return 0;
 
 		orig_pmd = *pmd;
-		if (unlikely(!pmd_present(orig_pmd))) {
-			VM_WARN_ON_ONCE(!pmd_is_valid_softleaf(orig_pmd));
-			goto huge_unlock;
-		}
-
-		folio = vm_normal_folio_pmd(vma, addr, orig_pmd);
+		folio = madvise_lru_huge_pmd_folio(vma, addr, orig_pmd,
+				pageout_anon_only);
 		if (!folio)
 			goto huge_unlock;
 
-		if (folio_is_zone_device(folio))
-			goto huge_unlock;
-
-		if (madvise_lru_folio_is_filtered(folio, pageout_anon_only))
-			goto huge_unlock;
-
-		if (next - addr != HPAGE_PMD_SIZE) {
+		if (!spans_pmd) {
 			if (!folio_trylock(folio))
 				goto huge_unlock;
 			folio_get(folio);
@@ -464,11 +486,8 @@ static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
 			return 0;
 		}
 
-		if (!pageout && pmd_young(orig_pmd)) {
-			pmdp_test_and_clear_young(vma, addr, pmd);
-			tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
-		}
-
+		if (!pageout)
+			madvise_cold_pmd(tlb, vma, pmd, addr, orig_pmd);
 		madvise_lru_folio(folio, pageout, &folio_list);
 huge_unlock:
 		spin_unlock(ptl);
