@@ -3674,10 +3674,10 @@ static void numa_group_count_active_nodes(struct numa_group *numa_group)
 
 /*
  * When adapting the scan rate, the period is divided into NUMA_PERIOD_SLOTS
- * increments. The more local the fault statistics are, the higher the scan
- * period will be for the next scan window. If local/(local+remote) ratio is
- * below NUMA_PERIOD_THRESHOLD (where range of ratio is 1..NUMA_PERIOD_SLOTS)
- * the scan period will decrease. Aim for 70% local accesses.
+ * increments. The more local or shared the fault statistics are, the higher
+ * the scan period will be for the next scan window. If the private remote
+ * ratio reaches NUMA_PERIOD_SLOTS - NUMA_PERIOD_THRESHOLD, the scan period
+ * will decrease. Aim for 70% local or shared accesses.
  */
 #define NUMA_PERIOD_SLOTS 10
 #define NUMA_PERIOD_THRESHOLD 7
@@ -3692,11 +3692,13 @@ static void update_task_scan_period(struct task_struct *p,
 			unsigned long shared, unsigned long private)
 {
 	unsigned int period_slot;
-	int lr_ratio, ps_ratio;
+	int lr_ratio, sr_ratio, rp_ratio, ratio;
 	int diff;
 
-	unsigned long remote = p->numa_faults_locality[0];
-	unsigned long local = p->numa_faults_locality[1];
+	unsigned long remote = p->numa_faults_locality[NUMA_FAULT_REMOTE];
+	unsigned long local = p->numa_faults_locality[NUMA_FAULT_LOCAL];
+	unsigned long remote_private =
+		p->numa_faults_locality[NUMA_FAULT_REMOTE_PRIVATE];
 	unsigned long locality_faults = local + remote;
 	unsigned long type_faults = private + shared;
 
@@ -3707,7 +3709,8 @@ static void update_task_scan_period(struct task_struct *p,
 	 * migration then it implies we are migrating too quickly or the local
 	 * node is overloaded. In either case, scan slower
 	 */
-	if (!locality_faults || !type_faults || p->numa_faults_locality[2]) {
+	if (!locality_faults || !type_faults ||
+	    p->numa_faults_locality[NUMA_FAULT_MIGRATE_FAIL]) {
 		p->numa_scan_period = min(p->numa_scan_period_max,
 			p->numa_scan_period << 1);
 
@@ -3720,40 +3723,36 @@ static void update_task_scan_period(struct task_struct *p,
 	/*
 	 * Prepare to scale scan period relative to the current period.
 	 *	 == NUMA_PERIOD_THRESHOLD scan period stays the same
-	 *       <  NUMA_PERIOD_THRESHOLD scan period decreases (scan faster)
+	 *       <  NUMA_PERIOD_THRESHOLD scan period may decrease if the
+	 *                            remote-private signal is strong enough
 	 *	 >= NUMA_PERIOD_THRESHOLD scan period increases (scan slower)
 	 */
 	period_slot = DIV_ROUND_UP(p->numa_scan_period, NUMA_PERIOD_SLOTS);
 	lr_ratio = (local * NUMA_PERIOD_SLOTS) / locality_faults;
-	ps_ratio = (private * NUMA_PERIOD_SLOTS) / type_faults;
+	sr_ratio = (shared * NUMA_PERIOD_SLOTS) / type_faults;
+	rp_ratio = (remote_private * NUMA_PERIOD_SLOTS) / locality_faults;
+	ratio = max(lr_ratio, sr_ratio);
 
-	if (ps_ratio >= NUMA_PERIOD_THRESHOLD) {
+	if (ratio >= NUMA_PERIOD_THRESHOLD) {
 		/*
-		 * Most memory accesses are local. There is no need to
-		 * do fast NUMA scanning, since memory is already local.
+		 * Most memory accesses are local or shared. Local faults do not
+		 * need fast scanning; shared faults may just be moved elsewhere by
+		 * other tasks.
 		 */
-		int slot = ps_ratio - NUMA_PERIOD_THRESHOLD;
-		if (!slot)
-			slot = 1;
-		diff = slot * period_slot;
-	} else if (lr_ratio >= NUMA_PERIOD_THRESHOLD) {
-		/*
-		 * Most memory accesses are shared with other tasks.
-		 * There is no point in continuing fast NUMA scanning,
-		 * since other tasks may just move the memory elsewhere.
-		 */
-		int slot = lr_ratio - NUMA_PERIOD_THRESHOLD;
+		int slot = ratio - NUMA_PERIOD_THRESHOLD;
 		if (!slot)
 			slot = 1;
 		diff = slot * period_slot;
 	} else {
 		/*
-		 * Private memory faults exceed (SLOTS-THRESHOLD)/SLOTS,
-		 * yet they are not on the local NUMA node. Speed up
-		 * NUMA scanning to get the memory moved over.
+		 * Only speed up scanning when enough faults are both private
+		 * and remote. Mixed windows dominated by shared remote faults
+		 * should not create extra hinting overhead.
 		 */
-		int ratio = max(lr_ratio, ps_ratio);
-		diff = -(NUMA_PERIOD_THRESHOLD - ratio) * period_slot;
+		if (rp_ratio >= NUMA_PERIOD_SLOTS - NUMA_PERIOD_THRESHOLD)
+			diff = -(NUMA_PERIOD_THRESHOLD - ratio) * period_slot;
+		else
+			diff = 0;
 	}
 
 	p->numa_scan_period = clamp(p->numa_scan_period + diff,
@@ -3905,8 +3904,8 @@ static void task_numa_placement(struct task_struct *p)
 	p->numa_scan_seq = seq;
 	p->numa_scan_period_max = task_scan_max(p);
 
-	total_faults = p->numa_faults_locality[0] +
-		       p->numa_faults_locality[1];
+	total_faults = p->numa_faults_locality[NUMA_FAULT_REMOTE] +
+		       p->numa_faults_locality[NUMA_FAULT_LOCAL];
 	runtime = numa_get_avg_runtime(p, &period);
 
 	/* If the task is part of a group prevent parallel updates to group stats */
@@ -4261,11 +4260,14 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	if (migrated)
 		p->numa_pages_migrated += pages;
 	if (flags & TNF_MIGRATE_FAIL)
-		p->numa_faults_locality[2] += pages;
+		p->numa_faults_locality[NUMA_FAULT_MIGRATE_FAIL] += pages;
 
 	p->numa_faults[task_faults_idx(NUMA_MEMBUF, mem_node, priv)] += pages;
 	p->numa_faults[task_faults_idx(NUMA_CPUBUF, cpu_node, priv)] += pages;
-	p->numa_faults_locality[local] += pages;
+	if (!local && priv)
+		p->numa_faults_locality[NUMA_FAULT_REMOTE_PRIVATE] += pages;
+	p->numa_faults_locality[local ? NUMA_FAULT_LOCAL :
+				 NUMA_FAULT_REMOTE] += pages;
 }
 
 static void reset_ptenuma_scan(struct task_struct *p)
