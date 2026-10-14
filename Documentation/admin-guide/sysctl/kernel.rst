@@ -765,6 +765,22 @@ will be limited to be no more than the set value.
 A rule of thumb is to set this to less than 1/10 of the PMEM node
 write bandwidth.
 
+numa_balancing_promote_free_space_bypass
+========================================
+
+Controls whether memory tiering promotion may bypass the normal
+hint-fault hotness check and promotion rate limit when the target
+fast-tier node has enough free space.
+
+The default value is 1.  In this mode, if the fast tier has enough free
+space, recently accessed slow-tier pages can be promoted without the
+hotness check or the promotion rate limit, so the kernel can fill
+available fast-tier capacity.
+
+When set to 0, enough free space no longer bypasses these controls.
+A slow-tier page must pass the normal hotness and rate-limit checks before
+promotion.
+
 oops_all_cpu_backtrace
 ======================
 
