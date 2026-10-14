@@ -31,6 +31,8 @@
 #include <linux/kmemleak.h>
 #include <trace/events/cma.h>
 
+#include <asm/sections.h>
+
 #include "internal.h"
 #include "cma.h"
 #include "mm_init.h"
@@ -66,6 +68,11 @@ EXPORT_SYMBOL_GPL(cma_get_name);
 bool cma_has_fixed_base(const struct cma *cma)
 {
 	return test_bit(CMA_FIXED_BASE, &cma->flags);
+}
+
+static bool cma_overlaps_kernel_image(phys_addr_t base, phys_addr_t size)
+{
+	return base < __pa_symbol(_end) && __pa_symbol(_text) < base + size;
 }
 
 static unsigned long cma_bitmap_aligned_mask(const struct cma *cma,
@@ -294,6 +301,22 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	/* Sanity checks */
 	if (!size || !memblock_is_region_reserved(base, size))
 		return -EINVAL;
+
+	/*
+	 * The area being already reserved is expected here, so an overlap with
+	 * the kernel image cannot be told apart from the normal case by looking
+	 * at memblock alone. Check for it explicitly: activating such an area
+	 * clears PageReserved on the kernel's own text and data and releases
+	 * them to the page allocator.
+	 */
+	if (cma_overlaps_kernel_image(base, size)) {
+		phys_addr_t text = __pa_symbol(_text);
+		phys_addr_t end = __pa_symbol(_end);
+
+		pr_err("area %s (%pa, size %pa) overlaps kernel image [%pa-%pa]\n",
+		       name ?: "(unnamed)", &base, &size, &text, &end);
+		return -EBUSY;
+	}
 
 	/*
 	 * CMA uses CMA_MIN_ALIGNMENT_BYTES as alignment requirement which
