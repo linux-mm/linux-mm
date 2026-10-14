@@ -28,6 +28,7 @@
 #include <linux/vmalloc.h>
 #include <linux/dma-map-ops.h>
 #include <linux/kexec_handover.h>
+#include <linux/cma.h>
 #include "kexec_internal.h"
 
 #ifdef CONFIG_KEXEC_SIG
@@ -671,6 +672,7 @@ static int kexec_walk_resources(struct kexec_buf *kbuf,
 static int kexec_alloc_contig(struct kexec_buf *kbuf)
 {
 	size_t nr_pages = kbuf->memsz >> PAGE_SHIFT;
+	struct cma *cma;
 	unsigned long mem;
 	struct page *p;
 
@@ -681,6 +683,16 @@ static int kexec_alloc_contig(struct kexec_buf *kbuf)
 	/* Skip CMA logic for crash kernel */
 	if (kbuf->image->type == KEXEC_TYPE_CRASH)
 		return -EPERM;
+
+	/*
+	 * The next kernel runs from here rather than being copied out, so it
+	 * would declare this area again from the same description and release
+	 * the pages holding its own image to the page allocator. Only an area
+	 * this kernel placed itself is safe to use.
+	 */
+	cma = dev_get_cma_area(NULL);
+	if (!cma || cma_has_fixed_base(cma))
+		return -EOPNOTSUPP;
 
 	p = dma_alloc_from_contiguous(NULL, nr_pages, get_order(kbuf->buf_align), true);
 	if (!p)
