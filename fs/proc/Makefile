@@ -21,6 +21,7 @@ proc-y += interrupts.o
 endif
 proc-y	+= loadavg.o
 proc-y	+= meminfo.o
+proc-y	+= oom.o
 proc-y	+= stat.o
 proc-y	+= uptime.o
 proc-y	+= util.o
