@@ -832,6 +832,16 @@ struct task_ipi_mask {
 struct task_ipi_mask { };
 #endif
 
+#ifdef CONFIG_NUMA_BALANCING
+enum numa_faults_locality {
+	NUMA_FAULT_REMOTE,
+	NUMA_FAULT_LOCAL,
+	NUMA_FAULT_MIGRATE_FAIL,
+	NUMA_FAULT_REMOTE_PRIVATE,
+	NR_NUMA_FAULT_LOCALITY,
+};
+#endif
+
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -1422,11 +1432,10 @@ struct task_struct {
 
 	/*
 	 * numa_faults_locality tracks if faults recorded during the last
-	 * scan window were remote/local or failed to migrate. The task scan
-	 * period is adapted based on the locality of the faults with different
-	 * weights depending on whether they were shared or private faults
+	 * scan window were remote/local, remote private, or failed to migrate.
+	 * The task scan period is adapted based on those fault patterns.
 	 */
-	unsigned long			numa_faults_locality[3];
+	unsigned long			numa_faults_locality[NR_NUMA_FAULT_LOCALITY];
 
 	unsigned long			numa_pages_migrated;
 #endif /* CONFIG_NUMA_BALANCING */
