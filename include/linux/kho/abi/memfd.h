@@ -87,6 +87,9 @@ struct memfd_luo_ser {
 	struct kho_vmalloc folios;
 } __packed;
 
+/* The execute bits were set on the memfd when its seals were applied. */
+#define MEMFD_LUO_FL_EXEC_BIT		BIT(0)
+
 /* The compatibility string for memfd file handler */
 #define MEMFD_LUO_FH_COMPATIBLE	"memfd-v2"
 
