@@ -53,17 +53,18 @@ def get_memcg_info(page):
     """Retrieve memory cgroup information for a page."""
     try:
         MEMCG_DATA_OBJEXTS = prog.constant("MEMCG_DATA_OBJEXTS").value_()
-        MEMCG_DATA_KMEM = prog.constant("MEMCG_DATA_KMEM").value_()
         mask = prog.constant('__NR_MEMCG_DATA_FLAGS').value_() - 1
         memcg_data = page.memcg_data.read_()
         if memcg_data & MEMCG_DATA_OBJEXTS:
             slabobj_ext = cast("struct slabobj_ext *", memcg_data & ~mask)
-            memcg = slabobj_ext.objcg.memcg.value_()
-        elif memcg_data & MEMCG_DATA_KMEM:
-            objcg = cast("struct obj_cgroup *", memcg_data & ~mask)
-            memcg = objcg.memcg.value_()
+            try:
+                objcg = slabobj_ext._objcg
+            except AttributeError:
+                objcg = slabobj_ext.objcg
+            memcg = objcg.memcg
         else:
-            memcg = cast("struct mem_cgroup *", memcg_data & ~mask)
+            objcg = Object(prog, "struct obj_cgroup *", memcg_data & ~mask)
+            memcg = objcg.memcg
 
         if memcg.value_() == 0:
             return "none", "/sys/fs/cgroup/memory/"
