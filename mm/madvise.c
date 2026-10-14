@@ -436,6 +436,62 @@ static struct folio *madvise_lru_huge_pmd_folio(struct vm_area_struct *vma,
 		return NULL;
 	return folio;
 }
+
+/*
+ * Return false only when the folio was split and the caller must walk the
+ * new PTEs.
+ */
+static bool madvise_lru_huge_pmd(pmd_t *pmd, unsigned long addr,
+		unsigned long next, struct mm_walk *walk,
+		bool pageout_anon_only)
+{
+	const struct madvise_walk_private *private = walk->private;
+	const bool spans_pmd = next - addr == HPAGE_PMD_SIZE;
+	struct mmu_gather *tlb = private->tlb;
+	struct vm_area_struct *vma = walk->vma;
+	bool pageout = private->pageout;
+	LIST_HEAD(folio_list);
+	struct folio *folio;
+	spinlock_t *ptl;
+	pmd_t orig_pmd;
+
+	tlb_change_page_size(tlb, HPAGE_PMD_SIZE);
+	ptl = pmd_trans_huge_lock(pmd, vma);
+	if (!ptl)
+		return true;
+
+	orig_pmd = *pmd;
+	folio = madvise_lru_huge_pmd_folio(vma, addr, orig_pmd,
+			pageout_anon_only);
+	if (!folio)
+		goto unlock;
+
+	if (!spans_pmd) {
+		if (!folio_trylock(folio))
+			goto unlock;
+		folio_get(folio);
+		spin_unlock(ptl);
+		return madvise_lru_split_folio(folio) != 0;
+	}
+
+	if (!pageout)
+		madvise_cold_pmd(tlb, vma, pmd, addr, orig_pmd);
+	madvise_lru_folio(folio, pageout, &folio_list);
+unlock:
+	spin_unlock(ptl);
+	if (pageout)
+		reclaim_pages(&folio_list);
+	cond_resched();
+	return true;
+}
+#else
+/* pmd_trans_huge() is always false without THP, so this is never called. */
+static bool madvise_lru_huge_pmd(pmd_t *pmd, unsigned long addr,
+		unsigned long next, struct mm_walk *walk,
+		bool pageout_anon_only)
+{
+	return false;
+}
 #endif
 
 static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
@@ -459,46 +515,9 @@ static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
 	pageout_anon_only = pageout && !vma_is_anonymous(vma) &&
 			    !can_do_file_pageout(vma);
 
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-	if (pmd_trans_huge(*pmd)) {
-		pmd_t orig_pmd;
-		unsigned long next = pmd_addr_end(addr, end);
-		const bool spans_pmd = next - addr == HPAGE_PMD_SIZE;
-
-		tlb_change_page_size(tlb, HPAGE_PMD_SIZE);
-		ptl = pmd_trans_huge_lock(pmd, vma);
-		if (!ptl)
-			return 0;
-
-		orig_pmd = *pmd;
-		folio = madvise_lru_huge_pmd_folio(vma, addr, orig_pmd,
-				pageout_anon_only);
-		if (!folio)
-			goto huge_unlock;
-
-		if (!spans_pmd) {
-			if (!folio_trylock(folio))
-				goto huge_unlock;
-			folio_get(folio);
-			spin_unlock(ptl);
-			if (!madvise_lru_split_folio(folio))
-				goto regular_folio;
-			return 0;
-		}
-
-		if (!pageout)
-			madvise_cold_pmd(tlb, vma, pmd, addr, orig_pmd);
-		madvise_lru_folio(folio, pageout, &folio_list);
-huge_unlock:
-		spin_unlock(ptl);
-		if (pageout)
-			reclaim_pages(&folio_list);
-		cond_resched();
+	if (pmd_trans_huge(*pmd) &&
+	    madvise_lru_huge_pmd(pmd, addr, end, walk, pageout_anon_only))
 		return 0;
-	}
-
-regular_folio:
-#endif
 	tlb_change_page_size(tlb, PAGE_SIZE);
 restart:
 	start_pte = pte = pte_offset_map_lock(vma->vm_mm, pmd, addr, &ptl);
