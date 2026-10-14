@@ -278,9 +278,8 @@ enum node_stat_item {
 	 */
 	PGPROMOTE_CANDIDATE,
 	/**
-	 * Not rate-limited (NRL) candidate pages for those can be promoted
-	 * without considering hot threshold because of enough free pages in
-	 * fast-tier node.  These promotions bypass the regular hotness checks
+	 * Not rate-limited (NRL) candidate pages that are promoted through the
+	 * free-space bypass. These promotions bypass the regular hotness checks
 	 * and do NOT influence the promotion rate-limiter or
 	 * threshold-adjustment logic.
 	 * This is for statistics/monitoring purposes.
