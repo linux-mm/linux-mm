@@ -4176,8 +4176,9 @@ void task_numa_free(struct task_struct *p, bool final)
 		kfree(numa_faults);
 	} else {
 		p->total_numa_faults = 0;
-		for (i = 0; i < NR_NUMA_HINT_FAULT_STATS * nr_node_ids; i++)
-			numa_faults[i] = 0;
+		memset(p->numa_faults_locality, 0, sizeof(p->numa_faults_locality));
+		memset(numa_faults, 0, sizeof(*numa_faults) *
+		       NR_NUMA_HINT_FAULT_BUCKETS * nr_node_ids);
 	}
 }
 
