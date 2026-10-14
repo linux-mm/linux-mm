@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,6 +13,7 @@
 #include <sys/ipc.h>
 #include <sys/mman.h>
 #include <sys/shm.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "kselftest_harness.h"
@@ -208,8 +210,9 @@ static bool page_is_present(int pagemap_fd, char *addr)
 	return pagemap_get_entry(pagemap_fd, addr) & PM_PRESENT;
 }
 
-/* Map a shared mapping of an unlinked, zero-filled temporary file. */
-static char *map_temp_file(struct __test_metadata *_metadata, size_t size)
+/* Map an unlinked, zero-filled temporary file with the given permissions. */
+static char *map_temp_file(struct __test_metadata *_metadata, size_t size,
+			   int flags, mode_t mode)
 {
 	char template[] = "/tmp/madvise-pageout-XXXXXX";
 	char *mapping;
@@ -219,12 +222,19 @@ static char *map_temp_file(struct __test_metadata *_metadata, size_t size)
 	ASSERT_GE(fd, 0);
 	ASSERT_EQ(unlink(template), 0);
 	ASSERT_EQ(ftruncate(fd, size), 0);
+	ASSERT_EQ(fchmod(fd, mode), 0);
 
-	mapping = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	mapping = mmap(NULL, size, PROT_READ | PROT_WRITE, flags, fd, 0);
 	ASSERT_NE(mapping, MAP_FAILED);
 	close(fd);
 
 	return mapping;
+}
+
+/* Become an unprivileged user without capabilities. */
+static bool drop_privileges(void)
+{
+	return !setgroups(0, NULL) && !setgid(65534) && !setuid(65534);
 }
 
 /*
@@ -432,7 +442,7 @@ TEST_F(madvise, cold_preserves_dirty_shared_file_page)
 {
 	char *mapping;
 
-	mapping = map_temp_file(_metadata, page_size);
+	mapping = map_temp_file(_metadata, page_size, MAP_SHARED, 0600);
 	mapping[0] = 1;
 
 	ASSERT_EQ(madvise(mapping, page_size, MADV_COLD), 0);
@@ -449,7 +459,7 @@ TEST_F(madvise, pageout_preserves_dirty_shared_file_page)
 {
 	char *mapping;
 
-	mapping = map_temp_file(_metadata, page_size);
+	mapping = map_temp_file(_metadata, page_size, MAP_SHARED, 0600);
 	mapping[0] = 1;
 
 	if (!pageout_until_evicted(_metadata, mapping, page_size,
@@ -637,6 +647,91 @@ TEST_F(madvise, cold_preserves_half_of_pte_mapped_thp)
 	assert_filled(_metadata, mapping, pmd_size);
 
 	ASSERT_EQ(munmap(mapping, pmd_size), 0);
+}
+
+/*
+ * The owner of a file may page out its clean page-cache pages. Run as an
+ * unprivileged owner, so that capabilities cannot stand in for ownership.
+ */
+TEST_F(madvise, pageout_evicts_owned_file_page)
+{
+	char *mapping, *control;
+
+	if (!geteuid() && !drop_privileges())
+		SKIP(return, "could not drop privileges");
+	pin_to_current_cpu(_metadata);
+
+	/* Make sure a writable file page can be paged out at all. */
+	control = map_temp_file(_metadata, page_size, MAP_PRIVATE, 0600);
+	ASSERT_EQ(control[0], 0);
+	if (!pageout_until_evicted(_metadata, control, page_size,
+				   self->pagemap_fd))
+		SKIP(return, "MADV_PAGEOUT did not evict a file page");
+
+	mapping = map_temp_file(_metadata, page_size, MAP_PRIVATE, 0400);
+	ASSERT_EQ(mapping[0], 0);
+	ASSERT_TRUE(pageout_until_evicted(_metadata, mapping, page_size,
+					  self->pagemap_fd));
+	ASSERT_EQ(mapping[0], 0);
+
+	ASSERT_EQ(munmap(mapping, page_size), 0);
+	ASSERT_EQ(munmap(control, page_size), 0);
+}
+
+/*
+ * A caller that neither owns nor may write a file must not page out its
+ * shared mappings. MADV_PAGEOUT succeeds but leaves the page resident.
+ */
+TEST_F(madvise, pageout_skips_unauthorized_shared_file)
+{
+	char *mapping;
+
+	if (geteuid())
+		SKIP(return, "requires root to change credentials");
+	mapping = map_temp_file(_metadata, page_size, MAP_SHARED, 0400);
+	if (!drop_privileges())
+		SKIP(return, "could not drop privileges");
+
+	ASSERT_EQ(mapping[0], 0);
+	ASSERT_TRUE(pagemap_is_populated(self->pagemap_fd, mapping));
+	ASSERT_EQ(madvise(mapping, page_size, MADV_PAGEOUT), 0);
+	ASSERT_TRUE(pagemap_is_populated(self->pagemap_fd, mapping));
+	ASSERT_EQ(mapping[0], 0);
+
+	ASSERT_EQ(munmap(mapping, page_size), 0);
+}
+
+/*
+ * A caller that neither owns nor may write a file may page out the anonymous
+ * COW pages of a private mapping of it, but must leave the file pages
+ * resident.
+ */
+TEST_F(madvise, pageout_private_file_reclaims_only_cow)
+{
+	char *mapping;
+	bool swapped;
+
+	if (geteuid())
+		SKIP(return, "requires root to change credentials");
+	mapping = map_temp_file(_metadata, 2 * page_size, MAP_PRIVATE,
+				0400);
+	if (!drop_privileges())
+		SKIP(return, "could not drop privileges");
+
+	ASSERT_EQ(mapping[0], 0);
+	ASSERT_EQ(mapping[page_size], 0);
+	mapping[0] = 1;
+
+	ASSERT_EQ(madvise(mapping, 2 * page_size, MADV_PAGEOUT), 0);
+	ASSERT_TRUE(pagemap_is_populated(self->pagemap_fd,
+					 mapping + page_size));
+	swapped = pagemap_is_swapped(self->pagemap_fd, mapping);
+	ASSERT_EQ(mapping[0], 1);
+	ASSERT_EQ(mapping[page_size], 0);
+	if (!swapped)
+		SKIP(return, "MADV_PAGEOUT did not swap the COW page");
+
+	ASSERT_EQ(munmap(mapping, 2 * page_size), 0);
 }
 
 TEST_HARNESS_MAIN
