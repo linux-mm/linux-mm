@@ -4214,6 +4214,21 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 		return;
 
 	/*
+	 * Slow-tier pages use last_cpupid as access-time metadata instead of
+	 * a real cpupid. Do not feed these faults into normal task placement
+	 * when normal NUMA balancing is disabled.
+	 */
+	if (last_cpupid == LAST_CPUPID_ACCESS_TIME) {
+		if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL)) {
+			if (migrated)
+				p->numa_pages_migrated += pages;
+			return;
+		}
+
+		last_cpupid = LAST_CPUPID_UNSET;
+	}
+
+	/*
 	 * NUMA faults statistics are unnecessary for the slow memory
 	 * node for memory tiering mode.
 	 */
@@ -4221,6 +4236,15 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	    (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING ||
 	     !cpupid_valid(last_cpupid)))
 		return;
+
+	/*
+	 * A stale slow-tier access timestamp can survive after memory tiering
+	 * is disabled and later reach here as if it was a cpupid from a
+	 * top-tier page. Treat any non-cpupid value as an ordinary first
+	 * access before task_numa_group() decodes a CPU from it.
+	 */
+	if (unlikely(!cpupid_valid(last_cpupid)))
+		last_cpupid = LAST_CPUPID_UNSET;
 
 	/* Allocate buffer to track faults on a per-node basis */
 	if (unlikely(!p->numa_faults)) {
@@ -4239,7 +4263,7 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	 * First accesses are treated as private, otherwise consider accesses
 	 * to be private if the accessing pid has not changed
 	 */
-	if (unlikely(last_cpupid == (-1 & LAST_CPUPID_MASK))) {
+	if (unlikely(last_cpupid == LAST_CPUPID_UNSET)) {
 		priv = 1;
 	} else {
 		priv = cpupid_match_pid(p, last_cpupid);
