@@ -2561,6 +2561,9 @@ static inline int folio_nid(const struct folio *folio)
 #define PAGE_ACCESS_TIME_MASK				\
 	(LAST_CPUPID_MASK << PAGE_ACCESS_TIME_BUCKETS)
 
+#define LAST_CPUPID_UNSET		(-1 & LAST_CPUPID_MASK)
+#define LAST_CPUPID_ACCESS_TIME		(-2 & LAST_CPUPID_MASK)
+
 static inline int cpu_pid_to_cpupid(int cpu, int pid)
 {
 	return ((cpu & LAST__CPU_MASK) << LAST__PID_SHIFT) | (pid & LAST__PID_MASK);
@@ -2609,7 +2612,7 @@ static inline int folio_last_cpupid(struct folio *folio)
 }
 static inline void page_cpupid_reset_last(struct page *page)
 {
-	page->_last_cpupid = -1 & LAST_CPUPID_MASK;
+	page->_last_cpupid = LAST_CPUPID_UNSET;
 }
 #else
 static inline int folio_last_cpupid(struct folio *folio)
