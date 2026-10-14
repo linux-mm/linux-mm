@@ -46,6 +46,8 @@ static inline int shrinker_unit_alloc(struct shrinker_info *new,
 	int start = old ? DIV_ROUND_UP(old->map_nr_max, SHRINKER_UNIT_BITS) : 0;
 	int i;
 
+	BUILD_BUG_ON(!is_power_of_2(sizeof(struct shrinker_info_unit)));
+
 	for (i = start; i < nr; i++) {
 		unit = kzalloc_node(sizeof(*unit), GFP_KERNEL, nid);
 		if (!unit) {
@@ -159,7 +161,7 @@ static int expand_one_shrinker_info(struct mem_cgroup *memcg, int new_size,
 static int expand_shrinker_info(int new_id)
 {
 	int ret = 0;
-	int new_nr_max = round_up(new_id + 1, SHRINKER_UNIT_BITS);
+	int new_nr_max = roundup(new_id + 1, SHRINKER_UNIT_BITS);
 	int new_size, old_size = 0;
 	struct mem_cgroup *memcg;
 
