@@ -608,16 +608,13 @@ void swap_writeback_dropbehind_folio(struct folio *folio)
  *
  * Its ok to check the swapcache flag without the folio lock
  * here because we are going to recheck again inside
- * folio_free_swap() _with_ the lock.
+ * __try_to_reclaim_swap() _with_ the lock.
  * 					- Marcelo
  */
 void free_swap_cache(struct folio *folio)
 {
-	if (folio_test_swapcache(folio) && !folio_mapped(folio) &&
-	    folio_trylock(folio)) {
-		folio_free_swap(folio);
-		folio_unlock(folio);
-	}
+	if (folio_test_swapcache(folio) && !folio_mapped(folio))
+		swap_reclaim_entry(folio->swap);
 }
 
 /*
