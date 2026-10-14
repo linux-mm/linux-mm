@@ -85,6 +85,11 @@ TEST_F(madvise, cold_skips_pte_hole)
 	check_skips_pte_hole(_metadata, self->pagemap_fd, MADV_COLD);
 }
 
+TEST_F(madvise, pageout_skips_pte_hole)
+{
+	check_skips_pte_hole(_metadata, self->pagemap_fd, MADV_PAGEOUT);
+}
+
 /* Neither hint may be applied to locked memory. */
 TEST_F(madvise, locked_vma_is_rejected)
 {
@@ -129,6 +134,11 @@ static void check_skips_swapped_pte(struct __test_metadata *_metadata,
 TEST_F(madvise, cold_skips_swapped_pte)
 {
 	check_skips_swapped_pte(_metadata, self->pagemap_fd, MADV_COLD);
+}
+
+TEST_F(madvise, pageout_skips_swapped_pte)
+{
+	check_skips_swapped_pte(_metadata, self->pagemap_fd, MADV_PAGEOUT);
 }
 
 TEST_HARNESS_MAIN
