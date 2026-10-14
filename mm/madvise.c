@@ -397,6 +397,16 @@ static bool madvise_lru_folio_is_filtered(struct folio *folio,
 	       (pageout_anon_only && !folio_test_anon(folio));
 }
 
+/* Split a locked and referenced folio, then drop the lock and reference. */
+static int madvise_lru_split_folio(struct folio *folio)
+{
+	int err = split_folio(folio);
+
+	folio_unlock(folio);
+	folio_put(folio);
+	return err;
+}
+
 static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
 		unsigned long end, struct mm_walk *walk)
 {
@@ -445,16 +455,11 @@ static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
 			goto huge_unlock;
 
 		if (next - addr != HPAGE_PMD_SIZE) {
-			int err;
-
 			if (!folio_trylock(folio))
 				goto huge_unlock;
 			folio_get(folio);
 			spin_unlock(ptl);
-			err = split_folio(folio);
-			folio_unlock(folio);
-			folio_put(folio);
-			if (!err)
+			if (!madvise_lru_split_folio(folio))
 				goto regular_folio;
 			return 0;
 		}
@@ -526,9 +531,7 @@ restart:
 				lazy_mmu_mode_disable();
 				pte_unmap_unlock(start_pte, ptl);
 				start_pte = NULL;
-				err = split_folio(folio);
-				folio_unlock(folio);
-				folio_put(folio);
+				err = madvise_lru_split_folio(folio);
 				start_pte = pte =
 					pte_offset_map_lock(mm, pmd, addr, &ptl);
 				if (!start_pte)
