@@ -7,7 +7,10 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <sys/ipc.h>
 #include <sys/mman.h>
+#include <sys/shm.h>
 #include <unistd.h>
 
 #include "kselftest_harness.h"
@@ -21,6 +24,8 @@ static size_t page_size;
 FIXTURE(madvise)
 {
 	int pagemap_fd;
+	/* Opening it needs CAP_SYS_ADMIN, -1 otherwise. */
+	int kpageflags_fd;
 };
 
 FIXTURE_SETUP(madvise)
@@ -29,10 +34,13 @@ FIXTURE_SETUP(madvise)
 
 	self->pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
 	ASSERT_GE(self->pagemap_fd, 0);
+	self->kpageflags_fd = open("/proc/kpageflags", O_RDONLY);
 }
 
 FIXTURE_TEARDOWN(madvise)
 {
+	if (self->kpageflags_fd >= 0)
+		close(self->kpageflags_fd);
 	close(self->pagemap_fd);
 }
 
@@ -45,6 +53,22 @@ static bool pageout_until_swapped(struct __test_metadata *_metadata,
 	for (retry = 0; retry < PAGEOUT_RETRIES; retry++) {
 		ASSERT_EQ(madvise(mapping, size, MADV_PAGEOUT), 0);
 		if (pagemap_is_swapped(pagemap_fd, mapping))
+			return true;
+		usleep(10000);
+	}
+
+	return false;
+}
+
+/* Page out the range until its first page is no longer mapped. */
+static bool pageout_until_evicted(struct __test_metadata *_metadata,
+				  char *mapping, size_t size, int pagemap_fd)
+{
+	int retry;
+
+	for (retry = 0; retry < PAGEOUT_RETRIES; retry++) {
+		ASSERT_EQ(madvise(mapping, size, MADV_PAGEOUT), 0);
+		if (!pagemap_is_populated(pagemap_fd, mapping))
 			return true;
 		usleep(10000);
 	}
@@ -65,6 +89,25 @@ static void pin_to_current_cpu(struct __test_metadata *_metadata)
 	CPU_ZERO(&mask);
 	CPU_SET(cpu, &mask);
 	ASSERT_EQ(sched_setaffinity(0, sizeof(mask), &mask), 0);
+}
+
+/* Map a shared mapping of an unlinked, zero-filled temporary file. */
+static char *map_temp_file(struct __test_metadata *_metadata, size_t size)
+{
+	char template[] = "/tmp/madvise-pageout-XXXXXX";
+	char *mapping;
+	int fd;
+
+	fd = mkstemp(template);
+	ASSERT_GE(fd, 0);
+	ASSERT_EQ(unlink(template), 0);
+	ASSERT_EQ(ftruncate(fd, size), 0);
+
+	mapping = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	ASSERT_NE(mapping, MAP_FAILED);
+	close(fd);
+
+	return mapping;
 }
 
 /*
@@ -265,6 +308,101 @@ TEST_F(madvise, cold_skips_swapped_pte)
 TEST_F(madvise, pageout_skips_swapped_pte)
 {
 	check_skips_swapped_pte(_metadata, self->pagemap_fd, MADV_PAGEOUT);
+}
+
+/* MADV_COLD must not discard a dirty page of a shared file mapping. */
+TEST_F(madvise, cold_preserves_dirty_shared_file_page)
+{
+	char *mapping;
+
+	mapping = map_temp_file(_metadata, page_size);
+	mapping[0] = 1;
+
+	ASSERT_EQ(madvise(mapping, page_size, MADV_COLD), 0);
+	ASSERT_EQ(mapping[0], 1);
+
+	ASSERT_EQ(munmap(mapping, page_size), 0);
+}
+
+/*
+ * MADV_PAGEOUT may write a dirty shared file page back or leave it resident,
+ * but must not discard it.
+ */
+TEST_F(madvise, pageout_preserves_dirty_shared_file_page)
+{
+	char *mapping;
+
+	mapping = map_temp_file(_metadata, page_size);
+	mapping[0] = 1;
+
+	if (!pageout_until_evicted(_metadata, mapping, page_size,
+				   self->pagemap_fd))
+		SKIP(return, "MADV_PAGEOUT did not unmap the page");
+	ASSERT_EQ(mapping[0], 1);
+
+	ASSERT_EQ(munmap(mapping, page_size), 0);
+}
+
+/* MADV_PAGEOUT must not lose the contents of shared anonymous memory. */
+TEST_F(madvise, pageout_preserves_shared_anon_page)
+{
+	char *mapping;
+
+	mapping = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+		       MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	ASSERT_NE(mapping, MAP_FAILED);
+	mapping[0] = 1;
+
+	if (!pageout_until_evicted(_metadata, mapping, page_size,
+				   self->pagemap_fd))
+		SKIP(return, "MADV_PAGEOUT did not evict the page");
+	ASSERT_EQ(mapping[0], 1);
+
+	ASSERT_EQ(munmap(mapping, page_size), 0);
+}
+
+/*
+ * SHM_LOCK makes shmem pages unevictable without setting VM_LOCKED on the
+ * VMA, so MADV_PAGEOUT accepts the range but must not reclaim the page.
+ */
+TEST_F(madvise, pageout_skips_unevictable_page)
+{
+	unsigned long pfn;
+	uint64_t flags;
+	char *mapping;
+	int shmid;
+
+	if (self->kpageflags_fd < 0)
+		SKIP(return, "requires root to read page flags");
+	shmid = shmget(IPC_PRIVATE, page_size, IPC_CREAT | 0600);
+	ASSERT_GE(shmid, 0);
+	if (shmctl(shmid, SHM_LOCK, NULL)) {
+		shmctl(shmid, IPC_RMID, NULL);
+		SKIP(return, "could not lock a shmem segment");
+	}
+	mapping = shmat(shmid, NULL, 0);
+	/* The segment is destroyed once it is detached. */
+	shmctl(shmid, IPC_RMID, NULL);
+	ASSERT_NE(mapping, (void *)-1);
+	pin_to_current_cpu(_metadata);
+	mapping[0] = 1;
+
+	/*
+	 * MADV_COLD drains this CPU's LRU add batch, which makes the page
+	 * unevictable.
+	 */
+	ASSERT_EQ(madvise(mapping, page_size, MADV_COLD), 0);
+	pfn = pagemap_get_pfn(self->pagemap_fd, mapping);
+	ASSERT_NE(pfn, -1UL);
+	ASSERT_EQ(pageflags_get(pfn, self->kpageflags_fd, &flags), 0);
+	if (!(flags & KPF_UNEVICTABLE))
+		SKIP(return, "could not make the page unevictable");
+
+	ASSERT_EQ(madvise(mapping, page_size, MADV_PAGEOUT), 0);
+	ASSERT_TRUE(pagemap_is_populated(self->pagemap_fd, mapping));
+	ASSERT_EQ(mapping[0], 1);
+
+	ASSERT_EQ(shmdt(mapping), 0);
 }
 
 TEST_HARNESS_MAIN
