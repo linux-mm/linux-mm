@@ -3697,6 +3697,8 @@ static void update_task_scan_period(struct task_struct *p,
 
 	unsigned long remote = p->numa_faults_locality[0];
 	unsigned long local = p->numa_faults_locality[1];
+	unsigned long locality_faults = local + remote;
+	unsigned long type_faults = private + shared;
 
 	/*
 	 * If there were no record hinting faults then either the task is
@@ -3705,7 +3707,7 @@ static void update_task_scan_period(struct task_struct *p,
 	 * migration then it implies we are migrating too quickly or the local
 	 * node is overloaded. In either case, scan slower
 	 */
-	if (local + shared == 0 || p->numa_faults_locality[2]) {
+	if (!locality_faults || !type_faults || p->numa_faults_locality[2]) {
 		p->numa_scan_period = min(p->numa_scan_period_max,
 			p->numa_scan_period << 1);
 
@@ -3722,8 +3724,8 @@ static void update_task_scan_period(struct task_struct *p,
 	 *	 >= NUMA_PERIOD_THRESHOLD scan period increases (scan slower)
 	 */
 	period_slot = DIV_ROUND_UP(p->numa_scan_period, NUMA_PERIOD_SLOTS);
-	lr_ratio = (local * NUMA_PERIOD_SLOTS) / (local + remote);
-	ps_ratio = (private * NUMA_PERIOD_SLOTS) / (private + shared);
+	lr_ratio = (local * NUMA_PERIOD_SLOTS) / locality_faults;
+	ps_ratio = (private * NUMA_PERIOD_SLOTS) / type_faults;
 
 	if (ps_ratio >= NUMA_PERIOD_THRESHOLD) {
 		/*
