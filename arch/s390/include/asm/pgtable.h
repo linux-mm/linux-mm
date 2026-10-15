@@ -1781,10 +1781,14 @@ static inline pmd_t pmdp_invalidate(struct vm_area_struct *vma,
 	pmd_t pmd = *pmdp;
 
 	VM_WARN_ON_ONCE(!pmd_present(pmd));
+	/*
+	 * _SEGMENT_ENTRY_INVALID alone also marks an old (not young) entry,
+	 * which lockless walkers like GUP-fast may follow. Clear
+	 * _SEGMENT_ENTRY_READ too, so the invalidated entry is pmd_protnone()
+	 * and is not followed, and page table check does not count it.
+	 */
 	pmd = set_pmd_bit(pmd, __pgprot(_SEGMENT_ENTRY_INVALID));
-#ifdef CONFIG_PAGE_TABLE_CHECK
 	pmd = clear_pmd_bit(pmd, __pgprot(_SEGMENT_ENTRY_READ));
-#endif
 	page_table_check_pmd_set(vma->vm_mm, addr, pmdp, pmd);
 	pmd = pmdp_xchg_direct(vma->vm_mm, addr, pmdp, pmd);
 	return pmd;
