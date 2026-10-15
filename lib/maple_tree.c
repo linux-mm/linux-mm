@@ -4789,9 +4789,12 @@ static void mt_free_walk(struct rcu_head *head)
 
 		type = mte_node_type(enode);
 		slots = ma_slots(mte_to_node(enode), type);
-		if ((offset < mt_slots[type]) &&
-		    rcu_dereference_protected(slots[offset],
-					      lock_is_held(&rcu_callback_map)))
+		/*
+		 * Only the first slot_len slots of the parent hold children.
+		 * A maple_range_64 node with fewer children keeps its metadata
+		 * in the last slot, which must not be taken for a node.
+		 */
+		if (offset < mte_to_node(enode)->slot_len)
 			slots = mte_dead_walk(&enode, offset);
 		node = mte_to_node(enode);
 	} while ((node != start) || (node->slot_len < offset));
