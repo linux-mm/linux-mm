@@ -268,4 +268,25 @@ struct liveupdate_session_freeze {
 #define LIVEUPDATE_SESSION_FREEZE					\
 	_IO(LIVEUPDATE_IOCTL_TYPE, LIVEUPDATE_CMD_SESSION_FREEZE)
 
+/**
+ * struct liveupdate_memfd_retrieve_arg - Argument for tmpfs file retrieval
+ * @size: Input; sizeof(struct liveupdate_memfd_retrieve_arg)
+ * @fd:   Input; Writable, empty, linked tmpfs file descriptor to restore into.
+ *
+ * Passed via &struct liveupdate_session_retrieve_fd.arg on
+ * %LIVEUPDATE_SESSION_RETRIEVE_FD. This argument is required when retrieving
+ * a preserved linked tmpfs file and is rejected with -EINVAL when retrieving
+ * an anonymous memfd.
+ *
+ * @fd must refer to a writable, empty, linked tmpfs file that is not already
+ * claimed by LUO. On success, the file is populated with the preserved folios,
+ * its size and f_pos are restored, and the file descriptor returned in
+ * &struct liveupdate_session_retrieve_fd.fd references the same underlying open
+ * file description as @fd.
+ */
+struct liveupdate_memfd_retrieve_arg {
+	__u32		size;
+	__s32		fd;
+};
+
 #endif /* _UAPI_LIVEUPDATE_H */

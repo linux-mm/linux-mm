@@ -9,14 +9,14 @@
  */
 
 /**
- * DOC: Memfd Preservation via LUO
+ * DOC: Memfd and Tmpfs Preservation via LUO
  *
  * Overview
  * ========
  *
- * Memory file descriptors (memfd) can be preserved over a kexec using the Live
- * Update Orchestrator (LUO) file preservation. This allows userspace to
- * transfer its memory contents to the next kernel after a kexec.
+ * Memory file descriptors and generic tmpfs files can be preserved over a
+ * kexec using the LUO file preservation. This allows userspace to transfer its
+ * memory contents to the next kernel after a kexec.
  *
  * The preservation is not intended to be transparent. Only select properties of
  * the file are preserved. All others are reset to default. The preserved
@@ -24,16 +24,17 @@
  *
  * .. note::
  *    The LUO API is not stabilized yet, so the preserved properties of a memfd
- *    are also not stable and are subject to backwards incompatible changes.
+ *    or tmpfs file are also not stable and are subject to backwards
+ *    incompatible changes.
  *
  * .. note::
- *    Currently a memfd backed by Hugetlb is not supported. Memfds created
+ *    Currently a file backed by Hugetlb is not supported. Memfds created
  *    with ``MFD_HUGETLB`` will be rejected.
  *
  * Preserved Properties
  * ====================
  *
- * The following properties of the memfd are preserved across kexec:
+ * The following properties of the memfd/tmpfs file are preserved across kexec:
  *
  * File Contents
  *   All data stored in the file is preserved.
@@ -300,6 +301,8 @@ static int memfd_luo_preserve(struct liveupdate_file_op_args *args)
 
 	ser->size = inode_size;
 	ser->seals = seals;
+	if (inode->i_nlink)
+		ser->flags |= MEMFD_LUO_FLAG_TMPFS;
 
 	err = memfd_luo_preserve_folios(args->file, &ser->folios,
 					&folios_ser, &nr_folios);
@@ -516,10 +519,60 @@ put_folios:
 	return err;
 }
 
+static struct file *memfd_luo_get_tmpfs_file(struct liveupdate_file_op_args *args)
+{
+	const struct liveupdate_memfd_retrieve_arg *rarg = args->arg;
+	struct inode *inode;
+	struct file *file;
+	int err;
+
+	if (!rarg)
+		return ERR_PTR(-EINVAL);
+
+	file = fget(rarg->fd);
+	if (!file)
+		return ERR_PTR(-EBADF);
+
+	if (!(file->f_mode & FMODE_WRITE)) {
+		err = -EACCES;
+		goto put_file;
+	}
+
+	if (!shmem_file(file)) {
+		err = -EINVAL;
+		goto put_file;
+	}
+
+	inode = file_inode(file);
+	inode_lock(inode);
+	if (!inode->i_nlink) {
+		err = -EINVAL;
+		goto unlock_inode;
+	}
+
+	if (i_size_read(inode) != 0 || !mapping_empty(inode->i_mapping)) {
+		err = -EBUSY;
+		goto unlock_inode;
+	}
+
+	err = liveupdate_claim_file(args->handler, file);
+	if (err)
+		goto unlock_inode;
+
+	return file;
+
+unlock_inode:
+	inode_unlock(inode);
+put_file:
+	fput(file);
+	return ERR_PTR(err);
+}
+
 static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 {
 	struct memfd_luo_folio_ser *folios_ser;
 	struct memfd_luo_ser *ser;
+	struct inode *inode;
 	struct file *file;
 	int err;
 
@@ -527,50 +580,75 @@ static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 	if (!ser)
 		return -EINVAL;
 
-	/* Make sure the file only has seals supported by this version. */
-	if (ser->seals & ~MEMFD_LUO_ALL_SEALS) {
+	/* Make sure the file only has seals and flags supported by this version. */
+	if ((ser->seals & ~MEMFD_LUO_ALL_SEALS) ||
+	    (ser->flags & ~MEMFD_LUO_ALL_FLAGS)) {
 		err = -EOPNOTSUPP;
 		goto free_ser;
 	}
 
-	/*
-	 * The seals are preserved. Allow sealing here so they can be added
-	 * later.
-	 */
-	file = memfd_alloc_file("", MFD_ALLOW_SEALING);
-	if (IS_ERR(file)) {
-		pr_err("failed to setup file: %pe\n", file);
-		err = PTR_ERR(file);
-		goto free_ser;
-	}
+	if (ser->flags & MEMFD_LUO_FLAG_TMPFS) {
+		file = memfd_luo_get_tmpfs_file(args);
+		if (IS_ERR(file)) {
+			args->retryable = true;
+			return PTR_ERR(file);
+		}
+		inode = file_inode(file);
+	} else {
+		if (args->arg) {
+			args->retryable = true;
+			return -EINVAL;
+		}
 
-	err = memfd_add_seals(file, ser->seals);
-	if (err) {
-		pr_err("failed to add seals: %pe\n", ERR_PTR(err));
-		goto put_file;
-	}
+		/*
+		 * The seals are preserved. Allow sealing here so they can be
+		 * added later.
+		 */
+		file = memfd_alloc_file("", MFD_ALLOW_SEALING);
+		if (IS_ERR(file)) {
+			pr_err("failed to setup file: %pe\n", file);
+			err = PTR_ERR(file);
+			goto free_ser;
+		}
 
-	vfs_setpos(file, ser->pos, MAX_LFS_FILESIZE);
-	i_size_write(file_inode(file), ser->size);
+		err = memfd_add_seals(file, ser->seals);
+		if (err) {
+			pr_err("failed to add seals: %pe\n", ERR_PTR(err));
+			goto put_file;
+		}
+
+		inode = file_inode(file);
+		inode_lock(inode);
+	}
 
 	if (ser->nr_folios) {
 		folios_ser = kho_restore_vmalloc(&ser->folios);
 		if (!folios_ser) {
 			err = -EINVAL;
-			goto put_file;
+			goto unclaim_file;
 		}
 
 		err = memfd_luo_retrieve_folios(file, folios_ser, ser->nr_folios);
 		vfree(folios_ser);
 		if (err)
-			goto put_file;
+			goto unclaim_file;
 	}
+
+	vfs_setpos(file, ser->pos, MAX_LFS_FILESIZE);
+	i_size_write(inode, ser->size);
+	inode_unlock(inode);
 
 	args->file = file;
 	kho_restore_free(ser);
 
 	return 0;
 
+unclaim_file:
+	if (ser->flags & MEMFD_LUO_FLAG_TMPFS) {
+		shmem_truncate_range(inode, 0, (loff_t)-1);
+		liveupdate_unclaim_file(args->handler, file);
+	}
+	inode_unlock(inode);
 put_file:
 	fput(file);
 free_ser:
@@ -581,9 +659,7 @@ free_ser:
 static bool memfd_luo_can_preserve(struct liveupdate_file_handler *handler,
 				   struct file *file)
 {
-	struct inode *inode = file_inode(file);
-
-	return shmem_file(file) && !inode->i_nlink;
+	return shmem_file(file);
 }
 
 static unsigned long memfd_luo_get_id(struct file *file)
@@ -599,6 +675,7 @@ static const struct liveupdate_file_ops memfd_luo_file_ops = {
 	.unpreserve = memfd_luo_unpreserve,
 	.can_preserve = memfd_luo_can_preserve,
 	.get_id = memfd_luo_get_id,
+	.rarg = LIVEUPDATE_ARG(struct liveupdate_memfd_retrieve_arg, fd),
 	.owner = THIS_MODULE,
 };
 
