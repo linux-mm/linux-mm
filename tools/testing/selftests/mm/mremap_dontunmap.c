@@ -335,6 +335,98 @@ static void mremap_dontunmap_partial_mapping_overwrite(void)
 	ksft_test_result_pass("%s\n", __func__);
 }
 
+static long get_vmlck_kb(void)
+{
+	FILE *f = fopen("/proc/self/status", "r");
+	char *line = NULL;
+	size_t len = 0;
+	long kb = -1;
+
+	if (!f)
+		ksft_exit_fail_msg("fopen /proc/self/status: %s\n",
+				   strerror(errno));
+
+	while (getline(&line, &len, f) != -1) {
+		if (sscanf(line, "VmLck: %ld kB", &kb) == 1)
+			break;
+	}
+
+	free(line);
+	fclose(f);
+
+	if (kb < 0)
+		ksft_exit_fail_msg("VmLck not found in /proc/self/status\n");
+
+	return kb;
+}
+
+static void mremap_dontunmap_partial_mlocked(void)
+{
+	unsigned long num_pages = 10;
+	size_t size = num_pages * page_size;
+	size_t half = (num_pages / 2) * page_size;
+	void *src, *dst;
+	long baseline, locked, remapped, after;
+	bool pass;
+
+	baseline = get_vmlck_kb();
+
+	src = mmap(NULL, size, PROT_READ | PROT_WRITE,
+		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (src == MAP_FAILED)
+		ksft_exit_fail_msg("mmap source: %s\n", strerror(errno));
+
+	dst = mmap(NULL, half, PROT_READ | PROT_WRITE,
+		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (dst == MAP_FAILED)
+		ksft_exit_fail_msg("mmap destination: %s\n", strerror(errno));
+
+	memset(src, 'a', size);
+
+	if (mlock(src, size)) {
+		if (errno == EPERM || errno == ENOMEM) {
+			ksft_print_msg("mlock unavailable: %s\n",
+				       strerror(errno));
+
+			if (munmap(dst, half))
+				ksft_exit_fail_msg("munmap destination: %s\n",
+						   strerror(errno));
+			if (munmap(src, size))
+				ksft_exit_fail_msg("munmap source: %s\n",
+						   strerror(errno));
+
+			ksft_test_result_skip("%s\n", __func__);
+			return;
+		}
+		ksft_exit_fail_msg("mlock: %s\n", strerror(errno));
+	}
+
+	locked = get_vmlck_kb();
+
+	if (mremap(src + half, half, half,
+		   MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP,
+		   dst) == MAP_FAILED)
+		ksft_exit_fail_msg("mremap: %s\n", strerror(errno));
+
+	remapped = get_vmlck_kb();
+
+	if (munmap(dst, half))
+		ksft_exit_fail_msg("munmap destination: %s\n",
+				   strerror(errno));
+	if (munmap(src, size))
+		ksft_exit_fail_msg("munmap source: %s\n", strerror(errno));
+
+	after = get_vmlck_kb();
+
+	pass = locked == baseline + (long)(size / 1024) &&
+	       remapped == locked &&
+	       after == baseline;
+
+	ksft_test_result(pass,
+			 "%s (baseline=%ld kB, locked=%ld kB, remapped=%ld kB, after=%ld kB)\n",
+			 __func__, baseline, locked, remapped, after);
+}
+
 int main(void)
 {
 	ksft_print_header();
@@ -348,7 +440,7 @@ int main(void)
 		ksft_finished();
 	}
 
-	ksft_set_plan(5);
+	ksft_set_plan(6);
 
 	// Keep a page sized buffer around for when we need it.
 	page_buffer =
@@ -361,6 +453,7 @@ int main(void)
 	mremap_dontunmap_simple_fixed();
 	mremap_dontunmap_partial_mapping();
 	mremap_dontunmap_partial_mapping_overwrite();
+	mremap_dontunmap_partial_mlocked();
 
 	BUG_ON(munmap(page_buffer, page_size) == -1,
 	       "unable to unmap page buffer");
