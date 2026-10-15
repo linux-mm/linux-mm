@@ -4886,9 +4886,17 @@ next:
 		mt_free_bulk(node->slot_len, slots);
 
 free_leaf:
+	/*
+	 * A full maple_range_64 node has no metadata: its last slot holds a
+	 * child.  mt_clear_meta() cannot tell, because mte_dead_leaves() has
+	 * stripped the type bits from the child pointers, and would zero part
+	 * of that child pointer.  slot_len, the child count returned by
+	 * mte_dead_leaves(), says whether the node is full.
+	 */
 	if (free)
 		kfree(node);
-	else
+	else if (node->type != maple_range_64 ||
+		 node->slot_len < MAPLE_RANGE64_SLOTS)
 		mt_clear_meta(mt, node, node->type);
 }
 
