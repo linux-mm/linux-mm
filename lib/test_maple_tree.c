@@ -286,6 +286,36 @@ static noinline void __init check_seq(struct maple_tree *mt, unsigned long max,
 #endif
 }
 
+/*
+ * Destroy RCU-mode trees that are not allocation trees, so that the nodes are
+ * freed by mt_free_walk() from an RCU callback.  With the ranges and gaps
+ * stored below, the sizes give the tree shapes (on 64-bit) that used to break
+ * this path:
+ *
+ * - 120 ranges: a full root.  mt_destroy_walk() took its last child for
+ *   metadata and zeroed part of the child pointer.
+ * - 2768 ranges: height 4, and a non-root internal node has 15 children.
+ *   mt_free_walk() took the metadata in its last slot for a child.
+ *
+ * Without its fix, the first case corrupts memory silently and is only
+ * detected with KASAN, or with ASan in the userspace test harness.
+ */
+static noinline void __init check_rcu_destroy(struct maple_tree *mt)
+{
+	unsigned long sizes[] = { 120, 2768 };
+	unsigned long i, j;
+
+	for (i = 0; i < ARRAY_SIZE(sizes); i++) {
+		mt_init_flags(mt, MT_FLAGS_USE_RCU);
+		for (j = 0; j < sizes[i]; j++)
+			MT_BUG_ON(mt, mtree_store_range(mt, j * 10, j * 10 + 5,
+							xa_mk_value(j),
+							GFP_KERNEL));
+		mtree_destroy(mt);
+		rcu_barrier();
+	}
+}
+
 static noinline void __init check_lb_not_empty(struct maple_tree *mt)
 {
 	unsigned long i, j;
@@ -3803,6 +3833,8 @@ static int __init maple_tree_seed(void)
 	mt_init_flags(&tree, MT_FLAGS_ALLOC_RANGE);
 	check_mas_store_gfp(&tree);
 	mtree_destroy(&tree);
+
+	check_rcu_destroy(&tree);
 
 	/* Test ranges (store and insert) */
 	mt_init_flags(&tree, 0);
