@@ -3785,6 +3785,19 @@ static inline unsigned int alloc_flags_cma(gfp_t gfp_mask)
 }
 
 /*
+ * The zonelist can be rebuilt in place while it is walked, so the iterator's
+ * filters may have passed a slot that now holds a different zone.
+ * Recheck the zone itself before using it.
+ */
+static inline bool zonelist_zone_valid(struct zone *zone,
+				       const struct alloc_context *ac)
+{
+	if (zone_idx(zone) > ac->highest_zoneidx)
+		return false;
+	return !ac->nodemask || node_isset(zone_to_nid(zone), *ac->nodemask);
+}
+
+/*
  * get_page_from_freelist goes through the zonelist trying to allocate
  * a page.
  */
@@ -3811,6 +3824,9 @@ retry:
 					ac->nodemask) {
 		struct page *page;
 		unsigned long mark;
+
+		if (unlikely(!zonelist_zone_valid(zone, ac)))
+			continue;
 
 		if (cpusets_enabled() &&
 			(alloc_flags & ALLOC_CPUSET) &&
@@ -5235,6 +5251,9 @@ unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
 	z = ac.preferred_zoneref;
 	for_next_zone_zonelist_nodemask(zone, z, ac.highest_zoneidx, ac.nodemask) {
 		unsigned long mark;
+
+		if (unlikely(!zonelist_zone_valid(zone, &ac)))
+			continue;
 
 		if (cpusets_enabled() && (alloc_flags & ALLOC_CPUSET) &&
 		    !__cpuset_zone_allowed(zone, gfp)) {
