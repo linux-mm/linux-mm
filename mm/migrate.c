@@ -2213,7 +2213,8 @@ struct folio *alloc_migration_target(struct folio *src, unsigned long private)
 		gfp_mask = htlb_modify_alloc_mask(h, gfp_mask);
 		return alloc_hugetlb_folio_nodemask(h, nid,
 						mtc->nmask, gfp_mask,
-						htlb_allow_alloc_fallback(mtc->reason));
+						htlb_allow_alloc_fallback(mtc->reason),
+						mtc->reason != MR_CONTIG_RANGE);
 	}
 
 	if (folio_test_large(src)) {
