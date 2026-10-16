@@ -25,6 +25,9 @@ static unsigned long hugetlb_cma_size __ro_after_init;
 static unsigned int hugetlb_cma_percent __initdata;
 static unsigned int hugetlb_cma_percent_in_node[MAX_NUMNODES] __initdata;
 
+static char hugetlb_cma_cmdline[COMMAND_LINE_SIZE] __initdata;
+static unsigned int hugetlb_cma_cmdline_len __initdata;
+
 #ifdef CONFIG_NUMA
 static phys_addr_t __init memblock_node_memory_size(int nid)
 {
@@ -119,11 +122,29 @@ void * __init hugetlb_cma_alloc_bootmem(struct hstate *h, int nid, bool node_exa
 	return NULL;
 }
 
-static int __init cmdline_parse_hugetlb_cma(char *p)
+static int __init hugetlb_cma_parse(char *p)
 {
 	int nid, count = 0;
 	unsigned long tmp;
 	char *s = p;
+	char *suffix = strchr(p, '@');
+
+	if (suffix) {
+		unsigned int order = arch_hugetlb_cma_order();
+		unsigned long long page_size;
+		char *end;
+
+		page_size = memparse(suffix + 1, &end);
+		if (suffix == p || !page_size || *end) {
+			pr_warn("hugetlb_cma: invalid parameter %s\n", p);
+			return -EINVAL;
+		}
+		if (!order || page_size != (PAGE_SIZE << order) ||
+		    !arch_hugetlb_valid_size(page_size)) {
+			pr_warn("hugetlb_cma: unsupported page size in %s\n", p);
+			return -EINVAL;
+		}
+	}
 
 	while (*s) {
 		if (sscanf(s, "%lu%n", &tmp, &count) != 1)
@@ -194,6 +215,20 @@ static int __init cmdline_parse_hugetlb_cma(char *p)
 	return 0;
 }
 
+static int __init cmdline_parse_hugetlb_cma(char *p)
+{
+	size_t len;
+
+	if (!p)
+		return -EINVAL;
+	len = strlen(p) + 1;
+	if (len > sizeof(hugetlb_cma_cmdline) - hugetlb_cma_cmdline_len)
+		return -EINVAL;
+	memcpy(hugetlb_cma_cmdline + hugetlb_cma_cmdline_len, p, len);
+	hugetlb_cma_cmdline_len += len;
+
+	return 0;
+}
 early_param("hugetlb_cma", cmdline_parse_hugetlb_cma);
 
 static int __init cmdline_parse_hugetlb_cma_only(char *p)
@@ -214,6 +249,12 @@ void __init hugetlb_cma_reserve(void)
 	bool node_specific_cma_alloc = false;
 	bool has_node_specific_param = false;
 	int nid;
+	char *p;
+
+	for (p = hugetlb_cma_cmdline;
+	     p < hugetlb_cma_cmdline + hugetlb_cma_cmdline_len;
+	     p += strlen(p) + 1)
+		hugetlb_cma_parse(p);
 
 	for (nid = 0; nid < MAX_NUMNODES; nid++) {
 		if (hugetlb_cma_size_in_node[nid] || hugetlb_cma_percent_in_node[nid]) {
