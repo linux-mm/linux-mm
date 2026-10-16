@@ -1368,7 +1368,7 @@ static struct folio *alloc_gigantic_frozen_folio(int order, gfp_t gfp_mask,
 	if (folio)
 		return folio;
 
-	if (hugetlb_cma_exclusive_alloc())
+	if (hugetlb_cma_exclusive_alloc(order))
 		return NULL;
 
 	folio = (struct folio *)alloc_contig_frozen_pages(1 << order, gfp_mask,
@@ -3635,7 +3635,7 @@ static void __init hugetlb_hstate_alloc_pages(struct hstate *h)
 	 * Skip gigantic hugepages allocation if early CMA
 	 * reservations are not available.
 	 */
-	if (hstate_is_gigantic(h) && hugetlb_cma_total_size() &&
+	if (hstate_is_gigantic(h) && hugetlb_cma_size(h) &&
 	    !hugetlb_early_cma(h)) {
 		pr_warn_once("hugetlb_cma is enabled, skip boot time allocation\n");
 		return;
@@ -4338,8 +4338,6 @@ static __init void hugetlb_parse_params(void)
 
 		hcp->setup(hcp->val);
 	}
-
-	hugetlb_cma_validate_params();
 }
 
 /*
