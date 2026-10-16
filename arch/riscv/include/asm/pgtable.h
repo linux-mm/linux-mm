@@ -372,6 +372,21 @@ static inline int pte_write(pte_t pte)
 	return pte_val(pte) & _PAGE_WRITE;
 }
 
+/*
+ * GUP-fast only follows entries that are present and have _PAGE_READ,
+ * and leaves the rest to slow GUP, which checks the VMA: an execute-only
+ * entry and a writable shadow stack entry (XWR = 010) lack _PAGE_READ, a
+ * PROT_NONE or invalidated entry lacks _PAGE_PRESENT. Any other writable
+ * entry is readable too.
+ */
+#define pte_access_permitted pte_access_permitted
+static inline bool pte_access_permitted(pte_t pte, bool write)
+{
+	const unsigned long need = _PAGE_PRESENT | _PAGE_READ;
+
+	return (pte_val(pte) & need) == need && (!write || pte_write(pte));
+}
+
 static inline int pte_exec(pte_t pte)
 {
 	return pte_val(pte) & _PAGE_EXEC;
@@ -816,10 +831,22 @@ static inline int pmd_write(pmd_t pmd)
 	return pte_write(pmd_pte(pmd));
 }
 
+#define pmd_access_permitted pmd_access_permitted
+static inline bool pmd_access_permitted(pmd_t pmd, bool write)
+{
+	return pte_access_permitted(pmd_pte(pmd), write);
+}
+
 #define pud_write pud_write
 static inline int pud_write(pud_t pud)
 {
 	return pte_write(pud_pte(pud));
+}
+
+#define pud_access_permitted pud_access_permitted
+static inline bool pud_access_permitted(pud_t pud, bool write)
+{
+	return pte_access_permitted(pud_pte(pud), write);
 }
 
 #define pmd_dirty pmd_dirty
