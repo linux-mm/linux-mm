@@ -2045,13 +2045,14 @@ void mem_cgroup_print_oom_group(struct mem_cgroup *memcg)
 
 /*
  * The value of NR_MEMCG_STOCK is selected to keep the cached memcgs and their
- * nr_pages in a single cacheline. This may change in future.
+ * nr_pages and nr_sock in a single cacheline. This may change in future.
  */
-#define NR_MEMCG_STOCK 7
+#define NR_MEMCG_STOCK 6
 #define FLUSHING_CACHED_CHARGE	0
 struct memcg_stock_pcp {
 	local_trylock_t lock;
 	uint8_t nr_pages[NR_MEMCG_STOCK];
+	int8_t nr_sock[NR_MEMCG_STOCK];
 	struct mem_cgroup *cached[NR_MEMCG_STOCK];
 
 	struct work_struct work;
@@ -2111,9 +2112,10 @@ static bool obj_stock_flush_required(struct obj_stock_pcp *stock,
 				     struct mem_cgroup *root_memcg);
 
 /**
- * consume_stock: Try to consume stocked charge on this cpu.
+ * __consume_stock: Try to consume stocked charge on this cpu.
  * @memcg: memcg to consume from.
  * @nr_pages: how many pages to charge.
+ * @nr_sock: how many pages to account for MEMCG_SOCK.
  *
  * Consume the cached charge if enough nr_pages are present otherwise return
  * failure. Also return failure for charge request larger than
@@ -2121,10 +2123,13 @@ static bool obj_stock_flush_required(struct obj_stock_pcp *stock,
  *
  * returns true if successful, false otherwise.
  */
-static bool consume_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
+static __always_inline bool __consume_stock(struct mem_cgroup *memcg,
+					    unsigned int nr_pages,
+					    unsigned int nr_sock)
 {
 	struct memcg_stock_pcp *stock;
 	uint8_t stock_pages;
+	int stock_sock = 0;
 	bool ret = false;
 	int i;
 
@@ -2144,7 +2149,19 @@ static bool consume_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
 
 		stock_pages -= nr_pages;
 		WRITE_ONCE(stock->nr_pages[i], stock_pages);
-		if (unlikely(!stock_pages)) {
+
+		if (nr_sock) {
+			stock_sock = stock->nr_sock[i] + nr_sock;
+
+			if (likely(stock_sock < (int)MEMCG_CHARGE_BATCH)) {
+				WRITE_ONCE(stock->nr_sock[i], stock_sock);
+				stock_sock = 0;
+			} else {
+				WRITE_ONCE(stock->nr_sock[i], 0);
+			}
+		}
+
+		if (unlikely(!stock_pages && !stock->nr_sock[i])) {
 			css_put(&memcg->css);
 			WRITE_ONCE(stock->cached[i], NULL);
 		}
@@ -2155,7 +2172,15 @@ static bool consume_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
 
 	local_unlock(&memcg_stock.lock);
 
+	if (unlikely(stock_sock))
+		mod_memcg_state(memcg, MEMCG_SOCK, stock_sock);
+
 	return ret;
+}
+
+static bool consume_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
+{
+	return __consume_stock(memcg, nr_pages, 0);
 }
 
 static void memcg_uncharge(struct mem_cgroup *memcg, unsigned int nr_pages)
@@ -2172,6 +2197,7 @@ static void drain_stock(struct memcg_stock_pcp *stock, int i)
 {
 	struct mem_cgroup *old = stock->cached[i];
 	uint8_t stock_pages;
+	int stock_sock;
 
 	if (!old)
 		return;
@@ -2180,6 +2206,12 @@ static void drain_stock(struct memcg_stock_pcp *stock, int i)
 	if (stock_pages) {
 		memcg_uncharge(old, stock_pages);
 		WRITE_ONCE(stock->nr_pages[i], 0);
+	}
+
+	stock_sock = stock->nr_sock[i];
+	if (stock_sock) {
+		mod_memcg_state(old, MEMCG_SOCK, stock_sock);
+		WRITE_ONCE(stock->nr_sock[i], 0);
 	}
 
 	css_put(&old->css);
@@ -2226,12 +2258,15 @@ static void drain_local_obj_stock(struct work_struct *dummy)
 	local_unlock(&obj_stock.lock);
 }
 
-static void refill_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
+static __always_inline void __refill_stock(struct mem_cgroup *memcg,
+					   unsigned int nr_pages,
+					   unsigned int nr_sock)
 {
 	struct memcg_stock_pcp *stock;
 	struct mem_cgroup *cached;
 	uint8_t stock_pages;
 	int empty_slot = -1;
+	int stock_sock = 0;
 	int i;
 
 	/*
@@ -2250,7 +2285,7 @@ static void refill_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
 		 * lock the percpu memcg_stock.lock, uncharge memcg directly.
 		 */
 		memcg_uncharge(memcg, nr_pages);
-		return;
+		goto update_sock;
 	}
 
 	stock = this_cpu_ptr(&memcg_stock);
@@ -2264,10 +2299,26 @@ static void refill_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
 
 		stock_pages = stock->nr_pages[i] + nr_pages;
 		WRITE_ONCE(stock->nr_pages[i], stock_pages);
+
+		if (nr_sock) {
+			stock_sock = stock->nr_sock[i] - nr_sock;
+
+			if (likely(stock_sock > -(int)MEMCG_CHARGE_BATCH)) {
+				WRITE_ONCE(stock->nr_sock[i], stock_sock);
+				stock_sock = 0;
+			} else {
+				WRITE_ONCE(stock->nr_sock[i], 0);
+			}
+		}
+
 		if (unlikely(stock_pages > MEMCG_CHARGE_BATCH))
 			drain_stock(stock, i);
 
 		local_unlock(&memcg_stock.lock);
+
+		if (unlikely(stock_sock))
+			mod_memcg_state(memcg, MEMCG_SOCK, stock_sock);
+
 		return;
 	}
 
@@ -2284,6 +2335,15 @@ static void refill_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
 	WRITE_ONCE(stock->nr_pages[i], nr_pages);
 
 	local_unlock(&memcg_stock.lock);
+
+update_sock:
+	if (nr_sock)
+		mod_memcg_state(memcg, MEMCG_SOCK, -nr_sock);
+}
+
+static void refill_stock(struct mem_cgroup *memcg, unsigned int nr_pages)
+{
+	__refill_stock(memcg, nr_pages, 0);
 }
 
 static bool is_memcg_drain_needed(struct memcg_stock_pcp *stock,
@@ -2299,7 +2359,8 @@ static bool is_memcg_drain_needed(struct memcg_stock_pcp *stock,
 		if (!memcg)
 			continue;
 
-		if (READ_ONCE(stock->nr_pages[i]) &&
+		if ((READ_ONCE(stock->nr_pages[i]) ||
+		     READ_ONCE(stock->nr_sock[i])) &&
 		    mem_cgroup_is_descendant(memcg, root_memcg)) {
 			flush = true;
 			break;
@@ -5629,6 +5690,9 @@ bool mem_cgroup_sk_charge(const struct sock *sk, unsigned int nr_pages,
 	if (!cgroup_subsys_on_dfl(memory_cgrp_subsys))
 		return memcg1_charge_skmem(memcg, nr_pages, gfp_mask);
 
+	if (likely(__consume_stock(memcg, nr_pages, nr_pages)))
+		return true;
+
 	if (try_charge_memcg(memcg, gfp_mask, nr_pages) == 0) {
 		mod_memcg_state(memcg, MEMCG_SOCK, nr_pages);
 		return true;
@@ -5651,9 +5715,7 @@ void mem_cgroup_sk_uncharge(const struct sock *sk, unsigned int nr_pages)
 		return;
 	}
 
-	mod_memcg_state(memcg, MEMCG_SOCK, -nr_pages);
-
-	refill_stock(memcg, nr_pages);
+	__refill_stock(memcg, nr_pages, nr_pages);
 }
 
 void mem_cgroup_flush_workqueue(void)
