@@ -19,6 +19,7 @@
 struct hugetlb_cma_pool {
 	struct cma *cma[MAX_NUMNODES];
 	unsigned long size;
+	unsigned int order;
 };
 
 struct hugetlb_cma_config {
@@ -27,13 +28,30 @@ struct hugetlb_cma_config {
 	unsigned int percent_in_node[MAX_NUMNODES];
 };
 
-static struct hugetlb_cma_pool hugetlb_cma __ro_after_init;
-static struct hugetlb_cma_config hugetlb_cma_config __initdata;
+static struct hugetlb_cma_pool hugetlb_cma[HUGE_MAX_HSTATE] __ro_after_init;
+static struct hugetlb_cma_config hugetlb_cma_config[HUGE_MAX_HSTATE] __initdata;
+static unsigned int hugetlb_cma_nr __ro_after_init;
+static unsigned int hugetlb_cma_default_order __ro_after_init;
 
 static bool hugetlb_cma_only __ro_after_init;
 
 static char hugetlb_cma_cmdline[COMMAND_LINE_SIZE] __initdata;
 static unsigned int hugetlb_cma_cmdline_len __initdata;
+
+static struct hugetlb_cma_pool *hugetlb_cma_pool(unsigned int order)
+{
+	unsigned int i;
+
+	/* Gigantic sizes share the architecture's original CMA pool. */
+	if (order_is_gigantic(order))
+		order = hugetlb_cma_default_order;
+
+	for (i = 0; i < hugetlb_cma_nr; i++) {
+		if (hugetlb_cma[i].order == order)
+			return &hugetlb_cma[i];
+	}
+	return NULL;
+}
 
 #ifdef CONFIG_NUMA
 static phys_addr_t __init memblock_node_memory_size(int nid)
@@ -56,10 +74,16 @@ static phys_addr_t __init memblock_node_memory_size(int nid)
 
 void hugetlb_cma_free_frozen_folio(struct folio *folio)
 {
-	struct hugetlb_cma_pool *pool = &hugetlb_cma;
+	unsigned int i;
+	int nid = folio_nid(folio);
+	unsigned long nr_pages = folio_nr_pages(folio);
 
-	WARN_ON_ONCE(!cma_release_frozen(pool->cma[folio_nid(folio)],
-					 &folio->page, folio_nr_pages(folio)));
+	for (i = 0; i < hugetlb_cma_nr; i++) {
+		if (cma_release_frozen(hugetlb_cma[i].cma[nid], &folio->page, nr_pages))
+			return;
+	}
+
+	WARN_ON_ONCE(1);
 }
 
 struct folio *hugetlb_cma_alloc_frozen_folio(int order, gfp_t gfp_mask,
@@ -70,9 +94,9 @@ struct folio *hugetlb_cma_alloc_frozen_folio(int order, gfp_t gfp_mask,
 	struct page *page = NULL;
 	const nodemask_t *nmask;
 	unsigned int cpuset_mems_cookie;
-	struct hugetlb_cma_pool *pool = &hugetlb_cma;
+	struct hugetlb_cma_pool *pool = hugetlb_cma_pool(order);
 
-	if (!pool->size)
+	if (!pool || !pool->size)
 		return NULL;
 
 retry_cpuset:
@@ -111,7 +135,7 @@ retry_cpuset:
 
 void * __init hugetlb_cma_alloc_bootmem(struct hstate *h, int nid, bool node_exact)
 {
-	struct hugetlb_cma_pool *pool = &hugetlb_cma;
+	struct hugetlb_cma_pool *pool = hugetlb_cma_pool(huge_page_order(h));
 	struct cma *cma;
 	void *m;
 	int node;
@@ -135,15 +159,16 @@ void * __init hugetlb_cma_alloc_bootmem(struct hstate *h, int nid, bool node_exa
 
 static int __init hugetlb_cma_parse(char *p)
 {
-	struct hugetlb_cma_pool *pool = &hugetlb_cma;
-	struct hugetlb_cma_config *config = &hugetlb_cma_config;
+	struct hugetlb_cma_pool *pool;
+	struct hugetlb_cma_config *config;
+	unsigned int order = hugetlb_cma_default_order;
+	unsigned int i;
 	int nid, count = 0;
 	unsigned long tmp;
 	char *s = p;
 	char *suffix = strchr(p, '@');
 
 	if (suffix) {
-		unsigned int order = arch_hugetlb_cma_order();
 		unsigned long long page_size;
 		char *end;
 
@@ -158,6 +183,26 @@ static int __init hugetlb_cma_parse(char *p)
 			return -EINVAL;
 		}
 	}
+
+	if (!order) {
+		pr_warn("hugetlb_cma: the option isn't supported by current arch\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < hugetlb_cma_nr; i++) {
+		if (hugetlb_cma[i].order == order)
+			break;
+	}
+
+	if (i == ARRAY_SIZE(hugetlb_cma))
+		return -EINVAL;
+
+	pool = &hugetlb_cma[i];
+	if (i == hugetlb_cma_nr) {
+		hugetlb_cma_nr++;
+		pool->order = order;
+	}
+	config = &hugetlb_cma_config[i];
 
 	while (*s) {
 		if (sscanf(s, "%lu%n", &tmp, &count) != 1)
@@ -256,20 +301,14 @@ unsigned int __weak arch_hugetlb_cma_order(void)
 	return 0;
 }
 
-void __init hugetlb_cma_reserve(void)
+static void __init hugetlb_cma_reserve_pool(struct hugetlb_cma_pool *pool,
+					    struct hugetlb_cma_config *config)
 {
-	struct hugetlb_cma_pool *pool = &hugetlb_cma;
-	struct hugetlb_cma_config *config = &hugetlb_cma_config;
-	unsigned long size, reserved, per_node, order, gigantic_page_size;
+	unsigned long size, reserved, per_node, hugepage_size;
+	unsigned int order = pool->order;
 	bool node_specific_cma_alloc = false;
 	bool has_node_specific_param = false;
 	int nid;
-	char *p;
-
-	for (p = hugetlb_cma_cmdline;
-	     p < hugetlb_cma_cmdline + hugetlb_cma_cmdline_len;
-	     p += strlen(p) + 1)
-		hugetlb_cma_parse(p);
 
 	for (nid = 0; nid < MAX_NUMNODES; nid++) {
 		if (config->size_in_node[nid] || config->percent_in_node[nid]) {
@@ -301,12 +340,6 @@ void __init hugetlb_cma_reserve(void)
 	if (!pool->size)
 		return;
 
-	order = arch_hugetlb_cma_order();
-	if (!order) {
-		pr_warn("hugetlb_cma: the option isn't supported by current arch\n");
-		return;
-	}
-
 	/*
 	 * HugeTLB CMA reservation is required for gigantic
 	 * huge pages which could not be allocated via the
@@ -314,12 +347,12 @@ void __init hugetlb_cma_reserve(void)
 	 * breaking this assumption.
 	 */
 	VM_WARN_ON(order <= MAX_PAGE_ORDER);
-	gigantic_page_size = PAGE_SIZE << order;
+	hugepage_size = PAGE_SIZE << order;
 
 	if (config->percent) {
 		unsigned long orig_size = pool->size;
 
-		pool->size = ALIGN_DOWN(pool->size, PAGE_SIZE << order);
+		pool->size = ALIGN_DOWN(pool->size, hugepage_size);
 		if (orig_size && !pool->size)
 			pr_warn("hugetlb_cma: reservation size rounded down to 0 from %lu MiB (%u%%)\n",
 				orig_size / SZ_1M, config->percent);
@@ -331,7 +364,7 @@ void __init hugetlb_cma_reserve(void)
 
 				config->size_in_node[nid] =
 					ALIGN_DOWN(config->size_in_node[nid],
-						   PAGE_SIZE << order);
+						   hugepage_size);
 				if (orig_size && !config->size_in_node[nid])
 					pr_warn("hugetlb_cma: reservation size rounded down to 0 from %lu MiB (%u%%) on node %d\n",
 						orig_size / SZ_1M,
@@ -351,9 +384,9 @@ void __init hugetlb_cma_reserve(void)
 
 		if (!node_isset(nid, hugetlb_bootmem_nodes)) {
 			pr_warn("hugetlb_cma: invalid node %d specified\n", nid);
-		} else if (!IS_ALIGNED(size, gigantic_page_size)) {
+		} else if (!IS_ALIGNED(size, hugepage_size)) {
 			pr_warn("hugetlb_cma: cma area of node %d must be a multiple of %lu MiB\n",
-				nid, gigantic_page_size / SZ_1M);
+				nid, hugepage_size / SZ_1M);
 		} else {
 			node_specific_cma_alloc = true;
 			continue;
@@ -367,9 +400,9 @@ void __init hugetlb_cma_reserve(void)
 	if (!pool->size)
 		return;
 
-	if (!IS_ALIGNED(pool->size, gigantic_page_size)) {
+	if (!IS_ALIGNED(pool->size, hugepage_size)) {
 		pr_warn("hugetlb_cma: cma area must be a multiple of %lu MiB\n",
-			gigantic_page_size / SZ_1M);
+			hugepage_size / SZ_1M);
 		pool->size = 0;
 		return;
 	}
@@ -381,7 +414,7 @@ void __init hugetlb_cma_reserve(void)
 		 */
 		per_node = DIV_ROUND_UP(pool->size,
 					nodes_weight(hugetlb_bootmem_nodes));
-		per_node = round_up(per_node, gigantic_page_size);
+		per_node = round_up(per_node, hugepage_size);
 		if (config->percent)
 			pr_info("hugetlb_cma: reserve %lu MiB (%u%%), up to %lu MiB per node\n",
 				pool->size / SZ_1M, config->percent,
@@ -411,7 +444,7 @@ void __init hugetlb_cma_reserve(void)
 		 * may be returned to CMA allocator in the case of
 		 * huge page demotion.
 		 */
-		res = cma_declare_contiguous_multi(size, gigantic_page_size,
+		res = cma_declare_contiguous_multi(size, hugepage_size,
 					HUGETLB_PAGE_ORDER, name,
 					&pool->cma[nid], nid);
 		if (res || !cma_validate_zones(pool->cma[nid])) {
@@ -434,28 +467,49 @@ void __init hugetlb_cma_reserve(void)
 			break;
 	}
 
-	if (!reserved)
-		/*
-		 * pool->size is used to determine if allocations from
-		 * cma are possible.  Set to zero if no cma regions are set up.
-		 */
-		pool->size = 0;
+	/* Only successfully reserved areas enable CMA allocation for this size. */
+	pool->size = reserved;
 }
 
-bool hugetlb_cma_exclusive_alloc(void)
+void __init hugetlb_cma_reserve(void)
 {
-	return hugetlb_cma_only;
+	unsigned int i;
+	char *p;
+
+	hugetlb_cma_default_order = arch_hugetlb_cma_order();
+
+	for (p = hugetlb_cma_cmdline;
+	     p < hugetlb_cma_cmdline + hugetlb_cma_cmdline_len;
+	     p += strlen(p) + 1)
+		hugetlb_cma_parse(p);
+
+	for (i = 0; i < hugetlb_cma_nr; i++)
+		hugetlb_cma_reserve_pool(&hugetlb_cma[i], &hugetlb_cma_config[i]);
+}
+
+bool hugetlb_cma_exclusive_alloc(unsigned int order)
+{
+	struct hugetlb_cma_pool *pool = hugetlb_cma_pool(order);
+
+	return hugetlb_cma_only && pool && pool->size;
+}
+
+unsigned long __init hugetlb_cma_size(struct hstate *h)
+{
+	struct hugetlb_cma_pool *pool = hugetlb_cma_pool(huge_page_order(h));
+
+	return pool ? pool->size : 0;
 }
 
 unsigned long __init hugetlb_cma_total_size(void)
 {
-	return hugetlb_cma.size;
-}
+	unsigned long size = 0;
+	unsigned int i;
 
-void __init hugetlb_cma_validate_params(void)
-{
-	if (!hugetlb_cma.size)
-		hugetlb_cma_only = false;
+	for (i = 0; i < hugetlb_cma_nr; i++)
+		size += hugetlb_cma[i].size;
+
+	return size;
 }
 
 bool __init hugetlb_early_cma(struct hstate *h)
@@ -463,5 +517,5 @@ bool __init hugetlb_early_cma(struct hstate *h)
 	if (arch_has_huge_bootmem_alloc())
 		return false;
 
-	return hstate_is_gigantic(h) && hugetlb_cma_only;
+	return hstate_is_gigantic(h) && hugetlb_cma_exclusive_alloc(huge_page_order(h));
 }
