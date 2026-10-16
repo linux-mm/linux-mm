@@ -1333,7 +1333,7 @@ static int tcp_client(const char *cgroup, unsigned short port)
 	const char server[] = "localhost";
 	struct addrinfo *ai;
 	char servport[6];
-	int retries = 0x10; /* nice round number */
+	int retries = 0x40; /* nice round number */
 	int sk, ret;
 	long allocated;
 
@@ -1445,6 +1445,13 @@ static int test_memcg_sock(const char *root)
 		goto cleanup;
 
 	if (cg_read_long(memcg, "memory.current") < 0)
+		goto cleanup;
+
+	/*
+	 * Drain per-CPU memcg_stock so cached MEMCG_SOCK deltas in
+	 * stock->nr_sock[] are flushed to vmstats.
+	 */
+	if (cg_write(memcg, "memory.high", "0"))
 		goto cleanup;
 
 	/*
