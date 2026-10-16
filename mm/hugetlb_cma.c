@@ -42,8 +42,8 @@ static struct hugetlb_cma_pool *hugetlb_cma_pool(unsigned int order)
 {
 	unsigned int i;
 
-	/* Gigantic sizes share the architecture's original CMA pool. */
-	if (order_is_gigantic(order))
+	/* PMD pages use their own pool; other gigantic sizes share. */
+	if (order != PMD_SHIFT - PAGE_SHIFT && order_is_gigantic(order))
 		order = hugetlb_cma_default_order;
 
 	for (i = 0; i < hugetlb_cma_nr; i++) {
@@ -177,11 +177,13 @@ static int __init hugetlb_cma_parse(char *p)
 			pr_warn("hugetlb_cma: invalid parameter %s\n", p);
 			return -EINVAL;
 		}
-		if (!order || page_size != (PAGE_SIZE << order) ||
+		if ((page_size != PMD_SIZE &&
+		     page_size != (PAGE_SIZE << order)) ||
 		    !arch_hugetlb_valid_size(page_size)) {
 			pr_warn("hugetlb_cma: unsupported page size in %s\n", p);
 			return -EINVAL;
 		}
+		order = ilog2(page_size) - PAGE_SHIFT;
 	}
 
 	if (!order) {
@@ -340,14 +342,7 @@ static void __init hugetlb_cma_reserve_pool(struct hugetlb_cma_pool *pool,
 	if (!pool->size)
 		return;
 
-	/*
-	 * HugeTLB CMA reservation is required for gigantic
-	 * huge pages which could not be allocated via the
-	 * page allocator. Just warn if there is any change
-	 * breaking this assumption.
-	 */
-	VM_WARN_ON(order <= MAX_PAGE_ORDER);
-	hugepage_size = PAGE_SIZE << order;
+	hugepage_size = max(PAGE_SIZE << order, CMA_MIN_ALIGNMENT_BYTES);
 
 	if (config->percent) {
 		unsigned long orig_size = pool->size;
@@ -438,14 +433,19 @@ static void __init hugetlb_cma_reserve_pool(struct hugetlb_cma_pool *pool,
 			size = min(per_node, pool->size - reserved);
 		}
 
-		snprintf(name, sizeof(name), "hugetlb%d", nid);
+		if (order == hugetlb_cma_default_order)
+			snprintf(name, sizeof(name), "hugetlb%d", nid);
+		else
+			snprintf(name, sizeof(name), "hugetlb-%lukB-%d",
+				 (PAGE_SIZE << order) / SZ_1K, nid);
+
 		/*
 		 * Note that 'order per bit' is based on smallest size that
 		 * may be returned to CMA allocator in the case of
 		 * huge page demotion.
 		 */
 		res = cma_declare_contiguous_multi(size, hugepage_size,
-					HUGETLB_PAGE_ORDER, name,
+					min_t(unsigned int, order, HUGETLB_PAGE_ORDER), name,
 					&pool->cma[nid], nid);
 		if (res || !cma_validate_zones(pool->cma[nid])) {
 			pr_warn("hugetlb_cma: %s: err %d, node %d\n",
