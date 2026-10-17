@@ -79,12 +79,14 @@ int luo_retrieve_session(int luo_fd, const char *name)
 	return arg.fd;
 }
 
-int luo_session_preserve_fd(int session_fd, int fd, __u64 token)
+int luo_session_preserve_fd_arg(int session_fd, int fd, __u64 token,
+				__u64 user_arg)
 {
 	struct liveupdate_session_preserve_fd arg = {
 		.size = sizeof(arg),
 		.fd = fd,
 		.token = token,
+		.arg = user_arg,
 	};
 
 	if (ioctl(session_fd, LIVEUPDATE_SESSION_PRESERVE_FD, &arg))
@@ -93,17 +95,28 @@ int luo_session_preserve_fd(int session_fd, int fd, __u64 token)
 	return 0;
 }
 
-int luo_session_retrieve_fd(int session_fd, __u64 token)
+int luo_session_preserve_fd(int session_fd, int fd, __u64 token)
+{
+	return luo_session_preserve_fd_arg(session_fd, fd, token, 0);
+}
+
+int luo_session_retrieve_fd_arg(int session_fd, __u64 token, __u64 user_arg)
 {
 	struct liveupdate_session_retrieve_fd arg = {
 		.size = sizeof(arg),
 		.token = token,
+		.arg = user_arg,
 	};
 
 	if (ioctl(session_fd, LIVEUPDATE_SESSION_RETRIEVE_FD, &arg))
 		return -errno;
 
 	return arg.fd;
+}
+
+int luo_session_retrieve_fd(int session_fd, __u64 token)
+{
+	return luo_session_retrieve_fd_arg(session_fd, token, 0);
 }
 
 /* Helper function to get a session name via ioctl. */
@@ -193,6 +206,16 @@ int luo_session_finish(int session_fd)
 	struct liveupdate_session_finish arg = { .size = sizeof(arg) };
 
 	if (ioctl(session_fd, LIVEUPDATE_SESSION_FINISH, &arg) < 0)
+		return -errno;
+
+	return 0;
+}
+
+int luo_session_freeze(int session_fd)
+{
+	struct liveupdate_session_freeze arg = { .size = sizeof(arg) };
+
+	if (ioctl(session_fd, LIVEUPDATE_SESSION_FREEZE, &arg) < 0)
 		return -errno;
 
 	return 0;
@@ -322,5 +345,49 @@ int luo_test(int argc, char *argv[],
 	else
 		stage2(luo_fd, state_session_fd);
 
+	return 0;
+}
+
+int restore_and_verify_tmpfs(int session_fd, int token, int fd,
+			     const char *expected_data)
+{
+	struct liveupdate_memfd_retrieve_arg rarg = {
+		.size = sizeof(rarg),
+		.fd = fd,
+	};
+	long page_size = getpagesize();
+	void *map = MAP_FAILED;
+	struct stat st;
+	int ret_fd;
+
+	ret_fd = luo_session_retrieve_fd_arg(session_fd, token,
+					     (unsigned long)&rarg);
+	if (ret_fd < 0) {
+		ksft_print_msg("luo_session_retrieve_fd_arg failed: %d\n",
+			       ret_fd);
+		return ret_fd;
+	}
+	close(ret_fd);
+
+	if (fstat(fd, &st) < 0)
+		return -errno;
+	if (st.st_size != page_size) {
+		ksft_print_msg("Size mismatch! Expected %ld, Got %lld\n",
+			       page_size, (long long)st.st_size);
+		return -EINVAL;
+	}
+
+	map = mmap(NULL, page_size, PROT_READ, MAP_SHARED, fd, 0);
+	if (map == MAP_FAILED)
+		return -errno;
+
+	if (expected_data && strcmp(expected_data, map) != 0) {
+		ksft_print_msg("Data mismatch! Expected '%s', Got '%s'\n",
+			       expected_data, (char *)map);
+		munmap(map, page_size);
+		return -EINVAL;
+	}
+
+	munmap(map, page_size);
 	return 0;
 }

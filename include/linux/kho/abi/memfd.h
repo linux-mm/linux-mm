@@ -68,7 +68,18 @@ struct memfd_luo_folio_ser {
 			     F_SEAL_EXEC)
 
 /**
- * struct memfd_luo_ser - Main serialization structure for a memfd.
+ * MEMFD_LUO_FLAG_TMPFS - The preserved file is a tmpfs file.
+ *
+ * Indicates the file was preserved from a linked tmpfs file rather than an
+ * anonymous memfd, and must be retrieved to an empty tmpfs file.
+ */
+#define MEMFD_LUO_FLAG_TMPFS		BIT(0)
+
+/* The set of flags this version supports preserving. */
+#define MEMFD_LUO_ALL_FLAGS		MEMFD_LUO_FLAG_TMPFS
+
+/**
+ * struct memfd_luo_ser - Main serialization structure for a memfd or tmpfs file.
  * @pos:       The file's current position (f_pos).
  * @size:      The total size of the file in bytes (i_size).
  * @seals:     The seals present on the memfd. The seals are uABI so it is safe
