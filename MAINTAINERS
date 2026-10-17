@@ -14105,11 +14105,15 @@ L:	kexec@lists.infradead.org
 S:	Maintained
 T:	git git://git.kernel.org/pub/scm/linux/kernel/git/liveupdate/linux.git
 F:	Documentation/admin-guide/kdump/
+F:	Documentation/mm/crash_memaction.rst
 F:	fs/proc/vmcore.c
 F:	include/linux/crash_core.h
 F:	include/linux/crash_dump.h
+F:	include/linux/crash_memaction.h
+F:	include/linux/secret_pool.h
 F:	include/uapi/linux/vmcore.h
 F:	kernel/crash_*.c
+F:	lib/secret_pool.c
 
 KEENE FM RADIO TRANSMITTER DRIVER
 M:	Hans Verkuil <hverkuil@kernel.org>
