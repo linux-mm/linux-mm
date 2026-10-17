@@ -239,6 +239,14 @@ static inline int folio_average_page_mapcount(struct folio *folio)
 	return max_t(int, avg + entire_mapcount, 1);
 }
 /*
+ * oom.c
+ */
+int proc_oom_score(struct seq_file *m, struct pid_namespace *ns,
+		   struct pid *pid, struct task_struct *task);
+extern const struct file_operations proc_oom_adj_operations;
+extern const struct file_operations proc_oom_score_adj_operations;
+
+/*
  * array.c
  */
 extern const struct file_operations proc_tid_children_operations;
