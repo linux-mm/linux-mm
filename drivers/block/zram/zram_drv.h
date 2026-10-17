@@ -17,6 +17,7 @@
 
 #include <asm/byteorder.h>
 #include <linux/rwsem.h>
+#include <linux/u64_stats_sync.h>
 #include <linux/zsmalloc.h>
 
 #include "zcomp.h"
@@ -90,15 +91,19 @@ struct zram_table_entry {
 	};
 };
 
+struct zram_pcpu_stats {
+	struct u64_stats_sync syncp;
+	s64 pages_stored;	/* no. of pages currently stored */
+	s64 compr_data_size;	/* compressed size of pages stored */
+	s64 same_pages;		/* no. of same element filled pages */
+	s64 huge_pages;		/* no. of huge pages */
+	u64 notify_free;	/* no. of swap slot free notifications */
+};
+
 struct zram_stats {
-	atomic64_t compr_data_size;	/* compressed size of pages stored */
 	atomic64_t failed_reads;	/* can happen when memory is too low */
 	atomic64_t failed_writes;	/* can happen when memory is too low */
-	atomic64_t notify_free;	/* no. of swap slot free notifications */
-	atomic64_t same_pages;		/* no. of same element filled pages */
-	atomic64_t huge_pages;		/* no. of huge pages */
 	atomic64_t huge_pages_since;	/* no. of huge pages since zram set up */
-	atomic64_t pages_stored;	/* no. of pages currently stored */
 	atomic_long_t max_used_pages;	/* no. of maximum pages stored */
 	atomic64_t miss_free;		/* no. of missed free */
 #ifdef	CONFIG_ZRAM_WRITEBACK
@@ -134,6 +139,7 @@ struct zram {
 	unsigned long limit_pages;
 
 	struct zram_stats stats;
+	struct zram_pcpu_stats __percpu *pcpu_stats;
 	/*
 	 * This is the limit on amount of *uncompressed* worth of data
 	 * we can store in a disk.
