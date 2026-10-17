@@ -24,6 +24,7 @@
 #include <linux/page_owner.h>
 #include <linux/psi.h>
 #include <linux/cpuset.h>
+#include <linux/huge_mm.h>
 #include "page_alloc.h"
 #include "internal.h"
 
@@ -80,6 +81,26 @@ static inline bool is_via_compact_memory(int order) { return false; }
 #else
 #define COMPACTION_HPAGE_ORDER	(PMD_SHIFT - PAGE_SHIFT)
 #endif
+
+static inline bool mthp_always_enabled(void)
+{
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	return !!READ_ONCE(huge_anon_orders_always);
+#else
+	return false;
+#endif
+}
+
+static inline int compact_hpage_order(void)
+{
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	unsigned long orders = READ_ONCE(huge_anon_orders_always);
+
+	if (orders)
+		return __fls(orders);
+#endif
+	return COMPACTION_HPAGE_ORDER;
+}
 
 static struct page *mark_allocated_noprof(struct page *page, unsigned int order, gfp_t gfp_flags)
 {
@@ -827,6 +848,12 @@ static bool skip_isolation_on_order(int order, int target_order)
 	 */
 	if (!is_via_compact_memory(target_order) && order >= target_order)
 		return true;
+
+	/* We are compacting for multi-size THP allocation */
+	if (is_via_compact_memory(target_order) && order >= compact_hpage_order() &&
+	    mthp_always_enabled())
+		return true;
+
 	/*
 	 * We limit memory compaction to pageblocks and won't try
 	 * creating free blocks of memory that are larger than that.
@@ -1377,9 +1404,18 @@ static bool suitable_migration_source(struct compact_control *cc,
 							struct page *page)
 {
 	int block_mt;
+	unsigned int order = compact_hpage_order();
+	bool costly = order > PAGE_ALLOC_COSTLY_ORDER;
 
 	if (pageblock_skip_persistent(page))
 		return false;
+
+	if (is_via_compact_memory(cc->order) && !costly) {
+		block_mt = get_pageblock_migratetype(page);
+		if (block_mt == MIGRATE_MOVABLE || is_migrate_cma(block_mt))
+			return true;
+		return false;
+	}
 
 	/*
 	 * Background compaction produces blocks for the zone at
@@ -2208,16 +2244,16 @@ static bool kswapd_is_running(pg_data_t *pgdat)
 
 /*
  * A zone's fragmentation score is the external fragmentation wrt to the
- * COMPACTION_HPAGE_ORDER. It returns a value in the range [0, 100].
+ * given order. It returns a value in the range [0, 100].
  */
-static unsigned int fragmentation_score_zone(struct zone *zone)
+static unsigned int fragmentation_score_zone(struct zone *zone, unsigned int order)
 {
-	return extfrag_for_order(zone, COMPACTION_HPAGE_ORDER);
+	return extfrag_for_order(zone, order);
 }
 
 /*
  * A weighted zone's fragmentation score is the external fragmentation
- * wrt to the COMPACTION_HPAGE_ORDER scaled by the zone's size. It
+ * wrt to the given order scaled by the zone's size. It
  * returns a value in the range [0, 100].
  *
  * The scaling factor ensures that proactive compaction focuses on larger
@@ -2225,11 +2261,11 @@ static unsigned int fragmentation_score_zone(struct zone *zone)
  * ZONE_DMA32. For smaller zones, the score value remains close to zero,
  * and thus never exceeds the high threshold for proactive compaction.
  */
-static unsigned int fragmentation_score_zone_weighted(struct zone *zone)
+static unsigned int fragmentation_score_zone_weighted(struct zone *zone, unsigned int order)
 {
 	unsigned long score;
 
-	score = zone->present_pages * fragmentation_score_zone(zone);
+	score = zone->present_pages * fragmentation_score_zone(zone, order);
 	return div64_ul(score, zone->zone_pgdat->node_present_pages + 1);
 }
 
@@ -2240,7 +2276,7 @@ static unsigned int fragmentation_score_zone_weighted(struct zone *zone)
  * the node's score falls below the low threshold, or one of the back-off
  * conditions is met.
  */
-static unsigned int fragmentation_score_node(pg_data_t *pgdat)
+static unsigned int fragmentation_score_node(pg_data_t *pgdat, unsigned int order)
 {
 	unsigned int score = 0;
 	int zoneid;
@@ -2251,30 +2287,43 @@ static unsigned int fragmentation_score_node(pg_data_t *pgdat)
 		zone = &pgdat->node_zones[zoneid];
 		if (!populated_zone(zone))
 			continue;
-		score += fragmentation_score_zone_weighted(zone);
+		score += fragmentation_score_zone_weighted(zone, order);
 	}
 
 	return score;
 }
 
-static unsigned int fragmentation_score_wmark(bool low)
+/*
+ * Fragmentation scores are not comparable across orders: a lower order
+ * scores much lower than a higher order for the same fragmentation state.
+ * Scale the watermark proportionally to the target order so a small order
+ * can still trigger proactive compaction; COMPACTION_HPAGE_ORDER keeps the
+ * original threshold.
+ */
+static unsigned int fragmentation_score_wmark(bool low, unsigned int order)
 {
-	unsigned int wmark_low, leeway;
+	unsigned int wmark_low, leeway, wmark;
 
 	wmark_low = 100U - sysctl_compaction_proactiveness;
 	leeway = min(10U, wmark_low / 2);
-	return low ? wmark_low : min(wmark_low + leeway, 100U);
+	wmark = low ? wmark_low : min(wmark_low + leeway, 100U);
+
+	if (order < COMPACTION_HPAGE_ORDER)
+		wmark = wmark * order / COMPACTION_HPAGE_ORDER;
+
+	return wmark;
 }
 
 static bool should_proactive_compact_node(pg_data_t *pgdat)
 {
 	int wmark_high;
+	unsigned int order = compact_hpage_order();
 
 	if (!sysctl_compaction_proactiveness || kswapd_is_running(pgdat))
 		return false;
 
-	wmark_high = fragmentation_score_wmark(false);
-	return fragmentation_score_node(pgdat) > wmark_high;
+	wmark_high = fragmentation_score_wmark(false, order);
+	return fragmentation_score_node(pgdat, order) > wmark_high;
 }
 
 static enum compact_result __compact_finished(struct compact_control *cc)
@@ -2305,14 +2354,15 @@ static enum compact_result __compact_finished(struct compact_control *cc)
 
 	if (cc->proactive_compaction) {
 		int score, wmark_low;
+		unsigned int order = compact_hpage_order();
 		pg_data_t *pgdat;
 
 		pgdat = cc->zone->zone_pgdat;
 		if (kswapd_is_running(pgdat))
 			return COMPACT_PARTIAL_SKIPPED;
 
-		score = fragmentation_score_zone(cc->zone);
-		wmark_low = fragmentation_score_wmark(true);
+		score = fragmentation_score_zone(cc->zone, order);
+		wmark_low = fragmentation_score_wmark(true, order);
 
 		if (score > wmark_low)
 			ret = COMPACT_CONTINUE;
@@ -3237,10 +3287,11 @@ static int kcompactd(void *p)
 		timeout = default_timeout;
 		if (should_proactive_compact_node(pgdat)) {
 			unsigned int prev_score, score;
+			unsigned int order = compact_hpage_order();
 
-			prev_score = fragmentation_score_node(pgdat);
+			prev_score = fragmentation_score_node(pgdat, order);
 			compact_node(pgdat, true);
-			score = fragmentation_score_node(pgdat);
+			score = fragmentation_score_node(pgdat, order);
 			/*
 			 * Defer proactive compaction if the fragmentation
 			 * score did not go down i.e. no progress made.
