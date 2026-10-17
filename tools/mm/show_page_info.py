@@ -7,10 +7,11 @@ import sys
 from drgn import Object, FaultError, PlatformFlags, cast
 from drgn.helpers.linux import find_task, follow_page, page_size
 from drgn.helpers.linux.mm import (
-    decode_page_flags, page_to_pfn, page_to_phys, page_to_virt, vma_find,
+    decode_page_flags, page_to_pfn, page_to_phys, page_to_virt, vma_find, vma_name,
     PageSlab, PageCompound, PageHead, PageTail, compound_head, compound_order, compound_nr
 )
 from drgn.helpers.linux.cgroup import cgroup_name, cgroup_path
+from drgn.helpers.common.format import decode_flags
 
 DESC = """
 This is a drgn script to show the page state.
@@ -53,17 +54,18 @@ def get_memcg_info(page):
     """Retrieve memory cgroup information for a page."""
     try:
         MEMCG_DATA_OBJEXTS = prog.constant("MEMCG_DATA_OBJEXTS").value_()
-        MEMCG_DATA_KMEM = prog.constant("MEMCG_DATA_KMEM").value_()
         mask = prog.constant('__NR_MEMCG_DATA_FLAGS').value_() - 1
         memcg_data = page.memcg_data.read_()
         if memcg_data & MEMCG_DATA_OBJEXTS:
             slabobj_ext = cast("struct slabobj_ext *", memcg_data & ~mask)
-            memcg = slabobj_ext.objcg.memcg.value_()
-        elif memcg_data & MEMCG_DATA_KMEM:
-            objcg = cast("struct obj_cgroup *", memcg_data & ~mask)
-            memcg = objcg.memcg.value_()
+            try:
+                objcg = slabobj_ext._objcg
+            except AttributeError:
+                objcg = slabobj_ext.objcg
+            memcg = objcg.memcg
         else:
-            memcg = cast("struct mem_cgroup *", memcg_data & ~mask)
+            objcg = Object(prog, "struct obj_cgroup *", memcg_data & ~mask)
+            memcg = objcg.memcg
 
         if memcg.value_() == 0:
             return "none", "/sys/fs/cgroup/memory/"
@@ -73,6 +75,52 @@ def get_memcg_info(page):
         return "unknown", f"Error retrieving memcg info: {e}"
     except Exception as e:
         return "unknown", f"Unexpected error: {e}"
+
+def format_vma_flags(flags: int) -> str:
+    """
+    Format VMA flags into a human-readable string.
+
+    :param flags: The VMA flags as an integer.
+    :return: A string representation of the flags.
+    """
+    # VM flags from include/uapi/linux/mm.h
+    # Since Linux 6.19 (commit 2b6a3f061f11), VMA flag bit numbers are defined
+    # in an anonymous enum. For older kernels, we hard-code them.
+    VM_FLAGS = [
+        ("READ", 0x00000001),
+        ("WRITE", 0x00000002),
+        ("EXEC", 0x00000004),
+        ("SHARED", 0x00000008),
+        ("MAYREAD", 0x00000010),
+        ("MAYWRITE", 0x00000020),
+        ("MAYEXEC", 0x00000040),
+        ("MAYSHARE", 0x00000080),
+        ("GROWSDOWN", 0x00000100),
+        ("UFFD_MISSING", 0x00000200),
+        ("PFNMAP", 0x00000400),
+        ("DENYWRITE", 0x00000800),
+        ("EXECUTABLE", 0x00001000),
+        ("LOCKED", 0x00002000),
+        ("IO", 0x00004000),
+        ("SEQ_READ", 0x00008000),
+        ("RAND_READ", 0x00010000),
+        ("DONTCOPY", 0x00020000),
+        ("DONTEXPAND", 0x00040000),
+        ("LOCKONFAULT", 0x00080000),
+        ("ACCOUNT", 0x00100000),
+        ("NORESERVE", 0x00200000),
+        ("HUGETLB", 0x00400000),
+        ("SYNC", 0x00800000),
+        ("ARCH_1", 0x01000000),
+        ("WIPEONFORK", 0x02000000),
+        ("DONTDUMP", 0x04000000),
+        ("SOFTDIRTY", 0x08000000),
+        ("MIXEDMAP", 0x10000000),
+        ("HUGEPAGE", 0x20000000),
+        ("NOHUGEPAGE", 0x40000000),
+        ("MERGEABLE", 0x80000000),
+    ]
+    return decode_flags(flags, VM_FLAGS, bit_numbers=False)
 
 def show_page_state(page, addr, mm, pid, task):
     """Display detailed information about a page."""
@@ -91,7 +139,6 @@ def show_page_state(page, addr, mm, pid, task):
             "Page Virtual": hex(page_to_virt(page).value_()),
             "Page Refcount": page._refcount.counter.value_(),
             "Page Mapcount": page._mapcount.counter.value_(),
-            "Page Index": hex(page.__folio_index.value_()),
             "Page Memcg Data": hex(page.memcg_data.value_()),
         }
 
@@ -106,10 +153,15 @@ def show_page_state(page, addr, mm, pid, task):
             fields["Page VMA"] = hex(vma.value_())
             fields["VMA Start"] = hex(vma.vm_start.value_())
             fields["VMA End"] = hex(vma.vm_end.value_())
+            vma_flags_hex = hex(vma.vm_flags.value_())
+            vma_flags_readable = format_vma_flags(vma.vm_flags.value_())
+            fields["VMA Flags"] = f"{vma_flags_hex} ({vma_flags_readable})"
+            fields["VMA Name"] = vma_name(vma).decode()
         except FaultError as e:
             fields["Page VMA"] = "Unavailable"
             fields["VMA Start"] = "Unavailable"
             fields["VMA End"] = "Unavailable"
+            fields["VMA Flags"] = "Unavailable"
             print(f"Error retrieving VMA information: {e}")
 
         # Calculate the maximum field name length for alignment
