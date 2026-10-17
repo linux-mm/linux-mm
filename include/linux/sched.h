@@ -1352,6 +1352,10 @@ struct task_struct {
 	struct css_set __rcu		*cgroups;
 	/* cg_list protected by css_set_lock and tsk->alloc_lock: */
 	struct list_head		cg_list;
+	/* If set, CPU time is charged here; see set_active_cgroup(): */
+	struct cgroup			*active_cgroup;
+	/* se.sum_exec_runtime at the last set_active_cgroup(): */
+	u64				active_cgroup_start;
 #ifdef CONFIG_PREEMPT_RT
 	struct llist_node		cg_dead_lnode;
 #endif	/* CONFIG_PREEMPT_RT */
