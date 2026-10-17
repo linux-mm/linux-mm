@@ -621,6 +621,13 @@ static int __map_range_leaf(struct pt_range *range, void *arg,
 			PT_WARN_ON(compute_best_pgsize(&pts, oa) !=
 				   leaf_pgsize_lg2);
 		}
+
+		/* If refcount = 0, shrinker killed the page, retry map */
+		if (!atomic_inc_not_zero(&virt_to_ioptdesc(pts.table)->__page_refcount)) {
+			ret = -EAGAIN;
+			break;
+		}
+
 		pt_install_leaf_entry(&pts, oa, leaf_pgsize_lg2, &map->attrs);
 
 		oa += log2_to_int(leaf_pgsize_lg2);
@@ -754,6 +761,11 @@ static __always_inline int __do_map_single_page(struct pt_range *range,
 	if (pts.level == 0) {
 		if (pts.type != PT_ENTRY_EMPTY)
 			return -EADDRINUSE;
+
+		/* If refcount = 0, shrinker killed the page, retry map */
+		if (!atomic_inc_not_zero(&virt_to_ioptdesc(pts.table)->__page_refcount))
+			return -EAGAIN;
+
 		pt_install_leaf_entry(&pts, map->oa, PAGE_SHIFT,
 				      &map->attrs);
 		/* No flush, not used when incoherent */
@@ -904,7 +916,7 @@ static int check_map_range(struct pt_iommu *iommu_table, struct pt_range *range,
 static int do_map(struct pt_range *range, struct pt_common *common,
 		  bool single_page, struct pt_iommu_map_args *map)
 {
-	int ret;
+	int ret, idx;
 
 	/*
 	 * The __map_single_page() fast path does not support DMA_INCOHERENT
@@ -912,17 +924,21 @@ static int do_map(struct pt_range *range, struct pt_common *common,
 	 */
 	if (single_page && !pt_feature(common, PT_FEAT_DMA_INCOHERENT)) {
 
+		idx = srcu_read_lock(&generic_pt_srcu);
 		ret = pt_walk_range(range, __map_single_page, map);
+		srcu_read_unlock(&generic_pt_srcu, idx);
 		if (ret != -EAGAIN)
 			return ret;
 		/* EAGAIN falls through to the full path */
 	}
 
 	do {
+		idx = srcu_read_lock(&generic_pt_srcu);
 		if (map->leaf_level == range->top_level)
 			ret = pt_walk_range(range, __map_range_leaf, map);
 		else
 			ret = pt_walk_range(range, __map_range, map);
+		srcu_read_unlock(&generic_pt_srcu, idx);
 	} while (ret == -EAGAIN);
 	return ret;
 }
@@ -1087,6 +1103,21 @@ start_oa:
 			 */
 			num_contig_lg2 = pt_entry_num_contig_lg2(&pts);
 			pt_clear_entries(&pts, num_contig_lg2);
+
+			/* Drop refcount and add to reclaim_list for the last ref */
+			/*
+			 * DMA API unmaps can run in IRQ context and the reclaim_list
+			 * lock is not IRQ safe, so only queue for non-DMA domains.
+			 */
+			if (atomic_dec_return(&virt_to_ioptdesc(pts.table)->__page_refcount) == 1 &&
+			    !iommu_is_dma_domain(&iommu_from_common(range->common)->domain)) {
+				struct pt_iommu *iommu = iommu_from_common(range->common);
+
+				xa_store(&iommu->domain.reclaim_list, range->va,
+					 virt_to_ioptdesc(pts.table), GFP_ATOMIC);
+				atomic_long_inc(&iommu->nr_reclaimable);
+			}
+
 			gather_add_leaf(&unmap->pending, &pts);
 			num_oas += log2_to_int(num_contig_lg2);
 			if (pts.index < flush_start_index)
@@ -1116,17 +1147,59 @@ static size_t NS(unmap_range)(struct pt_iommu *iommu_table, dma_addr_t iova,
 			unmap.pending.free_list),
 	};
 	struct pt_range range;
-	int ret;
+	int ret, idx;
 
 	ret = make_range(common_from_iommu(iommu_table), &range, iova, len);
 	if (ret)
 		return 0;
 
+	idx = srcu_read_lock(&generic_pt_srcu);
 	pt_walk_range(&range, __unmap_range, &unmap);
+	srcu_read_unlock(&generic_pt_srcu, idx);
 
 	gather_range_pending(&unmap.pending, iommu_table, iova, unmap.unmapped);
 
 	return unmap.unmapped;
+}
+
+struct pt_sever_args {
+	phys_addr_t expected_phys;
+	bool success;
+};
+
+static int __sever_branch(struct pt_range *range, void *arg,
+			  unsigned int level, struct pt_table_p *table)
+{
+	struct pt_state pts = pt_init(range, level, table);
+	struct pt_sever_args *sever = arg;
+
+	switch (pt_load_single_entry(&pts)) {
+	case PT_ENTRY_TABLE:
+		if (virt_to_phys(pt_table_ptr(&pts)) == sever->expected_phys) {
+			sever->success = pt_table_install64(&pts, 0x0);
+			/* Stop walking */
+			return 1;
+		}
+		return pt_descend(&pts, arg, __sever_branch);
+	default:
+		break;
+	}
+	return 0;
+}
+
+static bool NS(sever_branch)(struct pt_iommu *iommu_table, dma_addr_t iova,
+			     phys_addr_t expected_phys)
+{
+	struct pt_range range;
+	struct pt_sever_args sever = { .expected_phys = expected_phys, .success = false };
+	int ret;
+
+	ret = make_range(common_from_iommu(iommu_table), &range, iova, 1);
+	if (ret)
+		return false;
+
+	pt_walk_range(&range, __sever_branch, &sever);
+	return sever.success;
 }
 
 static void NS(get_info)(struct pt_iommu *iommu_table,
@@ -1166,6 +1239,8 @@ static void NS(deinit)(struct pt_iommu *iommu_table)
 			collect.pending.free_list),
 	};
 
+	generic_pt_shrinker_remove(iommu_table);
+
 	iommu_pages_list_add(&collect.pending.free_list, range.top_table);
 	pt_walk_range(&range, __collect_tables, &collect);
 
@@ -1182,6 +1257,7 @@ static void NS(deinit)(struct pt_iommu *iommu_table)
 static const struct pt_iommu_ops NS(ops) = {
 	.map_range = NS(map_range),
 	.unmap_range = NS(unmap_range),
+	.sever_branch = NS(sever_branch),
 #if IS_ENABLED(CONFIG_IOMMUFD_DRIVER) && defined(pt_entry_is_write_dirty) && \
 	IS_ENABLED(CONFIG_IOMMUFD_TEST) && defined(pt_entry_make_write_dirty)
 	.set_dirty = NS(set_dirty),
@@ -1341,6 +1417,7 @@ int pt_iommu_init(struct pt_iommu_table *fmt_table,
 
 	/* Must be last, see pt_iommu_deinit() */
 	iommu_table->ops = &NS(ops);
+	generic_pt_shrinker_add(iommu_table);
 	return 0;
 }
 EXPORT_SYMBOL_NS_GPL(pt_iommu_init, "GENERIC_PT_IOMMU");
