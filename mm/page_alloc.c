@@ -711,6 +711,9 @@ static inline struct capture_control *task_capc(struct zone *zone)
 		capc->zone == zone ? capc : NULL;
 }
 
+static void change_pageblock_range(struct page *pageblock_page,
+				   int start_order, int migratetype);
+
 static inline bool
 compaction_capture(struct capture_control *capc, struct page *page,
 		   int order, int migratetype)
@@ -733,6 +736,19 @@ compaction_capture(struct capture_control *capc, struct page *page,
 	if (order < pageblock_order && migratetype == MIGRATE_MOVABLE &&
 	    capc->migratetype != MIGRATE_MOVABLE)
 		return false;
+
+	/*
+	 * A non-movable capture claims a movable block: convert it to
+	 * the request. A movable capture steals: take the pages and
+	 * leave the type alone. Partial movable blocks returned above,
+	 * so reaching here means a whole block.
+	 */
+	if (capc->migratetype != MIGRATE_MOVABLE &&
+	    migratetype == MIGRATE_MOVABLE) {
+		change_pageblock_range(page, order, capc->migratetype);
+		/* Converted whole, so no fragmentation to report below. */
+		migratetype = capc->migratetype;
+	}
 
 	if (migratetype != capc->migratetype)
 		trace_mm_page_alloc_extfrag(page, capc->order, order,
@@ -976,6 +992,11 @@ static inline void __free_one_page(struct page *page,
 			account_freepages(zone, 1 << order, migratetype);
 		} else {
 			__del_page_from_free_list(buddy, zone, order, buddy_mt);
+			/* The buddy's free pages join the merged block's type. */
+			if (unlikely(buddy_mt != migratetype)) {
+				account_freepages(zone, -(1 << order), buddy_mt);
+				account_freepages(zone, 1 << order, migratetype);
+			}
 		}
 
 		if (unlikely(buddy_mt != migratetype)) {
@@ -2280,18 +2301,39 @@ find_suitable_fallback(struct free_area *area, unsigned int order,
 }
 
 /*
- * This function implements actual block claiming behaviour. If order is large
- * enough, we can claim the whole pageblock for the requested migratetype. If
- * not, we check the pageblock for constituent pages; if at least half of the
- * pages are free or compatible, we can still claim the whole block, so pages
- * freed in the future will be put on the correct free list.
+ * Whether to retype a partly used block. A block wholly inside its zone
+ * takes the allocation's type, so no non-movable page sits in a
+ * movable-typed block; a straddling block is never retyped.
  */
+static bool should_claim_used_block(struct zone *zone, unsigned long start_pfn,
+				    int start_type, int block_type,
+				    int free_pages, int movable_pages)
+{
+	if (!zone_spans_pageblock(zone, start_pfn))
+		return false;
+
+	if (page_group_by_mobility_disabled)
+		return true;
+
+	/* Convert to movable only if no non-movable pages are present. */
+	if (is_migrate_movable(start_type))
+		return free_pages + movable_pages == pageblock_nr_pages;
+
+	/* Non-movable pages break compaction; claim as non-movable */
+	if (is_migrate_movable(block_type))
+		return true;
+
+	/* Unmovable or reclaimable claiming from the other. */
+	return free_pages >= (1 << (pageblock_order - 1));
+}
+
+/* Convert the block so later frees use the allocation's migratetype. */
 static struct page *
 try_to_claim_block(struct zone *zone, struct page *page,
 		   int current_order, int order, int start_type,
 		   int block_type, unsigned int alloc_flags)
 {
-	int free_pages, movable_pages, alike_pages;
+	int free_pages, movable_pages;
 	unsigned long start_pfn;
 
 	/* Take ownership for orders >= pageblock_order */
@@ -2318,39 +2360,13 @@ try_to_claim_block(struct zone *zone, struct page *page,
 				       &movable_pages))
 		return NULL;
 
-	/*
-	 * Determine how many pages are compatible with our allocation.
-	 * For movable allocation, it's the number of movable pages which
-	 * we just obtained. For other types it's a bit more tricky.
-	 */
-	if (start_type == MIGRATE_MOVABLE) {
-		alike_pages = movable_pages;
-	} else {
-		/*
-		 * If we are falling back a RECLAIMABLE or UNMOVABLE allocation
-		 * to MOVABLE pageblock, consider all non-movable pages as
-		 * compatible. If it's UNMOVABLE falling back to RECLAIMABLE or
-		 * vice versa, be conservative since we can't distinguish the
-		 * exact migratetype of non-movable pages.
-		 */
-		if (block_type == MIGRATE_MOVABLE)
-			alike_pages = pageblock_nr_pages
-						- (free_pages + movable_pages);
-		else
-			alike_pages = 0;
-	}
-	/*
-	 * If a sufficient number of pages in the block are either free or of
-	 * compatible migratability as our allocation, claim the whole block.
-	 */
-	if (free_pages + alike_pages >= (1 << (pageblock_order-1)) ||
-			page_group_by_mobility_disabled) {
-		__move_freepages_block(zone, start_pfn, block_type, start_type);
-		set_pageblock_migratetype(pfn_to_page(start_pfn), start_type);
-		return __rmqueue_smallest(zone, order, start_type);
-	}
+	if (!should_claim_used_block(zone, start_pfn, start_type, block_type,
+				     free_pages, movable_pages))
+		return NULL;
 
-	return NULL;
+	__move_freepages_block(zone, start_pfn, block_type, start_type);
+	set_pageblock_migratetype(pfn_to_page(start_pfn), start_type);
+	return __rmqueue_smallest(zone, order, start_type);
 }
 
 /*
@@ -2413,8 +2429,10 @@ __rmqueue_claim(struct zone *zone, int order, int start_migratetype,
 }
 
 /*
- * Try to steal a single page from some fallback migratetype. Leave the rest of
- * the block as its current migratetype, potentially causing fragmentation.
+ * Try to steal one page from a fallback type, leaving the rest of the block
+ * unchanged and possibly fragmented. A non-movable allocation must not steal
+ * from a movable block: without converting its type, the steal would leave
+ * non-movable content under a movable type.
  */
 static __always_inline struct page *
 __rmqueue_steal(struct zone *zone, int order, int start_migratetype)
@@ -2434,6 +2452,19 @@ __rmqueue_steal(struct zone *zone, int order, int start_migratetype)
 			continue;
 
 		page = get_page_from_free_area(area, fallback_mt);
+
+		/*
+		 * Do not allow non-movable allocations in movable
+		 * pageblocks; that could break compaction.
+		 * Non-movable allocations should claim pageblocks, instead.
+		 */
+		if (!is_migrate_movable(start_migratetype) &&
+		    is_migrate_movable(fallback_mt) &&
+		    !page_group_by_mobility_disabled &&
+		    zone_spans_pageblock(zone, page_to_pfn(page))) {
+			continue;
+		}
+
 		page_del_and_expand(zone, page, order, current_order, fallback_mt);
 		trace_mm_page_alloc_extfrag(page, order, current_order,
 					    start_migratetype, fallback_mt);
