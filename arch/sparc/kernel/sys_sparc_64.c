@@ -26,6 +26,8 @@
 #include <linux/ipc.h>
 #include <linux/personality.h>
 #include <linux/random.h>
+#include <linux/elf-randomize.h>
+#include <linux/sizes.h>
 #include <linux/export.h>
 #include <linux/context_tracking.h>
 #include <linux/timex.h>
@@ -280,7 +282,7 @@ unsigned long get_fb_unmapped_area(struct file *filp, unsigned long orig_addr, u
 EXPORT_SYMBOL(get_fb_unmapped_area);
 
 /* Essentially the same as PowerPC.  */
-static unsigned long mmap_rnd(void)
+unsigned long arch_mmap_rnd(void)
 {
 	unsigned long rnd = 0UL;
 
@@ -294,9 +296,17 @@ static unsigned long mmap_rnd(void)
 	return rnd << PAGE_SHIFT;
 }
 
+unsigned long arch_randomize_brk(struct mm_struct *mm)
+{
+	if (test_thread_flag(TIF_32BIT))
+		return randomize_page(mm->brk, SZ_32M);
+
+	return randomize_page(mm->brk, SZ_1G);
+}
+
 void arch_pick_mmap_layout(struct mm_struct *mm, const struct rlimit *rlim_stack)
 {
-	unsigned long random_factor = mmap_rnd();
+	unsigned long random_factor = arch_mmap_rnd();
 	unsigned long gap;
 
 	/*
