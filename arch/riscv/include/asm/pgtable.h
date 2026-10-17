@@ -406,7 +406,11 @@ static inline int pte_special(pte_t pte)
 
 static inline pte_t pte_wrprotect(pte_t pte)
 {
-	return __pte((pte_val(pte) & ~(_PAGE_WRITE)) | (_PAGE_READ));
+	/* Shadow stack is XWR = 010: keep a leaf by making it readable */
+	if (pte_val(pte) & _PAGE_WRITE)
+		pte = __pte(pte_val(pte) | _PAGE_READ);
+
+	return __pte(pte_val(pte) & ~(_PAGE_WRITE));
 }
 
 #ifdef CONFIG_HAVE_ARCH_USERFAULTFD_WP
@@ -688,8 +692,7 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm,
 	 * encoding 000b which is wrong encoding with V = 1. This should lead to page fault
 	 * but we dont want this wrong configuration to be set in page tables.
 	 */
-	atomic_long_set((atomic_long_t *)ptep,
-			((pte_val(read_pte) & ~(unsigned long)_PAGE_WRITE) | _PAGE_READ));
+	atomic_long_set((atomic_long_t *)ptep, pte_val(pte_wrprotect(read_pte)));
 }
 
 #define __HAVE_ARCH_PTEP_CLEAR_YOUNG_FLUSH
