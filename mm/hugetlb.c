@@ -1362,18 +1362,8 @@ static struct folio *dequeue_hugetlb_folio(struct hstate *h, gfp_t gfp_mask,
 static struct folio *alloc_gigantic_frozen_folio(int order, gfp_t gfp_mask,
 		int nid, nodemask_t *nodemask)
 {
-	struct folio *folio;
-
-	folio = hugetlb_cma_alloc_frozen_folio(order, gfp_mask, nid, nodemask);
-	if (folio)
-		return folio;
-
-	if (hugetlb_cma_exclusive_alloc())
-		return NULL;
-
-	folio = (struct folio *)alloc_contig_frozen_pages(1 << order, gfp_mask,
-							  nid, nodemask);
-	return folio;
+	return (struct folio *)alloc_contig_frozen_pages(1 << order, gfp_mask,
+							 nid, nodemask);
 }
 #else /* !CONFIG_ARCH_HAS_GIGANTIC_PAGE || !CONFIG_CONTIG_ALLOC */
 static struct folio *alloc_gigantic_frozen_folio(int order, gfp_t gfp_mask, int nid,
@@ -1849,19 +1839,25 @@ static struct folio *only_alloc_fresh_hugetlb_folio(struct hstate *h,
 	if (nid == NUMA_NO_NODE)
 		nid = numa_mem_id();
 
-	if (order_is_gigantic(order))
-		folio = alloc_gigantic_frozen_folio(order, gfp_mask, nid, nmask);
-	else
-		folio = alloc_buddy_frozen_folio(order, gfp_mask, nid, nmask,
-						 node_alloc_noretry);
+	folio = hugetlb_cma_alloc_frozen_folio(order, gfp_mask, nid, nmask);
+	if (!folio) {
+		if (hugetlb_cma_exclusive_alloc(order))
+			return NULL;
+
+		if (order_is_gigantic(order))
+			folio = alloc_gigantic_frozen_folio(order, gfp_mask, nid, nmask);
+		else
+			folio = alloc_buddy_frozen_folio(order, gfp_mask, nid, nmask,
+							 node_alloc_noretry);
+	}
+
 	if (folio)
 		init_new_hugetlb_folio(folio);
 	return folio;
 }
 
 /*
- * Common helper to allocate a fresh hugetlb folio. All specific allocators
- * should use this function to get new hugetlb folio
+ * Common helper to allocate a fresh hugetlb folio.
  *
  * Note that returned folio is 'frozen':  ref count of head page and all tail
  * pages is zero, and the accounting must be done in the caller.
@@ -1874,6 +1870,30 @@ static struct folio *alloc_fresh_hugetlb_folio(struct hstate *h,
 	folio = only_alloc_fresh_hugetlb_folio(h, gfp_mask, nid, nmask, NULL);
 	if (folio)
 		hugetlb_vmemmap_optimize_folio(h, folio);
+	return folio;
+}
+
+/*
+ * Contiguous allocation can replace or migrate hugetlb pages while holding
+ * a CMA allocation mutex. Do not recurse into CMA to allocate replacements.
+ */
+static struct folio *alloc_fresh_hugetlb_folio_nocma(struct hstate *h, gfp_t gfp_mask,
+						     int nid, nodemask_t *nmask)
+{
+	struct folio *folio;
+	unsigned int order = huge_page_order(h);
+
+	if (hugetlb_cma_exclusive_alloc(order))
+		return NULL;
+
+	if (nid == NUMA_NO_NODE)
+		nid = numa_mem_id();
+
+	folio = alloc_buddy_frozen_folio(order, gfp_mask, nid, nmask, NULL);
+	if (folio) {
+		init_new_hugetlb_folio(folio);
+		hugetlb_vmemmap_optimize_folio(h, folio);
+	}
 	return folio;
 }
 
@@ -2139,14 +2159,17 @@ out_unlock:
 }
 
 static struct folio *alloc_migrate_hugetlb_folio(struct hstate *h, gfp_t gfp_mask,
-				     int nid, nodemask_t *nmask)
+				     int nid, nodemask_t *nmask, bool allow_cma)
 {
 	struct folio *folio;
 
 	if (hstate_is_gigantic(h))
 		return NULL;
 
-	folio = alloc_fresh_hugetlb_folio(h, gfp_mask, nid, nmask);
+	if (allow_cma)
+		folio = alloc_fresh_hugetlb_folio(h, gfp_mask, nid, nmask);
+	else
+		folio = alloc_fresh_hugetlb_folio_nocma(h, gfp_mask, nid, nmask);
 	if (!folio)
 		return NULL;
 
@@ -2219,7 +2242,8 @@ struct folio *alloc_hugetlb_folio_reserve(struct hstate *h, int preferred_nid,
 
 /* folio migration callback function */
 struct folio *alloc_hugetlb_folio_nodemask(struct hstate *h, int preferred_nid,
-		nodemask_t *nmask, gfp_t gfp_mask, bool allow_alloc_fallback)
+		nodemask_t *nmask, gfp_t gfp_mask, bool allow_alloc_fallback,
+		bool allow_cma)
 {
 	struct folio *folio = NULL;
 
@@ -2238,7 +2262,7 @@ struct folio *alloc_hugetlb_folio_nodemask(struct hstate *h, int preferred_nid,
 			gfp_mask |= __GFP_THISNODE;
 
 		folio = alloc_migrate_hugetlb_folio(h, gfp_mask, preferred_nid,
-						    nmask);
+						    nmask, allow_cma);
 	}
 
 	if (folio)
@@ -2722,8 +2746,8 @@ retry:
 		if (!new_folio) {
 			spin_unlock_irq(&hugetlb_lock);
 			gfp_mask = htlb_alloc_mask(h) | __GFP_THISNODE;
-			new_folio = alloc_fresh_hugetlb_folio(h, gfp_mask,
-							      nid, NULL);
+			new_folio = alloc_fresh_hugetlb_folio_nocma(h, gfp_mask,
+								    nid, NULL);
 			if (!new_folio)
 				return -ENOMEM;
 			goto retry;
@@ -3635,7 +3659,7 @@ static void __init hugetlb_hstate_alloc_pages(struct hstate *h)
 	 * Skip gigantic hugepages allocation if early CMA
 	 * reservations are not available.
 	 */
-	if (hstate_is_gigantic(h) && hugetlb_cma_total_size() &&
+	if (hstate_is_gigantic(h) && hugetlb_cma_size(h) &&
 	    !hugetlb_early_cma(h)) {
 		pr_warn_once("hugetlb_cma is enabled, skip boot time allocation\n");
 		return;
@@ -4338,8 +4362,6 @@ static __init void hugetlb_parse_params(void)
 
 		hcp->setup(hcp->val);
 	}
-
-	hugetlb_cma_validate_params();
 }
 
 /*
@@ -6359,7 +6381,7 @@ static struct folio *alloc_hugetlb_folio_vma(struct hstate *h,
 	 * consuming a reservation. Set the alloc_fallback to false to indicate
 	 * that breaking the per-node hugetlb pool is not allowed in this case.
 	 */
-	folio = alloc_hugetlb_folio_nodemask(h, node, nodemask, gfp_mask, false);
+	folio = alloc_hugetlb_folio_nodemask(h, node, nodemask, gfp_mask, false, true);
 	mpol_cond_put(mpol);
 
 	return folio;
