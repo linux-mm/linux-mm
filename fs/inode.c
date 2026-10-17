@@ -23,6 +23,7 @@
 #include <linux/rw_hint.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
+#include <linux/task_work.h>
 #include <trace/events/writeback.h>
 #define CREATE_TRACE_POINTS
 #include <trace/events/timestamp.h>
@@ -73,6 +74,25 @@ static DEFINE_PER_CPU(unsigned long, nr_inodes);
 static DEFINE_PER_CPU(unsigned long, nr_unused);
 
 static struct kmem_cache *inode_cachep __ro_after_init;
+
+struct deferred_reclaim_queue {
+	struct list_head list;
+	spinlock_t lock;
+};
+
+/* Inodes for deferred reclaim */
+struct inode_deferred_reclaim {
+	int workers;			/* Number of parallel workers */
+	struct workqueue_struct *wq;	/* Workqueue for workers */
+	struct work_struct *work;	/* Workers */
+	/*
+	 * Queue of deferred inodes. The number of queues is the same number
+	 * as the number of workers
+	 */
+	struct deferred_reclaim_queue *queues;
+};
+
+static struct inode_deferred_reclaim deferred_reclaim;
 
 static long get_nr_inodes(void)
 {
@@ -949,7 +969,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
 	 * sync, or the last page cache deletion will requeue them.
 	 */
 	if (icount_read(inode) ||
-	    (inode_state_read(inode) & ~I_REFERENCED) ||
+	    inode_state_read(inode) & ~(I_REFERENCED | I_DEFER_RECLAIM) ||
 	    !mapping_shrinkable(&inode->i_data)) {
 		list_lru_isolate(lru, &inode->i_lru);
 		spin_unlock(&inode->i_lock);
@@ -994,6 +1014,51 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
 	return LRU_REMOVED;
 }
 
+/* Number of inodes to process in one reclaim batch */
+#define INODE_RECLAIM_BATCH_SIZE 16
+
+static int get_deferred_sb_id(struct super_block *sb)
+{
+	return hash_ptr(sb, 32) % deferred_reclaim.workers;
+}
+
+void wake_deferred_reclaim_workers(struct super_block *sb, int count)
+{
+	int id = get_deferred_sb_id(sb);
+	int i, wake_count;
+
+	wake_count = DIV_ROUND_UP(count, INODE_RECLAIM_BATCH_SIZE);
+	if (wake_count > deferred_reclaim.workers)
+		wake_count = deferred_reclaim.workers;
+	for (i = 0; i < wake_count; i++) {
+		queue_work(deferred_reclaim.wq,
+			   &deferred_reclaim.work[id]);
+		id = (id + 1) % deferred_reclaim.workers;
+	}
+}
+
+static void queue_deferred_reclaim(struct super_block *sb, int count,
+				   struct list_head *list)
+{
+	int id = get_deferred_sb_id(sb);
+	struct deferred_reclaim_queue *queue =
+					&deferred_reclaim.queues[id];
+
+	spin_lock(&queue->lock);
+	list_splice_tail(list, &queue->list);
+	atomic_add(count, &sb->s_deferred_reclaim_count);
+	spin_unlock(&queue->lock);
+
+	/*
+	 * Skip waking up workers for frozen filesystem. They'd skip the inodes
+	 * anyway.
+	 */
+	if (atomic_read(&sb->s_deferred_reclaim_running) < 0)
+		return;
+
+	wake_deferred_reclaim_workers(sb, count);
+}
+
 /*
  * Walk the superblock inode LRU for freeable inodes and attempt to free them.
  * This is called from the superblock shrinker function with a number of inodes
@@ -1003,13 +1068,314 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
 long prune_icache_sb(struct super_block *sb, struct shrink_control *sc)
 {
 	LIST_HEAD(freeable);
-	long freed;
+	long freed, deferred = 0;
+	struct inode *inode, *tmp;
 
 	freed = list_lru_shrink_walk(&sb->s_inode_lru, sc,
 				     inode_lru_isolate, &freeable);
-	dispose_list(&freeable);
+
+	list_for_each_entry_safe(inode, tmp, &freeable, i_lru) {
+		if (inode_state_read_once(inode) & I_DEFER_RECLAIM) {
+			deferred++;
+			continue;
+		}
+		list_del_init(&inode->i_lru);
+		evict(inode);
+		cond_resched();
+	}
+
+	if (!list_empty(&freeable))
+		queue_deferred_reclaim(sb, deferred, &freeable);
 	return freed;
 }
+
+static void __get_inode_reclaim_batch(int *start, int end,
+				      struct list_head *list, int *count)
+{
+	int i;
+
+	for (i = *start; i < end; i++) {
+		struct deferred_reclaim_queue *queue =
+						&deferred_reclaim.queues[i];
+		struct inode *inode, *next;
+
+		if (list_empty_careful(&queue->list))
+			continue;
+		spin_lock(&queue->lock);
+		list_for_each_entry_safe(inode, next, &queue->list, i_lru) {
+			/*
+			 * Skip inodes on frozen fs as we'd likely block. We
+			 * always accept inodes from read-only fs as there
+			 * eviction cannot require writing.
+			 */
+			if (!sb_rdonly(inode->i_sb) &&
+			    inode->i_sb->s_writers.frozen != SB_UNFROZEN)
+				continue;
+			list_move_tail(&inode->i_lru, list);
+			if (++(*count) >= INODE_RECLAIM_BATCH_SIZE)
+				break;
+		}
+		spin_unlock(&queue->lock);
+		if (*count >= INODE_RECLAIM_BATCH_SIZE)
+			break;
+	}
+	*start = i;
+}
+
+/* Move a batch of inodes from queued lists to our private list */
+static int get_inode_reclaim_batch(int *id, struct list_head *list)
+{
+	int count = 0;
+	int orig_id = *id;
+
+	__get_inode_reclaim_batch(id, deferred_reclaim.workers, list, &count);
+	if (count >= INODE_RECLAIM_BATCH_SIZE)
+		return count;
+	/* Wrap around */
+	if (orig_id > 0) {
+		*id = 0;
+		__get_inode_reclaim_batch(id, orig_id, list, &count);
+	}
+	return count;
+}
+
+static void inode_reclaim_update_stat(struct super_block *sb, unsigned int n,
+				      u64 start)
+{
+	u64 delay;
+
+	if (!sb)
+		return;
+
+	delay = div_u64(ktime_get_ns() - start, n);
+	/*
+	 * Smooth delay updates with exponential moving average. Updates can
+	 * get lost if workers race but we don't really care.
+	 */
+	WRITE_ONCE(sb->s_deferred_reclaim_delay,
+		   (63 * READ_ONCE(sb->s_deferred_reclaim_delay) + delay) / 64);
+
+	trace_inode_reclaim_update_stat(sb, n, delay,
+				READ_ONCE(sb->s_deferred_reclaim_delay));
+
+	/*
+	 * The elevated s_deferred_reclaim_count keeps sb alive until we drop
+	 * it
+	 */
+	if (!atomic_sub_return(n, &sb->s_deferred_reclaim_count))
+		wake_up_var(&sb->s_deferred_reclaim_count);
+}
+
+/* Put inodes from sb back to reclaim queue */
+static void inode_reclaim_skip_inodes(struct list_head *list,
+				      struct super_block *sb)
+{
+	struct inode *inode;
+	struct deferred_reclaim_queue *queue;
+	struct list_head tmp;
+
+	queue = &deferred_reclaim.queues[get_deferred_sb_id(sb)];
+	list_for_each_entry(inode, list, i_lru)
+		if (inode->i_sb != sb)
+			break;
+	list_cut_before(&tmp, list, &inode->i_lru);
+	spin_lock(&queue->lock);
+	list_splice_tail(&tmp, &queue->list);
+	spin_unlock(&queue->lock);
+}
+
+static bool sb_deferred_reclaim_get(struct super_block *sb)
+{
+	return atomic_inc_unless_negative(&sb->s_deferred_reclaim_running);
+}
+
+static void sb_deferred_reclaim_put(struct super_block *sb)
+{
+	if (sb && atomic_dec_and_test(&sb->s_deferred_reclaim_running))
+		wake_up_var(&sb->s_deferred_reclaim_running);
+}
+
+static void inode_reclaim_deferred(struct work_struct *work)
+{
+	struct inode *inode;
+	LIST_HEAD(inode_batch);
+	u64 start;
+	int id, count;
+	struct super_block *sb;
+
+	/*
+	 * We start with the list corresponding to the work but rolling a dice
+	 * would work as well
+	 */
+	id = work - deferred_reclaim.work;
+
+	while (1) {
+		if (!get_inode_reclaim_batch(&id, &inode_batch))
+			break;
+		sb = NULL;
+
+		while (!list_empty(&inode_batch)) {
+			/*
+			 * inode_batch list is private and I_FREEING flags
+			 * protect us from anybody else trying to remove the
+			 * inode from the LRU list. No locking needed.
+			 */
+			inode = list_first_entry(&inode_batch, struct inode,
+						 i_lru);
+			if (inode->i_sb != sb) {
+				inode_reclaim_update_stat(sb, count, start);
+				sb_deferred_reclaim_put(sb);
+
+				sb = inode->i_sb;
+				count = 0;
+				start = ktime_get_ns();
+				/* Protect us from filesystem freezing */
+				if (!sb_deferred_reclaim_get(sb)) {
+					inode_reclaim_skip_inodes(&inode_batch,
+								  sb);
+					sb = NULL;
+					continue;
+				}
+			}
+			count++;
+			list_del_init(&inode->i_lru);
+			evict(inode);
+			cond_resched();
+		}
+
+		inode_reclaim_update_stat(sb, count, start);
+		sb_deferred_reclaim_put(sb);
+	}
+}
+
+/* Maximum number of inode reclaim workers */
+#define MAX_RECLAIM_WORKERS 16
+
+static void __init deferred_reclaim_init(void)
+{
+	int workers = MAX_RECLAIM_WORKERS;
+	int i;
+
+	/* Scale down the number of workers for small systems */
+	if (workers > num_possible_cpus())
+		workers = num_possible_cpus();
+
+	deferred_reclaim.workers = workers;
+	deferred_reclaim.work = kmalloc_objs(struct work_struct, workers);
+	deferred_reclaim.queues =
+			kmalloc_objs(struct deferred_reclaim_queue, workers);
+	if (!deferred_reclaim.work || !deferred_reclaim.queues)
+		panic("Failed to allocate deferred inode reclaim queues");
+
+	deferred_reclaim.wq = alloc_workqueue("deferred-inode-reclaim",
+			WQ_FREEZABLE | WQ_MEM_RECLAIM | WQ_UNBOUND,
+			workers);
+	if (!deferred_reclaim.wq)
+		panic("Failed to allocate deferred inode reclaim workqueue");
+
+	for (i = 0; i < workers; i++) {
+		INIT_WORK(&deferred_reclaim.work[i], inode_reclaim_deferred);
+		spin_lock_init(&deferred_reclaim.queues[i].lock);
+		INIT_LIST_HEAD(&deferred_reclaim.queues[i].list);
+	}
+}
+
+struct deferred_reclaim_delay {
+	struct callback_head task_work;
+	u64 delay;
+};
+
+static void deferred_delay_work(struct callback_head *work)
+{
+	struct deferred_reclaim_delay *dd =
+		container_of(work, struct deferred_reclaim_delay, task_work);
+
+	schedule_timeout_killable(nsecs_to_jiffies(dd->delay));
+}
+
+/*
+ * Size of deferred reclaim list from which we start throttling tasks creating
+ * inodes marked for deferred reclaim.
+ */
+#define INODE_DEFERRED_RECLAIM_LIMIT 8192
+
+static void throttle_inode_deferred_reclaim(struct inode *inode)
+{
+	struct super_block *sb = inode->i_sb;
+	unsigned int len;
+
+	/*
+	 * If inodes with deferred reclaim are accumulating too much, slow down
+	 * tasks creating them. This doesn't provide any kind of guarantee on
+	 * the length of the deferred list since lots of inodes with
+	 * I_DEFER_RECLAIM can be already present in the inode cache and we
+	 * have no control when they reach the deferred list. But if the
+	 * pressure on the deferred list is sustained, the balance should
+	 * eventually be established.
+	 */
+	len = atomic_read(&sb->s_deferred_reclaim_count);
+	if (len > INODE_DEFERRED_RECLAIM_LIMIT) {
+		u64 delay = READ_ONCE(sb->s_deferred_reclaim_delay);
+		struct deferred_reclaim_delay *dd;
+
+		if (!delay)
+			return;
+
+		dd = kmalloc_obj(*dd, GFP_NOFS | __GFP_NORETRY);
+		/*
+		 * If the allocation failed, don't bother. Throttling is
+		 * approximate anyway and next time we'll throttle more.
+		 */
+		if (!dd)
+			return;
+
+		/*
+		 * Scale the delay based on how much we exceed the limit. Wait
+		 * at most 4x as long as estimated time to reclaim the inode.
+		 */
+		len = min(len, 5 * INODE_DEFERRED_RECLAIM_LIMIT);
+		delay = div_u64(delay * (len - INODE_DEFERRED_RECLAIM_LIMIT),
+				INODE_DEFERRED_RECLAIM_LIMIT);
+		trace_mark_inode_reclaim_deferred_throttle(inode, len, delay);
+
+		dd->delay = delay;
+		init_task_work(&dd->task_work, deferred_delay_work);
+		task_work_add(current, &dd->task_work, TWA_RESUME);
+	}
+}
+
+/*
+ * Mark inode for deferred reclaim. When slab reclaim path will be freeing the
+ * inode, it will not call evict() directly but rather offload it to a worker
+ * in a workqueue. This is useful when inode reclaim is expected to take a
+ * long time (e.g. because it needs to do IO) so that it doesn't block kswapd
+ * or because it needs allocating memory (which cannot be guaranteed from
+ * reclaim path).
+ *
+ * Note that we currently don't provide a way to unmark inode for deferred
+ * reclaim. It could be done but the benefit is unclear. The rationale is that
+ * to make inode hard to reclaim, relatively expensive things like writing data
+ * to the file have to be done and in such case the additional CPU overhead and
+ * latency of offloading the inode reclaim is negligible in the overall load.
+ */
+void mark_inode_reclaim_deferred(struct inode *inode)
+{
+	bool throttle = false;
+
+	if (inode_state_read_once(inode) & I_DEFER_RECLAIM)
+		return;
+
+	spin_lock(&inode->i_lock);
+	if (!(inode_state_read(inode) & I_DEFER_RECLAIM)) {
+		inode_state_set(inode, I_DEFER_RECLAIM);
+		throttle = true;
+	}
+	spin_unlock(&inode->i_lock);
+
+	if (throttle)
+		throttle_inode_deferred_reclaim(inode);
+}
+EXPORT_SYMBOL_GPL(mark_inode_reclaim_deferred);
 
 static void __wait_on_freeing_inode(struct inode *inode, bool hash_locked, bool rcu_locked);
 static bool igrab_from_hash(struct inode *inode);
@@ -2011,6 +2377,23 @@ static void iput_final(struct inode *inode)
 	inode_lru_list_del(inode);
 	spin_unlock(&inode->i_lock);
 
+	/*
+	 * Are we going to delete this inode while in reclaim path? Likely
+	 * reclaim of some object (e.g. overlayfs inode) ended up dropping the
+	 * last reference to an already deleted inode. Offload the eviction as
+	 * it's likely to require memory allocations and block on IO. Since
+	 * this eviction was triggered by a reclaim of unrelated object, the
+	 * inode is already outliving the operation that originally deleted it
+	 * (unlink, file close...). A slightly longer delay thus should not be
+	 * observable by userspace.
+	 */
+	if (current->flags & PF_MEMALLOC && !inode->i_nlink) {
+		LIST_HEAD(defer);
+
+		list_add(&inode->i_lru, &defer);
+		queue_deferred_reclaim(sb, 1, &defer);
+		return;
+	}
 	evict(inode);
 }
 
@@ -2029,7 +2412,6 @@ void iput(struct inode *inode)
 	if (unlikely(!inode))
 		return;
 
-retry:
 	lockdep_assert_not_held(&inode->i_lock);
 	VFS_BUG_ON_INODE(inode_state_read_once(inode) & (I_FREEING | I_CLEAR), inode);
 	/*
@@ -2042,14 +2424,14 @@ retry:
 	if (atomic_add_unless(&inode->i_count, -1, 1))
 		return;
 
-	if (inode->i_nlink && sync_lazytime(inode))
-		goto retry;
-
 	spin_lock(&inode->i_lock);
-	if (unlikely((inode_state_read(inode) & I_DIRTY_TIME) && inode->i_nlink)) {
-		spin_unlock(&inode->i_lock);
-		goto retry;
-	}
+	/*
+	 * If inode has timestamp updates pending, queue flushing them now as
+	 * otherwise the dirtiness could be preventing the inode from entering
+	 * LRU for hours.
+	 */
+	if (inode->i_nlink && inode_state_read(inode) & I_DIRTY_TIME)
+		queue_dirtytime_writeback(inode);
 
 	if (!atomic_dec_and_test(&inode->i_count)) {
 		spin_unlock(&inode->i_lock);
@@ -2658,6 +3040,9 @@ void __init inode_init(void)
 					 (SLAB_RECLAIM_ACCOUNT|SLAB_PANIC|
 					 SLAB_ACCOUNT),
 					 init_once);
+
+	/* Deferred inode reclaim infrastructure */
+	deferred_reclaim_init();
 
 	/* Hash may have been set up in inode_init_early */
 	if (!hashdist)
