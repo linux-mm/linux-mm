@@ -140,6 +140,15 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 	pcpu_task_unpin();						\
 })
 
+#define pcp_spin_trylock_nolock(ptr)					\
+({									\
+	struct per_cpu_pages *_ret = NULL;				\
+									\
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT) || preemptible())		\
+		_ret = pcp_spin_trylock(ptr);				\
+	_ret;								\
+})
+
 /*
  * On CONFIG_SMP=n the UP implementation of spin_trylock() never fails and thus
  * is not compatible with our locking scheme. However we do not need pcp for
@@ -152,6 +161,13 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 
 #define pcp_spin_unlock(ptr)		\
 		BUG_ON(1)
+
+#define pcp_spin_trylock_nolock(ptr)		\
+({						\
+	(void)(ptr);				\
+	NULL;					\
+})
+
 #endif
 
 /*
@@ -1544,7 +1560,8 @@ static void free_one_page(struct zone *zone, struct page *page,
 	unsigned long flags;
 
 	if (unlikely(fpi_flags & FPI_NOLOCK)) {
-		if (!can_spin_trylock() || !spin_trylock_irqsave(&zone->lock, flags)) {
+		if (!can_spin_trylock() ||
+		    !spin_trylock_nolock_irqsave(&zone->lock, flags)) {
 			add_page_to_zone_llist(zone, page, order);
 			return;
 		}
@@ -2533,7 +2550,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 	int i;
 
 	if (unlikely(alloc_flags & ALLOC_NOLOCK)) {
-		if (!spin_trylock_irqsave(&zone->lock, flags))
+		if (!spin_trylock_nolock_irqsave(&zone->lock, flags))
 			return 0;
 	} else {
 		spin_lock_irqsave(&zone->lock, flags);
@@ -2975,7 +2992,10 @@ static void __free_frozen_pages(struct page *page, unsigned int order,
 		add_page_to_zone_llist(zone, page, order);
 		return;
 	}
-	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
+	if (unlikely(fpi_flags & FPI_NOLOCK))
+		pcp = pcp_spin_trylock_nolock(zone->per_cpu_pageset);
+	else
+		pcp = pcp_spin_trylock(zone->per_cpu_pageset);
 	if (pcp) {
 		if (!free_frozen_page_commit(zone, pcp, page, migratetype,
 						order, fpi_flags))
@@ -3220,7 +3240,7 @@ struct page *rmqueue_buddy(struct zone *preferred_zone, struct zone *zone,
 	do {
 		page = NULL;
 		if (unlikely(alloc_flags & ALLOC_NOLOCK)) {
-			if (!spin_trylock_irqsave(&zone->lock, flags))
+			if (!spin_trylock_nolock_irqsave(&zone->lock, flags))
 				return NULL;
 		} else {
 			spin_lock_irqsave(&zone->lock, flags);
@@ -3369,7 +3389,10 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	struct page *page;
 
 	/* spin_trylock may fail due to a parallel drain or IRQ reentrancy. */
-	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
+	if (unlikely(alloc_flags & ALLOC_NOLOCK))
+		pcp = pcp_spin_trylock_nolock(zone->per_cpu_pageset);
+	else
+		pcp = pcp_spin_trylock(zone->per_cpu_pageset);
 	if (!pcp)
 		return NULL;
 
