@@ -485,7 +485,9 @@ offset_dir_lookup(struct dentry *parent, loff_t offset)
 	else {
 		rcu_read_lock();
 		child = mas_find_rev(&mas, DIR_OFFSET_MIN);
-		found = find_positive_dentry(parent, child, false);
+		/* nothing at or below @offset: no entry is left to emit */
+		if (child)
+			found = find_positive_dentry(parent, child, false);
 		rcu_read_unlock();
 	}
 	return found;
