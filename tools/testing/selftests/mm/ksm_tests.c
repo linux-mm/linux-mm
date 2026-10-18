@@ -177,6 +177,16 @@ static void  *allocate_memory(void *ptr, int prot, int mapping, char data, size_
 		ksft_perror("mmap");
 		return NULL;
 	}
+	/*
+	 * Splitting a large folio before merging maps its zero-filled pages
+	 * to the shared zeropage, so keep the pages small. Ignore EINVAL on
+	 * kernels without THP.
+	 */
+	if (madvise(map_ptr, map_size, MADV_NOHUGEPAGE) && errno != EINVAL) {
+		ksft_perror("madvise");
+		munmap(map_ptr, map_size);
+		return NULL;
+	}
 	memset(map_ptr, data, map_size);
 	if (mprotect(map_ptr, map_size, prot)) {
 		ksft_perror("mprotect");
