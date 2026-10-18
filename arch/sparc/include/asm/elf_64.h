@@ -190,7 +190,7 @@ typedef struct {
    that it will "exec", and that there is sufficient room for the brk.  */
 
 #define ELF_ET_DYN_BASE		0x0000010000000000UL
-#define COMPAT_ELF_ET_DYN_BASE	0x0000000070000000UL
+#define COMPAT_ELF_ET_DYN_BASE	0x0000000040000000UL
 
 extern unsigned long sparc64_elf_hwcap;
 #define ELF_HWCAP	sparc64_elf_hwcap
