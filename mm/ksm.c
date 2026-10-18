@@ -34,6 +34,7 @@
 #include <linux/memory.h>
 #include <linux/mmu_notifier.h>
 #include <linux/swap.h>
+#include <linux/userfaultfd_k.h>
 #include <linux/ksm.h>
 #include <linux/hashtable.h>
 #include <linux/freezer.h>
@@ -1462,6 +1463,18 @@ static int replace_page(struct vm_area_struct *vma, struct page *page,
 		 */
 		dec_mm_counter(mm, MM_ANONPAGES);
 	}
+
+	/*
+	 * The old PTE may carry soft-dirty and uffd-wp state that tracks writes
+	 * to this address. Make sure to preserve these bits in the new PTE.
+	 * On a uffd-rwp VMA, also restore PAGE_NONE.
+	 */
+	if (pte_soft_dirty(orig_pte))
+		newpte = pte_mksoft_dirty(newpte);
+	if (pte_uffd(orig_pte))
+		newpte = pte_mkuffd(newpte);
+	if (pte_uffd(orig_pte) && userfaultfd_rwp(vma))
+		newpte = pte_modify(newpte, PAGE_NONE);
 
 	flush_cache_page(vma, addr, pte_pfn(ptep_get(ptep)));
 	/*
