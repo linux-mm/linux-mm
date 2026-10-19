@@ -168,7 +168,10 @@ static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
 }
 
 /*
- * Never enable huge pmd sharing on some uffd registered vmas:
+ * Never enable huge pmd sharing on the following VMAs:
+ *
+ * - VM_UFFD_MISSING VMAs, because UFFDIO_POISON may install markers and we
+ *   want PMD tables to be unshared when installing these markers already.
  *
  * - VM_UFFD_WP and VM_UFFD_RWP VMAs, because the write protect / access
  *   tracking information is per pgtable entry.
@@ -181,9 +184,11 @@ static inline bool is_mergeable_vm_userfaultfd_ctx(struct vm_area_struct *vma,
  */
 static inline bool uffd_disable_huge_pmd_share(struct vm_area_struct *vma)
 {
-	return vma_test_any_mask(vma,
-		mk_vma_flags_from_masks(VMA_UFFD_WP, VMA_UFFD_RWP,
-					VMA_UFFD_MINOR));
+	const vma_flags_t uffd_flags =
+		mk_vma_flags_from_masks(VMA_UFFD_MISSING, VMA_UFFD_WP,
+					VMA_UFFD_RWP, VMA_UFFD_MINOR);
+
+	return vma_test_any_mask(vma, uffd_flags);
 }
 
 /*
