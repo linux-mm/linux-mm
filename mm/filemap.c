@@ -2827,6 +2827,165 @@ static void filemap_end_dropbehind_read(struct folio *folio)
 	}
 }
 
+/*
+ * Whether filemap_read_rcu_batch() can copy from @folio, or has to leave it
+ * to the slow path, which holds a reference for readahead, dropbehind and
+ * folio_mark_accessed(), and deals with poisoned pages.  @last_index is the
+ * page the previous copy ended in.
+ */
+static bool filemap_read_rcu_can_copy(struct folio *folio, pgoff_t index,
+				      pgoff_t last_index)
+{
+	if (!folio_test_uptodate(folio))
+		return false;
+	if (folio_test_readahead(folio) || folio_test_dropbehind(folio))
+		return false;
+	/* memory_failure() waits only for readers that got past this */
+	if (folio_contain_hwpoisoned_page(folio))
+		return false;
+	/* One reference covers all of a large folio's pages */
+	if (folio_test_large(folio))
+		return false;
+
+	/*
+	 * The slow path does not call folio_mark_accessed() on the folio that
+	 * the previous read ended in, so copying from it skips nothing.  The
+	 * folio's size can change without a reference: compare pages instead.
+	 */
+	if (index == last_index)
+		return true;
+
+	/* Otherwise only if folio_mark_accessed() would leave it as it is */
+	if (lru_gen_enabled()) {
+		unsigned long all = LRU_REFS_FLAGS | BIT(PG_workingset);
+
+		return folio_test_unevictable(folio) ||
+		       (READ_ONCE(folio->flags.f) & all) == all;
+	}
+	return folio_test_referenced(folio) && !folio_test_idle(folio) &&
+	       (folio_test_active(folio) || folio_test_unevictable(folio));
+}
+
+/*
+ * Return the folio at @pos if it is this file's page until rcu_read_unlock(),
+ * and read i_size into @isize.  A folio with PG_rcu_free is freed only after
+ * an RCU grace period.  Without a reference, the folio that xas_load()
+ * returned can be freed and its memory reused as another folio before the
+ * flag is tested, so look at the slot again after the flag.
+ */
+static struct folio *filemap_read_rcu_lookup(struct xa_state *xas,
+		struct inode *inode, loff_t pos, loff_t *isize)
+{
+	struct folio *folio;
+
+	xas_set(xas, pos >> PAGE_SHIFT);
+	folio = xas_load(xas);
+	if (xas_retry(xas, folio) || !folio || xa_is_value(folio))
+		return NULL;
+
+	/* Not folio_test_rcu_free(): it may not be a folio any more */
+	if (!(READ_ONCE(folio->flags.f) & __PG_RCU_FREE))
+		return NULL;
+	/* Read i_size and slot after the flag: it implies uptodate */
+	smp_rmb();
+	*isize = i_size_read(inode);
+	if (pos >= *isize)
+		return NULL;
+	/* i_size_read() is an acquire; a write fills the slot first */
+	if (xas_reload(xas) != folio)
+		return NULL;
+	/* Read the rest of the folio only once the slot holds it */
+	smp_rmb();
+	return folio;
+}
+
+/* Bytes one RCU read section copies at most: it holds up grace periods */
+#define FILEMAP_RCU_READ_MAX	SZ_512K
+
+/*
+ * Copy from folios with PG_rcu_free without taking references, at most
+ * FILEMAP_RCU_READ_MAX bytes under one rcu_read_lock().  Return true if that
+ * much was copied and the read is not done.  *last_index is the page the
+ * previous copy ended in, set as the slow path sets last_pos.
+ */
+static bool filemap_read_rcu_batch(struct kiocb *iocb, struct iov_iter *iter,
+		pgoff_t *last_index, size_t *copied)
+{
+	struct address_space *mapping = iocb->ki_filp->f_mapping;
+	struct inode *inode = mapping->host;
+	XA_STATE(xas, &mapping->i_pages, 0);
+	size_t budget = FILEMAP_RCU_READ_MAX;
+	bool more = false;
+
+	/* flush_dcache_folio() is not known to be safe without a reference */
+	if (ARCH_IMPLEMENTS_FLUSH_DCACHE_PAGE &&
+	    mapping_writably_mapped(mapping))
+		return false;
+
+	/* A user fault cannot sleep in the RCU read section: it ends the copy */
+	rcu_read_lock();
+	pagefault_disable();
+	while (iov_iter_count(iter)) {
+		loff_t pos = iocb->ki_pos;
+		pgoff_t index = pos >> PAGE_SHIFT;
+		size_t offset = offset_in_page(pos);
+		struct folio *folio;
+		size_t bytes, n;
+		loff_t isize;
+
+		if (!budget) {
+			more = true;
+			break;
+		}
+		folio = filemap_read_rcu_lookup(&xas, inode, pos, &isize);
+		if (!folio)
+			break;
+		if (!filemap_read_rcu_can_copy(folio, index, *last_index))
+			break;
+
+		bytes = min_t(loff_t, isize - pos, iov_iter_count(iter));
+		bytes = min3(bytes, budget, PAGE_SIZE - offset);
+		/* Not _nofault(): its usercopy check reads the folio's order */
+		n = copy_page_to_iter(folio_page(folio, index - folio->index),
+				      offset, bytes, iter);
+		*copied += n;
+		iocb->ki_pos += n;
+		budget -= n;
+		if (n)
+			*last_index = (pos + n - 1) >> PAGE_SHIFT;
+		if (n < bytes)
+			break;
+	}
+	pagefault_enable();
+	rcu_read_unlock();
+
+	return more;
+}
+
+/*
+ * Copy from the page cache without folio references, in batches, and
+ * return how much was copied.  The slow path reads the rest.
+ */
+static size_t filemap_read_rcu(struct kiocb *iocb, struct iov_iter *iter,
+		loff_t last_pos)
+{
+	/* The page the previous read ended in; ULONG_MAX if none */
+	pgoff_t last_index = (last_pos - 1) >> PAGE_SHIFT;
+	size_t copied = 0;
+
+	/* Not on an inode that never had a folio flagged */
+	if (!IS_ENABLED(CONFIG_PAGE_RCU_FREE) ||
+	    !mapping_rcu_read(iocb->ki_filp->f_mapping))
+		return 0;
+
+	while (filemap_read_rcu_batch(iocb, iter, &last_index, &copied)) {
+		if (fatal_signal_pending(current))
+			break;
+		cond_resched();
+	}
+	return copied;
+}
+
 /**
  * filemap_read - Read data from the page cache.
  * @iocb: The iocb to read.
@@ -2852,6 +3011,7 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 	bool writably_mapped;
 	loff_t isize, end_offset;
 	loff_t last_pos = ra->prev_pos;
+	size_t fast_read;
 
 	if (unlikely(iocb->ki_pos < 0))
 		return -EINVAL;
@@ -2862,6 +3022,14 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 
 	iov_iter_truncate(iter, inode->i_sb->s_maxbytes - iocb->ki_pos);
 	folio_batch_init(&fbatch);
+
+	fast_read = filemap_read_rcu(iocb, iter, last_pos);
+	if (fast_read) {
+		already_read += fast_read;
+		last_pos = iocb->ki_pos;
+		if (!iov_iter_count(iter))
+			goto out;
+	}
 
 	do {
 		cond_resched();
@@ -2940,6 +3108,7 @@ put_folios:
 		folio_batch_init(&fbatch);
 	} while (iov_iter_count(iter) && iocb->ki_pos < isize && !error);
 
+out:
 	file_accessed(filp);
 	/* Readers sharing the file would bounce the line for nothing */
 	if (ra->prev_pos != last_pos)
