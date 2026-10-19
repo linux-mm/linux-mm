@@ -40,6 +40,9 @@ static inline unsigned long zero_bytemask(unsigned long bits)
 #include <asm-generic/word-at-a-time.h>
 #endif
 
+#include <linux/kasan-checks.h>
+#include <linux/kcsan-checks.h>
+
 /*
  * Load an unaligned word from kernel space.
  *
@@ -50,6 +53,10 @@ static inline unsigned long zero_bytemask(unsigned long bits)
 static inline unsigned long load_unaligned_zeropad(const void *addr)
 {
 	unsigned long ret;
+
+	/* open-coded instrument_read(addr, 1), as in read_word_at_a_time() */
+	kasan_check_read(addr, 1);
+	kcsan_check_read(addr, 1);
 
 	__mte_enable_tco_async();
 

@@ -3,6 +3,8 @@
 #define _ASM_WORD_AT_A_TIME_H
 
 #include <linux/bitops.h>
+#include <linux/kasan-checks.h>
+#include <linux/kcsan-checks.h>
 #include <linux/wordpart.h>
 #include <asm/asm-extable.h>
 #include <asm/bitsperlong.h>
@@ -51,6 +53,10 @@ static inline unsigned long zero_bytemask(unsigned long data)
 static inline unsigned long load_unaligned_zeropad(const void *addr)
 {
 	unsigned long data;
+
+	/* open-coded instrument_read(addr, 1), as in read_word_at_a_time() */
+	kasan_check_read(addr, 1);
+	kcsan_check_read(addr, 1);
 
 	asm_inline volatile(
 		"0:	lg	%[data],0(%[addr])\n"

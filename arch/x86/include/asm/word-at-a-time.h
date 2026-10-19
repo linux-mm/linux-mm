@@ -3,6 +3,8 @@
 #define _ASM_WORD_AT_A_TIME_H
 
 #include <linux/bitops.h>
+#include <linux/kasan-checks.h>
+#include <linux/kcsan-checks.h>
 #include <linux/wordpart.h>
 
 struct word_at_a_time {
@@ -70,6 +72,10 @@ static inline unsigned long find_zero(unsigned long mask)
 static inline unsigned long load_unaligned_zeropad(const void *addr)
 {
 	unsigned long ret;
+
+	/* open-coded instrument_read(addr, 1), as in read_word_at_a_time() */
+	kasan_check_read(addr, 1);
+	kcsan_check_read(addr, 1);
 
 	asm volatile(
 		"1:	mov %[mem], %[ret]\n"
