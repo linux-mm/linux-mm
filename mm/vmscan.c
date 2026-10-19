@@ -7961,29 +7961,45 @@ static const match_table_t tokens = {
 };
 
 #define MEMORY_RECLAIM_SOURCE_NODES	"nodes:"
+#define MEMORY_RECLAIM_SOURCE_TIER	"tier:"
 
 static int parse_memory_reclaim_source(const char *source,
 				       nodemask_t *source_nodes)
 {
 	const char *nodes;
+	const char *tier;
+	int tier_id;
 
-	if (strncmp(source, MEMORY_RECLAIM_SOURCE_NODES,
-		    strlen(MEMORY_RECLAIM_SOURCE_NODES)))
-		return -EINVAL;
+	if (!strncmp(source, MEMORY_RECLAIM_SOURCE_NODES,
+		     strlen(MEMORY_RECLAIM_SOURCE_NODES))) {
+		nodes = source + strlen(MEMORY_RECLAIM_SOURCE_NODES);
+		if (!*nodes)
+			return -EINVAL;
 
-	nodes = source + strlen(MEMORY_RECLAIM_SOURCE_NODES);
-	if (!*nodes)
-		return -EINVAL;
+		nodes_clear(*source_nodes);
+		if (nodelist_parse(nodes, *source_nodes))
+			return -EINVAL;
 
-	nodes_clear(*source_nodes);
-	if (nodelist_parse(nodes, *source_nodes))
-		return -EINVAL;
+		nodes_and(*source_nodes, *source_nodes, node_states[N_MEMORY]);
+		if (nodes_empty(*source_nodes))
+			return -EINVAL;
 
-	nodes_and(*source_nodes, *source_nodes, node_states[N_MEMORY]);
-	if (nodes_empty(*source_nodes))
-		return -EINVAL;
+		return 0;
+	}
 
-	return 0;
+	if (!strncmp(source, MEMORY_RECLAIM_SOURCE_TIER,
+		     strlen(MEMORY_RECLAIM_SOURCE_TIER))) {
+		tier = source + strlen(MEMORY_RECLAIM_SOURCE_TIER);
+		if (!*tier)
+			return -EINVAL;
+
+		if (kstrtoint(tier, 10, &tier_id))
+			return -EINVAL;
+
+		return mt_get_memory_tier_nodemask(tier_id, source_nodes);
+	}
+
+	return -EINVAL;
 }
 
 int user_proactive_reclaim(char *buf,
