@@ -608,17 +608,20 @@ FOLIO_FLAG(dropbehind, FOLIO_HEAD_PAGE)
 /*
  * A lockless lookup that sees PG_rcu_free and then still finds the folio
  * where it looked may read it until rcu_read_unlock().  Set under a
- * reference, cleared only by the free.  Not for hugetlb or
+ * reference.  Cleared by the free, or when the folio's inode is evicted:
+ * no lockless lookup can reach it then.  Not for hugetlb or
  * free_pages_nolock().
  */
 #ifdef CONFIG_PAGE_RCU_FREE
 FOLIO_TEST_FLAG(rcu_free, FOLIO_HEAD_PAGE)
 	FOLIO_TEST_SET_FLAG(rcu_free, FOLIO_HEAD_PAGE)
+	FOLIO_CLEAR_FLAG(rcu_free, FOLIO_HEAD_PAGE)
 	__FOLIO_CLEAR_FLAG(rcu_free, FOLIO_HEAD_PAGE)
 #define __PG_RCU_FREE (1UL << PG_rcu_free)
 #else
 FOLIO_TEST_FLAG_FALSE(rcu_free)
 	FOLIO_TEST_SET_FLAG_FALSE(rcu_free)
+	FOLIO_CLEAR_FLAG_NOOP(rcu_free)
 	__FOLIO_CLEAR_FLAG_NOOP(rcu_free)
 #define __PG_RCU_FREE 0
 #endif

@@ -138,6 +138,9 @@ static void page_cache_delete(struct address_space *mapping,
 	nr = folio_nr_pages(folio);
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	/* No lockless reader can be in an evicted inode */
+	if (folio_test_rcu_free(folio) && mapping_exiting(mapping))
+		folio_clear_rcu_free(folio);
 
 	xas_store(&xas, shadow);
 	xas_init_marks(&xas);
@@ -306,6 +309,9 @@ static void page_cache_delete_batch(struct address_space *mapping,
 		}
 
 		WARN_ON_ONCE(!folio_test_locked(folio));
+		/* No lockless reader can be in an evicted inode */
+		if (folio_test_rcu_free(folio) && mapping_exiting(mapping))
+			folio_clear_rcu_free(folio);
 
 		folio->mapping = NULL;
 		/* Leave folio->index set: truncation lookup relies on it */
