@@ -3306,10 +3306,18 @@ static ssize_t shmem_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	struct file *file = iocb->ki_filp;
 	struct inode *inode = file_inode(file);
 	struct address_space *mapping = inode->i_mapping;
+	loff_t last_pos = file->f_ra.prev_pos;
 	pgoff_t index;
 	unsigned long offset;
 	int error = 0;
-	ssize_t retval = 0;
+	ssize_t retval;
+
+	retval = filemap_read_rcu(iocb, to, last_pos);
+	if (retval) {
+		last_pos = iocb->ki_pos;
+		if (!iov_iter_count(to))
+			goto out;
+	}
 
 	for (;;) {
 		struct folio *folio = NULL;
@@ -3375,11 +3383,7 @@ static ssize_t shmem_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 					flush_dcache_page(page);
 			}
 
-			/*
-			 * Mark the folio accessed if we read the beginning.
-			 */
-			if (!offset)
-				folio_mark_accessed(folio);
+			filemap_read_accessed(folio, iocb->ki_pos, last_pos);
 			/*
 			 * Ok, we have the page, and it's up-to-date, so
 			 * now we can copy it to user space...
@@ -3407,6 +3411,7 @@ static ssize_t shmem_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 
 		retval += ret;
 		iocb->ki_pos += ret;
+		last_pos = iocb->ki_pos;
 
 		if (!iov_iter_count(to))
 			break;
@@ -3416,8 +3421,11 @@ static ssize_t shmem_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 		}
 		cond_resched();
 	}
-
+out:
 	file_accessed(file);
+	/* Readers sharing the file would bounce the line for nothing */
+	if (file->f_ra.prev_pos != last_pos)
+		file->f_ra.prev_pos = last_pos;
 	return retval ? retval : error;
 }
 

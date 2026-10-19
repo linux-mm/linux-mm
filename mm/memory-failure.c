@@ -211,6 +211,10 @@ static bool page_handle_poison(struct page *page, bool hugepage_or_freepage, boo
 			return false;
 	}
 
+	/* The free of a hwpoisoned page is not deferred: wait for readers */
+	if (release && folio_test_rcu_free(page_folio(page)))
+		synchronize_rcu();
+
 	SetPageHWPoison(page);
 	if (release)
 		put_page(page);
@@ -1561,6 +1565,21 @@ static int get_hwpoison_page(struct page *p, unsigned long flags)
 	return ret;
 }
 
+/* A page waiting for a grace period is not in the buddy yet: free it */
+static void mf_free_rcu_pages(struct page *p)
+{
+	if (!IS_ENABLED(CONFIG_PAGE_RCU_FREE))
+		return;
+	if (page_count(p))
+		return;
+	if (!zone_page_state_snapshot(page_zone(p), NR_FREE_RCU_PAGES))
+		return;
+	if (is_free_buddy_page(p))
+		return;
+
+	rcu_free_sync();
+}
+
 /*
  * The caller must guarantee the folio isn't large folio, except hugetlb.
  * try_to_unmap() can't handle it.
@@ -2436,6 +2455,7 @@ try_again:
 	if (res != -ENOENT)
 		goto unlock_mutex;
 
+	mf_free_rcu_pages(p);
 	if (TestSetPageHWPoison(p)) {
 		res = -EHWPOISON;
 		if (flags & MF_ACTION_REQUIRED)
@@ -2608,6 +2628,13 @@ try_again:
 
 identify_page_state:
 	res = identify_page_state(pfn, p, page_flags);
+	/*
+	 * The caller may unmap the page once this returns 0.  Lockless
+	 * readers that started before the page got PG_hwpoison, or before a
+	 * split left it in a folio of its own, may still be copying it.
+	 */
+	if (!res && folio_test_rcu_free(folio))
+		synchronize_rcu();
 	mutex_unlock(&mf_mutex);
 	return res;
 unlock_page:
@@ -2999,6 +3026,7 @@ int soft_offline_page(unsigned long pfn, int flags)
 
 retry:
 	get_online_mems();
+	mf_free_rcu_pages(page);
 	ret = get_hwpoison_page(page, flags | MF_SOFT_OFFLINE);
 	put_online_mems();
 

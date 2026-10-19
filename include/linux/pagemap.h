@@ -210,6 +210,7 @@ enum mapping_flags {
 	AS_WRITEBACK_MAY_DEADLOCK_ON_RECLAIM = 9,
 	AS_KERNEL_FILE = 10,	/* mapping for a fake kernel file that shouldn't
 				   account usage to user cgroups */
+	AS_RCU_READ = 11,	/* a folio has had PG_rcu_free */
 	/* Bits 16-25 are used for FOLIO_ORDER */
 	AS_FOLIO_ORDER_BITS = 5,
 	AS_FOLIO_ORDER_MIN = 16,
@@ -267,6 +268,17 @@ static inline void mapping_clear_unevictable(struct address_space *mapping)
 static inline bool mapping_unevictable(const struct address_space *mapping)
 {
 	return mapping && test_bit(AS_UNEVICTABLE, &mapping->flags);
+}
+
+static inline void mapping_set_rcu_read(struct address_space *mapping)
+{
+	if (!test_bit(AS_RCU_READ, &mapping->flags))
+		set_bit(AS_RCU_READ, &mapping->flags);
+}
+
+static inline bool mapping_rcu_read(const struct address_space *mapping)
+{
+	return test_bit(AS_RCU_READ, &mapping->flags);
 }
 
 static inline void mapping_set_exiting(struct address_space *mapping)
