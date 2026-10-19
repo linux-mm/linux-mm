@@ -763,13 +763,23 @@ EXPORT_SYMBOL(folio_copy);
 
 int folio_mc_copy(struct folio *dst, struct folio *src)
 {
-	long nr = folio_nr_pages(src);
-	long i = 0;
+	const unsigned long nr_pages = folio_nr_pages(src);
+	/*
+	 * Copy the largest extent possible to allow for architecture specific
+	 * extent based optimizations. copy_mc_highpages() does not call
+	 * cond_resched(), so limit the unit size when running under
+	 * non-preemptible scheduling models.
+	 */
+	const unsigned long unit = preempt_model_preemptible() ?
+				   nr_pages : COPY_MC_PAGES_NON_PREEMPT_BATCH;
+	unsigned long i = 0, count;
 
 	for (;;) {
-		if (copy_mc_highpage(folio_page(dst, i), folio_page(src, i)))
+		count = min(unit, nr_pages - i);
+		if (copy_mc_highpages(folio_page(dst, i), folio_page(src, i), count))
 			return -EHWPOISON;
-		if (++i == nr)
+		i += count;
+		if (i == nr_pages)
 			break;
 		cond_resched();
 	}
