@@ -1448,6 +1448,7 @@ The following nested keys are defined.
 
 	  ==========            ================================
 	  swappiness            Swappiness value to reclaim with
+	  source                Source to apply reclaim pressure to
 	  ==========            ================================
 
 	Specifying a swappiness value instructs the kernel to perform
@@ -1457,6 +1458,34 @@ The following nested keys are defined.
 
 	The valid range for swappiness is [0-200, max], setting
 	swappiness=max exclusively reclaims anonymous memory.
+
+	The source key declares where the normal reclaim aging pipeline is
+	applied. It is a typed selector in the form source=<type>:<selector>.
+
+	Currently source=nodes:<nodelist> and source=tier:<N> are supported.
+	For example::
+
+	  echo "1G source=nodes:0-1" > memory.reclaim
+	  echo "1G source=tier:4" > memory.reclaim
+
+	This instructs the kernel to apply reclaim pressure to memory of target
+	cgroup that are currently resident on the selected source. The nodes
+	form selects nodes directly. The tier form selects the nodes currently
+	in /sys/devices/virtual/memory_tiering/memory_tierN/nodelist, where N
+	is the memory tier id. Reclaim then follows the normal reclaim path
+	for selected folios. The source selector does not choose a demotion or
+	eviction policy. On tiered memory systems, a source node in a
+	non-terminal tier will usually make progress through demotion when an
+	allowed demotion target exists. A source node in the terminal tier has
+	no demotion target, so successful reclaim progress from that source is
+	eviction.
+
+	The source selector is a source constraint only. It does not select or
+	limit demotion targets; those are still chosen by the kernel's memory
+	tier demotion policy. Specifying source does not change reclaim
+	completion accounting. On tiered memory systems, completion may include
+	demotion progress that moves folios away from the selected source nodes
+	without reducing memory.current.
 
   memory.peak
 	A read-write single value file which exists on non-root cgroups.

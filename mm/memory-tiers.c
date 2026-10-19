@@ -180,6 +180,30 @@ static ssize_t nodelist_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(nodelist);
 
+int mt_get_memory_tier_nodemask(int tier, nodemask_t *nodes)
+{
+	struct memory_tier *memtier;
+	int ret = -EINVAL;
+
+	if (tier < 0)
+		return -EINVAL;
+
+	mutex_lock(&memory_tier_lock);
+	list_for_each_entry(memtier, &memory_tiers, list) {
+		if (memtier->dev.id != tier)
+			continue;
+
+		*nodes = get_memtier_nodemask(memtier);
+		nodes_and(*nodes, *nodes, node_states[N_MEMORY]);
+		if (!nodes_empty(*nodes))
+			ret = 0;
+		break;
+	}
+	mutex_unlock(&memory_tier_lock);
+
+	return ret;
+}
+
 static struct attribute *memtier_dev_attrs[] = {
 	&dev_attr_nodelist.attr,
 	NULL

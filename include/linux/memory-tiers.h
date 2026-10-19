@@ -49,6 +49,7 @@ int mt_calc_adistance(int node, int *adist);
 int mt_set_default_dram_perf(int nid, struct access_coordinate *perf,
 			     const char *source);
 int mt_perf_to_adistance(struct access_coordinate *perf, int *adist);
+int mt_get_memory_tier_nodemask(int tier, nodemask_t *nodes);
 struct memory_dev_type *mt_find_alloc_memory_type(int adist,
 						  struct list_head *memory_types);
 void mt_put_memory_types(struct list_head *memory_types);
@@ -140,6 +141,11 @@ static inline int mt_set_default_dram_perf(int nid, struct access_coordinate *pe
 static inline int mt_perf_to_adistance(struct access_coordinate *perf, int *adist)
 {
 	return -EIO;
+}
+
+static inline int mt_get_memory_tier_nodemask(int tier, nodemask_t *nodes)
+{
+	return -EINVAL;
 }
 
 static inline struct memory_dev_type *mt_find_alloc_memory_type(int adist,
