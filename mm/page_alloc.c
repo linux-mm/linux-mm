@@ -1468,6 +1468,23 @@ static void rcu_free_drain(void)
 	mutex_unlock(&lock);
 }
 
+/* Free every waiting folio, including those a work took off the lists */
+void rcu_free_sync(void)
+{
+	int cpu;
+
+	if (!IS_ENABLED(CONFIG_PAGE_RCU_FREE))
+		return;
+
+	rcu_free_drain();
+	for_each_possible_cpu(cpu) {
+		struct rcu_free_pcpu *r = per_cpu_ptr(&rcu_free_pcpu, cpu);
+
+		flush_work(&r->rwork.work);
+		flush_work(&r->expedite);
+	}
+}
+
 static void __init rcu_free_init(void)
 {
 	int cpu;
@@ -7632,7 +7649,16 @@ int alloc_contig_frozen_range_noprof(unsigned long start, unsigned long end,
 	outer_start = find_large_buddy(start);
 
 	/* Make sure the range is really isolated. */
-	if (test_pages_isolated(outer_start, end, mode)) {
+	ret = test_pages_isolated(outer_start, end, mode);
+	if (ret && zone_page_state_snapshot(cc.zone, NR_FREE_RCU_PAGES)) {
+		rcu_free_sync();
+
+		/* A freed folio can merge with a free buddy below start */
+		outer_start = find_large_buddy(start);
+		ret = test_pages_isolated(outer_start, end, mode);
+	}
+
+	if (ret) {
 		ret = -EBUSY;
 		goto done;
 	}
