@@ -111,6 +111,9 @@ enum pageflags {
 	PG_swapbacked,		/* Page is backed by RAM/swap */
 	PG_unevictable,		/* Page is "unevictable"  */
 	PG_dropbehind,		/* drop pages on IO completion */
+#ifdef CONFIG_PAGE_RCU_FREE
+	PG_rcu_free,		/* free only after an RCU grace period */
+#endif
 #ifdef CONFIG_MMU
 	PG_mlocked,		/* Page is vma mlocked */
 #endif
@@ -601,6 +604,24 @@ FOLIO_FLAG(readahead, FOLIO_HEAD_PAGE)
 FOLIO_FLAG(dropbehind, FOLIO_HEAD_PAGE)
 	FOLIO_TEST_CLEAR_FLAG(dropbehind, FOLIO_HEAD_PAGE)
 	__FOLIO_SET_FLAG(dropbehind, FOLIO_HEAD_PAGE)
+
+/*
+ * A lockless lookup that sees PG_rcu_free and then still finds the folio
+ * where it looked may read it until rcu_read_unlock().  Set under a
+ * reference, cleared only by the free.  Not for hugetlb or
+ * free_pages_nolock().
+ */
+#ifdef CONFIG_PAGE_RCU_FREE
+FOLIO_TEST_FLAG(rcu_free, FOLIO_HEAD_PAGE)
+	FOLIO_TEST_SET_FLAG(rcu_free, FOLIO_HEAD_PAGE)
+	__FOLIO_CLEAR_FLAG(rcu_free, FOLIO_HEAD_PAGE)
+#define __PG_RCU_FREE (1UL << PG_rcu_free)
+#else
+FOLIO_TEST_FLAG_FALSE(rcu_free)
+	FOLIO_TEST_SET_FLAG_FALSE(rcu_free)
+	__FOLIO_CLEAR_FLAG_NOOP(rcu_free)
+#define __PG_RCU_FREE 0
+#endif
 
 #ifdef CONFIG_HIGHMEM
 /*

@@ -1313,6 +1313,96 @@ static inline void pgalloc_tag_sub_pages(struct alloc_tag *tag, unsigned int nr)
 
 #endif /* CONFIG_MEM_ALLOC_PROFILING */
 
+/*
+ * Each CPU has at most one grace period in flight (@queued), covering
+ * @batch.  Folios freed meanwhile wait on @pending for the next one.
+ */
+struct rcu_free_pcpu {
+	spinlock_t lock;
+	bool queued;
+	struct list_head pending;
+	struct list_head batch;
+	struct rcu_work rwork;
+};
+
+static DEFINE_PER_CPU(struct rcu_free_pcpu, rcu_free_pcpu);
+
+static struct workqueue_struct *rcu_free_wq __ro_after_init;
+
+static void rcu_free_start(struct rcu_free_pcpu *r)
+{
+	lockdep_assert_held(&r->lock);
+
+	if (r->queued || list_empty(&r->pending))
+		return;
+
+	list_splice_init(&r->pending, &r->batch);
+	r->queued = true;
+	WARN_ON_ONCE(!queue_rcu_work(rcu_free_wq, &r->rwork));
+}
+
+static void rcu_free_pages(struct list_head *list)
+{
+	struct folio_batch fbatch;
+	struct folio *folio, *next;
+
+	folio_batch_init(&fbatch);
+	list_for_each_entry_safe(folio, next, list, lru) {
+		if (!folio_batch_add(&fbatch, folio)) {
+			free_unref_folios(&fbatch);
+			cond_resched_tasks_rcu_qs();
+		}
+	}
+	if (folio_batch_count(&fbatch))
+		free_unref_folios(&fbatch);
+}
+
+static void rcu_free_workfn(struct work_struct *work)
+{
+	struct rcu_free_pcpu *r = container_of(to_rcu_work(work),
+					       struct rcu_free_pcpu, rwork);
+	LIST_HEAD(done);
+
+	spin_lock_irq(&r->lock);
+	list_splice_init(&r->batch, &done);
+	r->queued = false;
+	rcu_free_start(r);
+	spin_unlock_irq(&r->lock);
+
+	rcu_free_pages(&done);
+}
+
+static void rcu_free_defer(struct folio *folio)
+{
+	struct rcu_free_pcpu *r = raw_cpu_ptr(&rcu_free_pcpu);
+	unsigned long flags;
+
+	spin_lock_irqsave(&r->lock, flags);
+	list_add_tail(&folio->lru, &r->pending);
+	rcu_free_start(r);
+	spin_unlock_irqrestore(&r->lock, flags);
+}
+
+static void __init rcu_free_init(void)
+{
+	int cpu;
+
+	if (!IS_ENABLED(CONFIG_PAGE_RCU_FREE))
+		return;
+
+	rcu_free_wq = alloc_workqueue("rcu_free",
+				      WQ_MEM_RECLAIM | WQ_PERCPU, 0);
+
+	for_each_possible_cpu(cpu) {
+		struct rcu_free_pcpu *r = per_cpu_ptr(&rcu_free_pcpu, cpu);
+
+		spin_lock_init(&r->lock);
+		INIT_LIST_HEAD(&r->pending);
+		INIT_LIST_HEAD(&r->batch);
+		INIT_RCU_WORK(&r->rwork, rcu_free_workfn);
+	}
+}
+
 static __always_inline bool __free_pages_prepare(struct page *page,
 		unsigned int order, fpi_t fpi_flags)
 {
@@ -1326,6 +1416,19 @@ static __always_inline bool __free_pages_prepare(struct page *page,
 		return true;
 
 	VM_BUG_ON_PAGE(PageTail(page), page);
+
+	/*
+	 * Not for a hwpoisoned order-0 page: it never reaches the allocator,
+	 * and page_handle_poison() takes a reference right after this free.
+	 */
+	if (unlikely(folio_test_rcu_free(folio)) &&
+	    !(PageHWPoison(page) && !order)) {
+		VM_WARN_ON_ONCE(fpi_flags & FPI_NOLOCK);
+		__folio_clear_rcu_free(folio);
+		count_vm_events(PGFREE_RCU, 1 << order);
+		rcu_free_defer(folio);
+		return false;
+	}
 
 	trace_mm_page_free(page, order);
 	kmsan_free_page(page, order);
@@ -6401,6 +6504,8 @@ void __init setup_per_cpu_pageset(void)
 	for_each_online_pgdat(pgdat)
 		pgdat->per_cpu_nodestats =
 			alloc_percpu(struct per_cpu_nodestat);
+
+	rcu_free_init();
 }
 
 __meminit void zone_pcp_init(struct zone *zone)

@@ -1343,6 +1343,7 @@ const char * const vmstat_text[] = {
 	[I(PGACTIVATE)]				= "pgactivate",
 	[I(PGDEACTIVATE)]			= "pgdeactivate",
 	[I(PGLAZYFREE)]				= "pglazyfree",
+	[I(PGFREE_RCU)]				= "pgfree_rcu",
 
 	[I(PGFAULT)]				= "pgfault",
 	[I(PGMAJFAULT)]				= "pgmajfault",

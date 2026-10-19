@@ -211,6 +211,10 @@ static bool page_handle_poison(struct page *page, bool hugepage_or_freepage, boo
 			return false;
 	}
 
+	/* The free of a hwpoisoned page is not deferred: wait for readers */
+	if (release && folio_test_rcu_free(page_folio(page)))
+		synchronize_rcu();
+
 	SetPageHWPoison(page);
 	if (release)
 		put_page(page);

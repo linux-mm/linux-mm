@@ -718,6 +718,18 @@ config PCP_BATCH_SCALE_MAX
 	  latency.  This option sets the upper limit of scale factor to limit
 	  the maximum latency.
 
+config PAGE_RCU_FREE
+	def_bool 64BIT
+	help
+	  Reads from the page cache can copy from folios that are read
+	  again and again without taking a reference on them, so small
+	  reads of one file from many CPUs do not contend on the folio's
+	  reference count.  The cost is that memory freed from such
+	  folios becomes reusable only after an RCU grace period.
+
+	  64-bit only: it takes a page flag, and those are scarce on
+	  32-bit.
+
 config PHYS_ADDR_T_64BIT
 	def_bool 64BIT
 
