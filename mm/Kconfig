@@ -730,6 +730,9 @@ config PAGE_RCU_FREE
 	  64-bit only: it takes a page flag, and those are scarce on
 	  32-bit.
 
+	  Writing 0 to lockless_page_cache_read in debugfs turns these
+	  reads off.
+
 config PHYS_ADDR_T_64BIT
 	def_bool 64BIT
 

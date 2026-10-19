@@ -48,6 +48,7 @@
 #include <linux/rcupdate_wait.h>
 #include <linux/sched/mm.h>
 #include <linux/sysctl.h>
+#include <linux/debugfs.h>
 #include <linux/pgalloc.h>
 
 #include <asm/tlbflush.h>
@@ -2765,6 +2766,50 @@ static inline bool pos_same_folio(loff_t pos1, loff_t pos2, struct folio *folio)
 	return (pos1 >> shift == pos2 >> shift);
 }
 
+#ifdef CONFIG_PAGE_RCU_FREE
+/* Writing 0 to lockless_page_cache_read in debugfs turns the reads off */
+static DEFINE_STATIC_KEY_TRUE(lockless_read_key);
+
+static bool lockless_read_enabled(void)
+{
+	return static_branch_likely(&lockless_read_key);
+}
+
+#ifdef CONFIG_DEBUG_FS
+static int lockless_read_get(void *data, u64 *val)
+{
+	*val = static_key_enabled(&lockless_read_key);
+	return 0;
+}
+
+static int lockless_read_set(void *data, u64 val)
+{
+	if (val > 1)
+		return -EINVAL;
+	if (val)
+		static_branch_enable(&lockless_read_key);
+	else
+		static_branch_disable(&lockless_read_key);
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(lockless_read_fops, lockless_read_get,
+			 lockless_read_set, "%llu\n");
+
+static int __init lockless_read_debugfs_init(void)
+{
+	debugfs_create_file_unsafe("lockless_page_cache_read", 0644, NULL, NULL,
+				   &lockless_read_fops);
+	return 0;
+}
+late_initcall(lockless_read_debugfs_init);
+#endif
+#else
+static bool lockless_read_enabled(void)
+{
+	return false;
+}
+#endif
+
 /*
  * Reads keep coming back to @folio: free it only after an RCU grace period
  * from now on.  Not if its next read needs a reference anyway.  Not if it
@@ -2775,7 +2820,7 @@ static void filemap_mark_hot(struct folio *folio)
 {
 	struct address_space *mapping;
 
-	if (!IS_ENABLED(CONFIG_PAGE_RCU_FREE))
+	if (!lockless_read_enabled())
 		return;
 	if (folio_test_rcu_free(folio) || !folio_test_uptodate(folio) ||
 	    folio_test_dropbehind(folio) || folio_test_unevictable(folio))
@@ -3025,8 +3070,8 @@ size_t filemap_read_rcu(struct kiocb *iocb, struct iov_iter *iter,
 	pgoff_t last_index = (last_pos - 1) >> PAGE_SHIFT;
 	size_t copied = 0;
 
-	/* Not on an inode that never had a folio flagged */
-	if (!IS_ENABLED(CONFIG_PAGE_RCU_FREE) ||
+	/* Not when switched off, or on an inode that never had a folio flagged */
+	if (!lockless_read_enabled() ||
 	    !mapping_rcu_read(iocb->ki_filp->f_mapping))
 		return 0;
 
