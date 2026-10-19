@@ -1348,6 +1348,8 @@ static void rcu_free_pages(struct list_head *list)
 
 	folio_batch_init(&fbatch);
 	list_for_each_entry_safe(folio, next, list, lru) {
+		mod_zone_page_state(folio_zone(folio), NR_FREE_RCU_PAGES,
+				    -folio_nr_pages(folio));
 		if (!folio_batch_add(&fbatch, folio)) {
 			free_unref_folios(&fbatch);
 			cond_resched_tasks_rcu_qs();
@@ -1375,9 +1377,11 @@ static void rcu_free_workfn(struct work_struct *work)
 static void rcu_free_defer(struct folio *folio)
 {
 	struct rcu_free_pcpu *r = raw_cpu_ptr(&rcu_free_pcpu);
+	struct zone *zone = folio_zone(folio);
 	unsigned long flags;
 
 	spin_lock_irqsave(&r->lock, flags);
+	__mod_zone_page_state(zone, NR_FREE_RCU_PAGES, folio_nr_pages(folio));
 	list_add_tail(&folio->lru, &r->pending);
 	rcu_free_start(r);
 	spin_unlock_irqrestore(&r->lock, flags);
