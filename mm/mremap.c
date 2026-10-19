@@ -887,7 +887,7 @@ again:
 	return pmc_progress(pmc);
 }
 
-/* Set vrm->delta to the difference in VMA size specified by user. */
+/* Set vrm->delta to the absolute difference between old_len and new_len. */
 static void vrm_set_delta(struct vma_remap_struct *vrm)
 {
 	vrm->delta = abs_diff(vrm->old_len, vrm->new_len);
@@ -1523,6 +1523,7 @@ static unsigned long mremap_to(struct vma_remap_struct *vrm)
 
 		/* Set up for the move now shrink has been executed. */
 		vrm->old_len = vrm->new_len;
+		vrm_set_delta(vrm);
 	}
 
 	/* MREMAP_DONTUNMAP expands by old_len since old_len == new_len */
