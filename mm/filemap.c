@@ -2760,17 +2760,53 @@ static inline bool pos_same_folio(loff_t pos1, loff_t pos2, struct folio *folio)
 }
 
 /*
+ * Reads keep coming back to @folio: free it only after an RCU grace period
+ * from now on.  Not if its next read needs a reference anyway.  Not if it
+ * is unevictable: folio_mark_accessed() calls such a folio hot after at
+ * most one access, so every ramfs folio that is read would get the flag.
+ */
+static void filemap_mark_hot(struct folio *folio)
+{
+	struct address_space *mapping;
+
+	if (!IS_ENABLED(CONFIG_PAGE_RCU_FREE))
+		return;
+	if (folio_test_rcu_free(folio) || !folio_test_uptodate(folio) ||
+	    folio_test_readahead(folio) || folio_test_dropbehind(folio) ||
+	    folio_test_unevictable(folio))
+		return;
+	if (folio_test_set_rcu_free(folio))
+		return;
+
+	count_vm_events(PGFREE_RCU_MARK, folio_nr_pages(folio));
+	/* NULL if the folio was truncated meanwhile */
+	mapping = READ_ONCE(folio->mapping);
+	if (mapping)
+		mapping_set_rcu_read(mapping);
+}
+
+/*
  * filemap_read() is about to copy from @folio at @pos.  @last_pos is where
  * the previous read of this open file ended, or how far this one has got.
  *
  * Reading on in the folio that the last read ended in is not another access
  * to it: a folio read in small pieces is marked accessed once.
+ *
+ * The folio is hot when folio_mark_accessed() finds it as accessed as the
+ * LRU records, or when this open file goes back to data that it has just
+ * read.
  */
 static void filemap_read_accessed(struct folio *folio, loff_t pos,
 				  loff_t last_pos)
 {
-	if (!pos_same_folio(pos, last_pos - 1, folio))
-		folio_mark_accessed(folio);
+	bool hot;
+
+	if (pos_same_folio(pos, last_pos - 1, folio))
+		hot = pos < last_pos;
+	else
+		hot = folio_mark_accessed(folio);
+	if (hot)
+		filemap_mark_hot(folio);
 }
 
 static void filemap_end_dropbehind_read(struct folio *folio)
