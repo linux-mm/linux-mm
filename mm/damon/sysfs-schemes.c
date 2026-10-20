@@ -1355,7 +1355,13 @@ static ssize_t target_value_store(struct kobject *kobj,
 {
 	struct damos_sysfs_quota_goal *goal = container_of(kobj, struct
 			damos_sysfs_quota_goal, kobj);
-	int err = kstrtoul(buf, 0, &goal->target_value);
+	unsigned long target_value;
+	int err = kstrtoul(buf, 0, &target_value);
+
+	if (!mutex_trylock(&damon_sysfs_lock))
+		return -EBUSY;
+	goal->target_value = target_value;
+	mutex_unlock(&damon_sysfs_lock);
 
 	return err ? err : count;
 }
