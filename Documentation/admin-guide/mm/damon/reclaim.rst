@@ -159,6 +159,23 @@ this auto-tuning feature.
 
 Disabled by default.
 
+ignore_wmarks
+-------------
+
+Ignore the watermarks-based scheme activation condition.
+
+If set to ``Y``, DAMON_RECLAIM runs its scheme regardless of the system's
+free memory rate, so the reclaim is bounded only by ``min_age`` and the
+quota.  This is useful when cold pages should be reclaimed even while the
+system still has free memory, e.g. to squeeze the cold anonymous pages of a
+just-parked virtual machine out immediately.
+
+By default, ``N``, so the scheme is activated based on the system's free
+memory rate, as described for the watermarks below.
+
+Changes take effect when the scheme is rebuilt, i.e. on the next ``enabled``
+``0 -> 1`` transition, like the other DAMON_RECLAIM parameters.
+
 wmarks_interval
 ---------------
 
