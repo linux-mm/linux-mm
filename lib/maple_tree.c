@@ -4789,9 +4789,12 @@ static void mt_free_walk(struct rcu_head *head)
 
 		type = mte_node_type(enode);
 		slots = ma_slots(mte_to_node(enode), type);
-		if ((offset < mt_slots[type]) &&
-		    rcu_dereference_protected(slots[offset],
-					      lock_is_held(&rcu_callback_map)))
+		/*
+		 * Only the first slot_len slots of the parent hold children.
+		 * A maple_range_64 node with fewer children keeps its metadata
+		 * in the last slot, which must not be taken for a node.
+		 */
+		if (offset < mte_to_node(enode)->slot_len)
 			slots = mte_dead_walk(&enode, offset);
 		node = mte_to_node(enode);
 	} while ((node != start) || (node->slot_len < offset));
@@ -4883,9 +4886,17 @@ next:
 		mt_free_bulk(node->slot_len, slots);
 
 free_leaf:
+	/*
+	 * A full maple_range_64 node has no metadata: its last slot holds a
+	 * child.  mt_clear_meta() cannot tell, because mte_dead_leaves() has
+	 * stripped the type bits from the child pointers, and would zero part
+	 * of that child pointer.  slot_len, the child count returned by
+	 * mte_dead_leaves(), says whether the node is full.
+	 */
 	if (free)
 		kfree(node);
-	else
+	else if (node->type != maple_range_64 ||
+		 node->slot_len < MAPLE_RANGE64_SLOTS)
 		mt_clear_meta(mt, node, node->type);
 }
 
