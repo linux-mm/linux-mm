@@ -4,6 +4,7 @@
 
 #include <linux/pfn.h>
 #include <asm/pgtable.h>
+#include <linux/pgtable_types.h>
 
 #define PMD_ORDER	(PMD_SHIFT - PAGE_SHIFT)
 #define PUD_ORDER	(PUD_SHIFT - PAGE_SHIFT)
@@ -93,26 +94,26 @@ static inline void pud_init(void *addr)
 #endif
 
 #ifndef pte_offset_kernel
-static inline pte_t *pte_offset_kernel(pmd_t *pmd, unsigned long address)
+static inline hw_pte_t *pte_offset_kernel(pmd_t *pmd, unsigned long address)
 {
-	return (pte_t *)pmd_page_vaddr(*pmd) + pte_index(address);
+	return (hw_pte_t *)pmd_page_vaddr(*pmd) + pte_index(address);
 }
 #define pte_offset_kernel pte_offset_kernel
 #endif
 
 #ifdef CONFIG_HIGHPTE
 #define __pte_map(pmd, address) \
-	((pte_t *)kmap_local_page(pmd_page(*(pmd))) + pte_index((address)))
+	((hw_pte_t *)kmap_local_page(pmd_page(*(pmd))) + pte_index((address)))
 #define pte_unmap(pte)	do {	\
 	kunmap_local((pte));	\
 	rcu_read_unlock();	\
 } while (0)
 #else
-static inline pte_t *__pte_map(pmd_t *pmd, unsigned long address)
+static inline hw_pte_t *__pte_map(pmd_t *pmd, unsigned long address)
 {
 	return pte_offset_kernel(pmd, address);
 }
-static inline void pte_unmap(pte_t *pte)
+static inline void pte_unmap(hw_pte_t *pte)
 {
 	rcu_read_unlock();
 }
@@ -172,7 +173,7 @@ static inline pmd_t *pmd_off_k(unsigned long va)
 	return pmd_offset(pud_offset(p4d_offset(pgd_offset_k(va), va), va), va);
 }
 
-static inline pte_t *virt_to_kpte(unsigned long vaddr)
+static inline hw_pte_t *virt_to_kpte(unsigned long vaddr)
 {
 	pmd_t *pmd = pmd_off_k(vaddr);
 
@@ -269,6 +270,50 @@ static inline void lazy_mmu_mode_enable(void)
 
 	if (state->enable_count++ == 0)
 		arch_enter_lazy_mmu_mode();
+}
+
+#ifndef arch_enter_lazy_mmu_mode_with_ptes
+static inline void arch_enter_lazy_mmu_mode_with_ptes(struct mm_struct *mm,
+		unsigned long addr, unsigned long end, hw_pte_t *ptep)
+{
+	arch_enter_lazy_mmu_mode();
+}
+#endif
+
+/**
+ * lazy_mmu_mode_enable_with_ptes() - Enable the lazy MMU mode with a speedup hint.
+ * @mm: Address space the pages are mapped into.
+ * @addr: Start address of the range.
+ * @end: End address of the range.
+ * @ptep: Page table pointer for the first entry.
+ *
+ * Enters a new lazy MMU mode section; if the mode was not already enabled,
+ * enables it and calls arch_enter_lazy_mmu_mode_with_ptes().
+ *
+ * PTEs that fall within the specified range might observe update speedups.
+ * The PTEs must belong to the specified address space and be in the same PMD.
+ *
+ * There are no requirements on the order or range completeness of PTE
+ * updates for the specified range.
+ *
+ * Must be paired with a call to lazy_mmu_mode_disable().
+ *
+ * Has no effect if called:
+ * - While paused - see lazy_mmu_mode_pause()
+ * - In interrupt context
+ */
+static inline void lazy_mmu_mode_enable_with_ptes(struct mm_struct *mm,
+		unsigned long addr, unsigned long end, hw_pte_t *ptep)
+{
+	struct lazy_mmu_state *state = &current->lazy_mmu_state;
+
+	if (in_interrupt() || state->pause_count > 0)
+		return;
+
+	VM_WARN_ON_ONCE(state->enable_count == U8_MAX);
+
+	if (state->enable_count++ == 0)
+		arch_enter_lazy_mmu_mode_with_ptes(mm, addr, end, ptep);
 }
 
 /**
@@ -387,6 +432,8 @@ static inline void lazy_mmu_mode_resume(void)
 }
 #else
 static inline void lazy_mmu_mode_enable(void) {}
+static inline void lazy_mmu_mode_enable_with_ptes(struct mm_struct *mm,
+		unsigned long addr, unsigned long end, hw_pte_t *ptep) {}
 static inline void lazy_mmu_mode_disable(void) {}
 static inline void lazy_mmu_mode_pause(void) {}
 static inline void lazy_mmu_mode_resume(void) {}
@@ -407,7 +454,7 @@ static inline void lazy_mmu_mode_resume(void) {}
  *
  * May be overridden by the architecture, else pte_batch_hint is always 1.
  */
-static inline unsigned int pte_batch_hint(pte_t *ptep, pte_t pte)
+static inline unsigned int pte_batch_hint(hw_pte_t *ptep, pte_t pte)
 {
 	return 1;
 }
@@ -442,7 +489,7 @@ static inline pte_t pte_advance_pfn(pte_t pte, unsigned long nr)
  * to the same folio.  The PTEs are all in the same PMD.
  */
 static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
-		pte_t *ptep, pte_t pte, unsigned int nr)
+		hw_pte_t *ptep, pte_t pte, unsigned int nr)
 {
 	page_table_check_ptes_set(mm, addr, ptep, pte, nr);
 
@@ -459,7 +506,7 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 
 #ifndef __HAVE_ARCH_PTEP_SET_ACCESS_FLAGS
 extern int ptep_set_access_flags(struct vm_area_struct *vma,
-				 unsigned long address, pte_t *ptep,
+				 unsigned long address, hw_pte_t *ptep,
 				 pte_t entry, int dirty);
 #endif
 
@@ -490,9 +537,9 @@ static inline int pudp_set_access_flags(struct vm_area_struct *vma,
 #endif
 
 #ifndef ptep_get
-static inline pte_t ptep_get(pte_t *ptep)
+static inline pte_t ptep_get(hw_pte_t *ptep)
 {
-	return READ_ONCE(*ptep);
+	return __pte_from_hw(READ_ONCE(*ptep));
 }
 #endif
 
@@ -526,7 +573,7 @@ static inline pgd_t pgdp_get(pgd_t *pgdp)
 
 #ifndef __HAVE_ARCH_PTEP_TEST_AND_CLEAR_YOUNG
 static inline bool ptep_test_and_clear_young(struct vm_area_struct *vma,
-		unsigned long address, pte_t *ptep)
+		unsigned long address, hw_pte_t *ptep)
 {
 	pte_t pte = ptep_get(ptep);
 	bool young = true;
@@ -565,7 +612,7 @@ static inline bool pmdp_test_and_clear_young(struct vm_area_struct *vma,
 
 #ifndef __HAVE_ARCH_PTEP_CLEAR_YOUNG_FLUSH
 bool ptep_clear_flush_young(struct vm_area_struct *vma,
-		unsigned long address, pte_t *ptep);
+		unsigned long address, hw_pte_t *ptep);
 #endif
 
 #ifndef __HAVE_ARCH_PMDP_CLEAR_YOUNG_FLUSH
@@ -644,7 +691,7 @@ static inline void arch_check_zapped_pud(struct vm_area_struct *vma, pud_t pud)
 #ifndef __HAVE_ARCH_PTEP_GET_AND_CLEAR
 static inline pte_t ptep_get_and_clear(struct mm_struct *mm,
 				       unsigned long address,
-				       pte_t *ptep)
+				       hw_pte_t *ptep)
 {
 	pte_t pte = ptep_get(ptep);
 	pte_clear(mm, address, ptep);
@@ -673,7 +720,7 @@ static inline pte_t ptep_get_and_clear(struct mm_struct *mm,
  * pages that belong to the same folio.  The PTEs are all in the same PMD.
  */
 static inline void clear_young_dirty_ptes(struct vm_area_struct *vma,
-					  unsigned long addr, pte_t *ptep,
+					  unsigned long addr, hw_pte_t *ptep,
 					  unsigned int nr, cydp_t flags)
 {
 	pte_t pte;
@@ -698,7 +745,7 @@ static inline void clear_young_dirty_ptes(struct vm_area_struct *vma,
 #endif
 
 static inline void ptep_clear(struct mm_struct *mm, unsigned long addr,
-			      pte_t *ptep)
+			      hw_pte_t *ptep)
 {
 	pte_t pte = ptep_get(ptep);
 
@@ -739,7 +786,7 @@ static inline void ptep_clear(struct mm_struct *mm, unsigned long addr,
  * present bit set *unless* it is 'l'. Because get_user_pages_fast() only
  * operates on present ptes we're safe.
  */
-static inline pte_t ptep_get_lockless(pte_t *ptep)
+static inline pte_t ptep_get_lockless(hw_pte_t *ptep)
 {
 	pte_t pte;
 
@@ -777,7 +824,7 @@ static inline pmd_t pmdp_get_lockless(pmd_t *pmdp)
  * We require that the PTE can be read atomically.
  */
 #ifndef ptep_get_lockless
-static inline pte_t ptep_get_lockless(pte_t *ptep)
+static inline pte_t ptep_get_lockless(hw_pte_t *ptep)
 {
 	return ptep_get(ptep);
 }
@@ -844,7 +891,8 @@ static inline pud_t pudp_huge_get_and_clear_full(struct vm_area_struct *vma,
 
 #ifndef __HAVE_ARCH_PTEP_GET_AND_CLEAR_FULL
 static inline pte_t ptep_get_and_clear_full(struct mm_struct *mm,
-					    unsigned long address, pte_t *ptep,
+					    unsigned long address,
+					    hw_pte_t *ptep,
 					    int full)
 {
 	return ptep_get_and_clear(mm, address, ptep);
@@ -872,7 +920,7 @@ static inline pte_t ptep_get_and_clear_full(struct mm_struct *mm,
  * pages that belong to the same folio.  The PTEs are all in the same PMD.
  */
 static inline pte_t get_and_clear_full_ptes(struct mm_struct *mm,
-		unsigned long addr, pte_t *ptep, unsigned int nr, int full)
+		unsigned long addr, hw_pte_t *ptep, unsigned int nr, int full)
 {
 	pte_t pte, tmp_pte;
 
@@ -908,7 +956,7 @@ static inline pte_t get_and_clear_full_ptes(struct mm_struct *mm,
  * pages that belong to the same folio.  The PTEs are all in the same PMD.
  */
 static inline pte_t get_and_clear_ptes(struct mm_struct *mm, unsigned long addr,
-		pte_t *ptep, unsigned int nr)
+		hw_pte_t *ptep, unsigned int nr)
 {
 	return get_and_clear_full_ptes(mm, addr, ptep, nr, 0);
 }
@@ -933,7 +981,7 @@ static inline pte_t get_and_clear_ptes(struct mm_struct *mm, unsigned long addr,
  * pages that belong to the same folio.  The PTEs are all in the same PMD.
  */
 static inline void clear_full_ptes(struct mm_struct *mm, unsigned long addr,
-		pte_t *ptep, unsigned int nr, int full)
+		hw_pte_t *ptep, unsigned int nr, int full)
 {
 	for (;;) {
 		ptep_get_and_clear_full(mm, addr, ptep, full);
@@ -962,7 +1010,7 @@ static inline void clear_full_ptes(struct mm_struct *mm, unsigned long addr,
  * pages that belong to the same folio.  The PTEs are all in the same PMD.
  */
 static inline void clear_ptes(struct mm_struct *mm, unsigned long addr,
-		pte_t *ptep, unsigned int nr)
+		hw_pte_t *ptep, unsigned int nr)
 {
 	clear_full_ptes(mm, addr, ptep, nr, 0);
 }
@@ -977,13 +1025,14 @@ static inline void clear_ptes(struct mm_struct *mm, unsigned long addr,
  */
 #ifndef update_mmu_tlb_range
 static inline void update_mmu_tlb_range(struct vm_area_struct *vma,
-				unsigned long address, pte_t *ptep, unsigned int nr)
+				unsigned long address, hw_pte_t *ptep,
+				unsigned int nr)
 {
 }
 #endif
 
 static inline void update_mmu_tlb(struct vm_area_struct *vma,
-				unsigned long address, pte_t *ptep)
+				unsigned long address, hw_pte_t *ptep)
 {
 	update_mmu_tlb_range(vma, address, ptep, 1);
 }
@@ -1000,7 +1049,7 @@ static inline void update_mmu_tlb(struct vm_area_struct *vma,
  * The PTEs are all in the same PMD.
  */
 static inline void clear_nonpresent_ptes(struct mm_struct *mm,
-		unsigned long addr, pte_t *ptep, unsigned int nr)
+		unsigned long addr, hw_pte_t *ptep, unsigned int nr)
 {
 	(void)addr;
 
@@ -1016,7 +1065,7 @@ static inline void clear_nonpresent_ptes(struct mm_struct *mm,
 #ifndef __HAVE_ARCH_PTEP_CLEAR_FLUSH
 extern pte_t ptep_clear_flush(struct vm_area_struct *vma,
 			      unsigned long address,
-			      pte_t *ptep);
+			      hw_pte_t *ptep);
 #endif
 
 #ifndef __HAVE_ARCH_PMDP_HUGE_CLEAR_FLUSH
@@ -1044,7 +1093,8 @@ static inline pmd_t pmd_mkwrite(pmd_t pmd, struct vm_area_struct *vma)
 
 #ifndef __HAVE_ARCH_PTEP_SET_WRPROTECT
 struct mm_struct;
-static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long address, pte_t *ptep)
+static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long address,
+				      hw_pte_t *ptep)
 {
 	pte_t old_pte = ptep_get(ptep);
 	set_pte_at(mm, address, ptep, pte_wrprotect(old_pte));
@@ -1070,7 +1120,7 @@ static inline void ptep_set_wrprotect(struct mm_struct *mm, unsigned long addres
  * ptep_try_set as an identity macro. The generic stub returns false, which is
  * correct for callers that fall through to oops on failure.
  */
-static inline bool ptep_try_set(pte_t *ptep, pte_t new_pte)
+static inline bool ptep_try_set(hw_pte_t *ptep, pte_t new_pte)
 {
 	return false;
 }
@@ -1113,7 +1163,7 @@ static inline void flush_tlb_before_set(unsigned long addr)
  * pages that belong to the same folio.  The PTEs are all in the same PMD.
  */
 static inline void wrprotect_ptes(struct mm_struct *mm, unsigned long addr,
-		pte_t *ptep, unsigned int nr)
+		hw_pte_t *ptep, unsigned int nr)
 {
 	for (;;) {
 		ptep_set_wrprotect(mm, addr, ptep);
@@ -1144,7 +1194,7 @@ static inline void wrprotect_ptes(struct mm_struct *mm, unsigned long addr,
  * pages that belong to the same folio.  The PTEs are all in the same PMD.
  */
 static inline bool clear_flush_young_ptes(struct vm_area_struct *vma,
-		unsigned long addr, pte_t *ptep, unsigned int nr)
+		unsigned long addr, hw_pte_t *ptep, unsigned int nr)
 {
 	bool young = false;
 
@@ -1181,7 +1231,7 @@ static inline bool clear_flush_young_ptes(struct vm_area_struct *vma,
  * Returns: whether any PTE was young.
  */
 static inline bool test_and_clear_young_ptes(struct vm_area_struct *vma,
-		unsigned long addr, pte_t *ptep, unsigned int nr)
+		unsigned long addr, hw_pte_t *ptep, unsigned int nr)
 {
 	bool young = false;
 
@@ -1585,7 +1635,7 @@ static inline int pmd_none_or_clear_bad(pmd_t *pmd)
 
 static inline pte_t __ptep_modify_prot_start(struct vm_area_struct *vma,
 					     unsigned long addr,
-					     pte_t *ptep)
+					     hw_pte_t *ptep)
 {
 	/*
 	 * Get the current pte state, but zero it out to make it
@@ -1597,7 +1647,7 @@ static inline pte_t __ptep_modify_prot_start(struct vm_area_struct *vma,
 
 static inline void __ptep_modify_prot_commit(struct vm_area_struct *vma,
 					     unsigned long addr,
-					     pte_t *ptep, pte_t pte)
+					     hw_pte_t *ptep, pte_t pte)
 {
 	/*
 	 * The pte is non-present, so there's no hardware state to
@@ -1623,7 +1673,7 @@ static inline void __ptep_modify_prot_commit(struct vm_area_struct *vma,
  */
 static inline pte_t ptep_modify_prot_start(struct vm_area_struct *vma,
 					   unsigned long addr,
-					   pte_t *ptep)
+					   hw_pte_t *ptep)
 {
 	return __ptep_modify_prot_start(vma, addr, ptep);
 }
@@ -1636,7 +1686,8 @@ static inline pte_t ptep_modify_prot_start(struct vm_area_struct *vma,
  */
 static inline void ptep_modify_prot_commit(struct vm_area_struct *vma,
 					   unsigned long addr,
-					   pte_t *ptep, pte_t old_pte, pte_t pte)
+					   hw_pte_t *ptep, pte_t old_pte,
+					   pte_t pte)
 {
 	__ptep_modify_prot_commit(vma, addr, ptep, pte);
 }
@@ -1667,7 +1718,7 @@ static inline void ptep_modify_prot_commit(struct vm_area_struct *vma,
  */
 #ifndef modify_prot_start_ptes
 static inline pte_t modify_prot_start_ptes(struct vm_area_struct *vma,
-		unsigned long addr, pte_t *ptep, unsigned int nr)
+		unsigned long addr, hw_pte_t *ptep, unsigned int nr)
 {
 	pte_t pte, tmp_pte;
 
@@ -1707,7 +1758,7 @@ static inline pte_t modify_prot_start_ptes(struct vm_area_struct *vma,
  */
 #ifndef modify_prot_commit_ptes
 static inline void modify_prot_commit_ptes(struct vm_area_struct *vma, unsigned long addr,
-		pte_t *ptep, pte_t old_pte, pte_t pte, unsigned int nr)
+		hw_pte_t *ptep, pte_t old_pte, pte_t pte, unsigned int nr)
 {
 	int i;
 

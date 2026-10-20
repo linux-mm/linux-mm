@@ -19,7 +19,7 @@ static inline int note_kasan_page_table(struct mm_walk *walk,
 {
 	struct ptdump_state *st = walk->private;
 
-	st->note_page_pte(st, addr, kasan_early_shadow_pte[0]);
+	st->note_page_pte(st, addr, ptep_get(kasan_early_shadow_pte));
 
 	walk->action = ACTION_CONTINUE;
 
@@ -117,7 +117,7 @@ static int ptdump_pmd_entry(pmd_t *pmd, unsigned long addr,
 	return 0;
 }
 
-static int ptdump_pte_entry(pte_t *pte, unsigned long addr,
+static int ptdump_pte_entry(hw_pte_t *pte, unsigned long addr,
 			    unsigned long next, struct mm_walk *walk)
 {
 	struct ptdump_state *st = walk->private;
