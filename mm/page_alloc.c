@@ -1603,6 +1603,7 @@ void __meminit __free_pages_core(struct page *page, unsigned int order,
 			VM_WARN_ON_ONCE(PageReserved(p));
 			__ClearPageOffline(p);
 			set_page_count(p, 0);
+			clear_page_tag_ref(p);
 		}
 
 		adjust_managed_page_count(page, nr_pages);
