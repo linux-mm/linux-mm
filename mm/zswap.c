@@ -661,12 +661,29 @@ static int zswap_enabled_param_set(const char *val,
 		if (zswap_setup())
 			break;
 		fallthrough;
-	case ZSWAP_INIT_SUCCEED:
-		if (!zswap_has_pool)
+	case ZSWAP_INIT_SUCCEED: {
+		bool enable;
+
+		if (!zswap_has_pool) {
 			pr_err("can't enable, no pool configured\n");
-		else
-			ret = param_set_bool(val, kp);
+			break;
+		}
+
+		/*
+		 * The initial pool may have been created later by the
+		 * compressor param rather than by zswap_setup(), in which
+		 * case zswap_ever_enabled is still off. Flip it before
+		 * zswap_enabled becomes visible to zswap_store(), otherwise
+		 * zswap_load() would skip stored entries and read stale data
+		 * from the backing swap device. param_set_bool() treats a
+		 * NULL value as true.
+		 */
+		if (!val || (!kstrtobool(val, &enable) && enable))
+			static_branch_enable(&zswap_ever_enabled);
+
+		ret = param_set_bool(val, kp);
 		break;
+	}
 	case ZSWAP_INIT_FAILED:
 		pr_err("can't enable, initialization failed\n");
 	}
