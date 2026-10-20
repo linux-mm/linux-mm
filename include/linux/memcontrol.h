@@ -88,7 +88,6 @@ struct mem_cgroup_per_node {
 	struct mem_cgroup	*memcg;		/* Back pointer, we cannot */
 						/* use container_of	   */
 
-	struct lruvec_stats_percpu __percpu	*lruvec_stats_percpu;
 	struct lruvec_stats			*lruvec_stats;
 	struct shrinker_info __rcu	*shrinker_info;
 	struct obj_cgroup __rcu		*objcg;
@@ -314,6 +313,13 @@ struct mem_cgroup {
 	__cacheline_group_begin_aligned(memcg_read_mostly);
 	/* Read on every stat update */
 	struct memcg_vmstats_percpu __percpu *vmstats_percpu;
+	/*
+	 * Per-CPU lruvec stats of each node, indexed by node id. Points to an
+	 * array after nodeinfo[] in the same allocation. Kept here instead of
+	 * in mem_cgroup_per_node, to avoid sharing a cacheline pair with the
+	 * very frequently written LRU lists.
+	 */
+	struct lruvec_stats_percpu __percpu **lruvec_stats_percpu;
 
 	/* memory.stat */
 	struct memcg_vmstats	*vmstats;
