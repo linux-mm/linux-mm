@@ -1145,17 +1145,26 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
 
 static bool may_enter_fs(struct folio *folio, gfp_t gfp_mask)
 {
+	swp_entry_t entry;
+
 	if (gfp_mask & __GFP_FS)
 		return true;
 	/*
 	 * We can "enter_fs" for swap-cache with only __GFP_IO unless backed by
 	 * a swapfile that requires GFP_NOFS I/O.
 	 */
-	if (folio_test_swapcache(folio) && (gfp_mask & __GFP_IO) &&
-	    !(__swap_entry_to_info(folio->swap)->ops->flags &
-			SWAP_OPS_F_REQUIRE_NOFS))
-		return true;
-	return false;
+	if (!folio_test_swapcache(folio) || !(gfp_mask & __GFP_IO))
+		return false;
+
+	entry = folio->swap;
+	if (is_vswap_entry(entry)) {
+		entry = vswap_to_phys(entry);
+		if (!entry.val)
+			return true;
+	}
+
+	return !(__swap_entry_to_info(entry)->ops->flags &
+		 SWAP_OPS_F_REQUIRE_NOFS);
 }
 
 /*
@@ -1637,7 +1646,7 @@ activate_locked_split:
 activate_locked:
 		/* Not a candidate for swapping, so reclaim swap space. */
 		if (folio_test_swapcache(folio) &&
-		    ((mem_cgroup_swap_full(folio) && !is_vswap_entry(folio->swap)) ||
+		    ((mem_cgroup_swap_full(folio) && folio_phys_swap_backed(folio)) ||
 		     folio_test_mlocked(folio)))
 			folio_free_swap(folio);
 		VM_BUG_ON_FOLIO(folio_test_active(folio), folio);
