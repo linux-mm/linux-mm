@@ -686,6 +686,7 @@ iter_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
 		struct kiocb kiocb;
 		struct iov_iter from;
 		unsigned int head, tail;
+		bool was_in_splice_pipe_callback;
 		size_t left;
 		int n;
 
@@ -733,7 +734,11 @@ iter_file_splice_write(struct pipe_inode_info *pipe, struct file *out,
 		iov_iter_bvec(&from, ITER_SOURCE, array, n, sd.total_len - left);
 		init_sync_kiocb(&kiocb, out);
 		kiocb.ki_pos = sd.pos;
+		was_in_splice_pipe_callback = current->in_splice_pipe_callback;
+		if (pipe->files)
+			current->in_splice_pipe_callback = true;
 		ret = out->f_op->write_iter(&kiocb, &from);
+		current->in_splice_pipe_callback = was_in_splice_pipe_callback;
 		sd.pos = kiocb.ki_pos;
 		if (ret <= 0)
 			break;
@@ -1282,12 +1287,18 @@ ssize_t splice_file_to_pipe(struct file *in,
 			    loff_t *offset,
 			    size_t len, unsigned int flags)
 {
+	bool was_in_splice_pipe_callback;
 	ssize_t ret;
 
 	pipe_lock(opipe);
 	ret = wait_for_space(opipe, flags);
-	if (!ret)
+	if (!ret) {
+		was_in_splice_pipe_callback = current->in_splice_pipe_callback;
+		if (opipe->files)
+			current->in_splice_pipe_callback = true;
 		ret = do_splice_read(in, offset, opipe, len, flags);
+		current->in_splice_pipe_callback = was_in_splice_pipe_callback;
+	}
 	pipe_unlock(opipe);
 	if (ret > 0)
 		wakeup_pipe_readers(opipe);

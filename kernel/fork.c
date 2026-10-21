@@ -2132,6 +2132,7 @@ __latent_entropy struct task_struct *copy_process(
 	p = dup_task_struct(current, node);
 	if (!p)
 		goto fork_out;
+	p->in_splice_pipe_callback = 0;
 	/*
 	 * Must run before the first fallible op, so error paths never
 	 * free the parent's ret_stack.
