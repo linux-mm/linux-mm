@@ -5996,21 +5996,21 @@ int __init mem_cgroup_init(void)
 
 #ifdef CONFIG_SWAP
 /**
- * __mem_cgroup_try_charge_swap - try charging swap space for a folio
+ * __mem_cgroup_swap_get - pin the memcg to account a folio's swap slots to
  * @folio: folio being added to swap
  *
- * Try to charge @folio's memcg for the swap space at folio->swap.
+ * Pins one private ID ref per page of @folio on its memcg, or on its closest
+ * online ancestor if it has been offlined. The caller charges and records
+ * against whichever ID is returned, so both land on the same one.
  *
- * Returns 0 on success, -ENOMEM on failure.
+ * Return: the pinned private ID, or 0 if there is nothing to account. Drop
+ * the pins with __mem_cgroup_swap_put().
  */
-int __mem_cgroup_try_charge_swap(struct folio *folio)
+unsigned short __mem_cgroup_swap_get(struct folio *folio)
 {
 	unsigned int nr_pages = folio_nr_pages(folio);
-	struct swap_cluster_info *ci;
-	struct page_counter *counter;
 	struct mem_cgroup *memcg;
 	struct obj_cgroup *objcg;
-	unsigned short private_id;
 
 	if (do_memsw_account())
 		return 0;
@@ -6020,56 +6020,115 @@ int __mem_cgroup_try_charge_swap(struct folio *folio)
 	if (!objcg)
 		return 0;
 
-	scoped_guard(rcu) {
-		memcg = obj_cgroup_memcg(objcg);
-		if (!folio_test_swapcache(folio)) {
-			memcg_memory_event(memcg, MEMCG_SWAP_FAIL);
-			return 0;
-		}
-
-		private_id = mem_cgroup_private_id_get(memcg, nr_pages);
-
-		if (!mem_cgroup_private_id_is_root(private_id) &&
-		    !page_counter_try_charge(&memcg->swap, nr_pages, &counter)) {
-			memcg_memory_event(memcg, MEMCG_SWAP_MAX);
-			memcg_memory_event(memcg, MEMCG_SWAP_FAIL);
-			mem_cgroup_private_id_put(private_id, nr_pages);
-			return -ENOMEM;
-		}
-		mod_memcg_state(memcg, MEMCG_SWAP, nr_pages);
+	guard(rcu)();
+	memcg = obj_cgroup_memcg(objcg);
+	if (!folio_test_swapcache(folio)) {
+		memcg_memory_event(memcg, MEMCG_SWAP_FAIL);
+		return 0;
 	}
 
-	ci = swap_cluster_get_and_lock(folio);
-	__swap_cgroup_set(ci, swp_cluster_offset(folio->swap), nr_pages, private_id);
-	swap_cluster_unlock(ci);
+	return mem_cgroup_private_id_get(memcg, nr_pages);
+}
 
+/**
+ * __mem_cgroup_swap_fail - report a failed physical swap allocation
+ * @id: the pinned private ID of the swap owner (may be 0)
+ */
+void __mem_cgroup_swap_fail(unsigned short id)
+{
+	struct mem_cgroup *memcg;
+
+	if (do_memsw_account() || !id)
+		return;
+
+	guard(rcu)();
+	memcg = obj_cgroup_memcg(obj_cgroup_from_private_id(id));
+	memcg_memory_event(memcg, MEMCG_SWAP_FAIL);
+}
+
+/**
+ * __mem_cgroup_swap_charge - charge physical swap space
+ * @id: the private ID to charge (may be 0)
+ * @nr_pages: the amount of swap space to charge
+ *
+ * Return: 0 on success, -ENOMEM if memory.swap.max is exceeded.
+ */
+int __mem_cgroup_swap_charge(unsigned short id, unsigned int nr_pages)
+{
+	struct page_counter *counter;
+	struct mem_cgroup *memcg;
+
+	if (do_memsw_account() || !id)
+		return 0;
+
+	guard(rcu)();
+	memcg = obj_cgroup_memcg(obj_cgroup_from_private_id(id));
+	if (!mem_cgroup_private_id_is_root(id) &&
+	    !page_counter_try_charge(&memcg->swap, nr_pages, &counter)) {
+		memcg_memory_event(memcg, MEMCG_SWAP_MAX);
+		memcg_memory_event(memcg, MEMCG_SWAP_FAIL);
+		return -ENOMEM;
+	}
+	mod_memcg_state(memcg, MEMCG_SWAP, nr_pages);
 	return 0;
 }
 
 /**
- * __mem_cgroup_uncharge_swap - uncharge swap space
- * @id: cgroup id to uncharge
+ * __mem_cgroup_swap_record - record the owner of a folio's swap slots
+ * @folio: folio being added to swap
+ * @id: the private ID pinned by __mem_cgroup_swap_get()
+ */
+void __mem_cgroup_swap_record(struct folio *folio, unsigned short id)
+{
+	struct swap_cluster_info *ci;
+
+	ci = swap_cluster_get_and_lock(folio);
+	__swap_cgroup_set(ci, swp_cluster_offset(folio->swap),
+			  folio_nr_pages(folio), id);
+	swap_cluster_unlock(ci);
+}
+
+/**
+ * __mem_cgroup_swap_uncharge - uncharge physical swap space
+ * @id: the private ID to uncharge (may be 0)
  * @nr_pages: the amount of swap space to uncharge
  */
-void __mem_cgroup_uncharge_swap(unsigned short id, unsigned int nr_pages)
+void __mem_cgroup_swap_uncharge(unsigned short id, unsigned int nr_pages)
 {
-	struct obj_cgroup *objcg;
 	struct mem_cgroup *memcg;
 
-	rcu_read_lock();
-	objcg = obj_cgroup_from_private_id(id);
-	memcg = obj_cgroup_memcg(objcg);
-	if (memcg) {
-		if (!mem_cgroup_private_id_is_root(id)) {
-			if (do_memsw_account())
-				page_counter_uncharge(&memcg->memsw, nr_pages);
-			else
-				page_counter_uncharge(&memcg->swap, nr_pages);
-		}
-		mod_memcg_state(memcg, MEMCG_SWAP, -nr_pages);
-		__mem_cgroup_private_id_put(objcg, id, nr_pages);
+	if (!id)
+		return;
+
+	guard(rcu)();
+	memcg = obj_cgroup_memcg(obj_cgroup_from_private_id(id));
+	if (!mem_cgroup_private_id_is_root(id)) {
+		if (do_memsw_account())
+			page_counter_uncharge(&memcg->memsw, nr_pages);
+		else
+			page_counter_uncharge(&memcg->swap, nr_pages);
 	}
-	rcu_read_unlock();
+	if (!do_memsw_account())
+		mod_memcg_state(memcg, MEMCG_SWAP, -nr_pages);
+}
+
+/**
+ * __mem_cgroup_swap_put - drop the private ID refs taken for swap slots
+ * @id: the pinned private ID
+ * @nr_pages: number of refs to drop
+ * @is_vswap: whether the released swap slots are virtual
+ */
+void __mem_cgroup_swap_put(unsigned short id, unsigned int nr_pages,
+			   bool is_vswap)
+{
+	struct mem_cgroup *memcg;
+
+	guard(rcu)();
+	if (do_memsw_account() && !is_vswap) {
+		memcg = obj_cgroup_memcg(obj_cgroup_from_private_id(id));
+		mod_memcg_state(memcg, MEMCG_SWAP, -nr_pages);
+	}
+	mem_cgroup_private_id_put(id, nr_pages);
 }
 
 long mem_cgroup_get_nr_swap_pages(const struct mem_cgroup *memcg)
@@ -6114,11 +6173,8 @@ long mem_cgroup_get_folio_swap_margin(const struct folio *folio)
  */
 bool mem_cgroup_can_swap(struct mem_cgroup *memcg, long nr_pages)
 {
-	if (!mem_cgroup_disabled() && !do_memsw_account() &&
-	    page_counter_margin(&memcg->swap) < nr_pages)
-		return false;
-
-	return mem_cgroup_can_vswap(memcg) || get_nr_swap_pages() >= nr_pages;
+	return mem_cgroup_can_vswap(memcg) ||
+	       mem_cgroup_get_nr_swap_pages(memcg) >= nr_pages;
 }
 
 bool mem_cgroup_swap_full(const struct folio *folio)
