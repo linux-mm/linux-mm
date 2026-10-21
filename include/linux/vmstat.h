@@ -33,6 +33,9 @@ enum vm_stat_item {
 	NR_DIRTY_BG_THRESHOLD,
 	NR_MEMMAP_PAGES,	/* page metadata allocated through buddy allocator */
 	NR_MEMMAP_BOOT_PAGES,	/* page metadata allocated through boot allocator */
+#ifdef CONFIG_SWAP
+	NR_VSWAP,		/* pages occupying a virtual swap slot */
+#endif
 	NR_VM_STAT_ITEMS,
 };
 

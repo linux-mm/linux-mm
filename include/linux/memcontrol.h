@@ -41,6 +41,7 @@ enum memcg_stat_item {
 	MEMCG_ZSWAP_B,
 	MEMCG_ZSWAPPED,
 	MEMCG_ZSWAP_INCOMP,
+	MEMCG_VSWAP,
 	MEMCG_NR_STAT,
 };
 

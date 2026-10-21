@@ -371,6 +371,7 @@ bool current_is_kswapd(void);
 
 #ifdef CONFIG_SWAP
 bool mem_cgroup_can_vswap(struct mem_cgroup *memcg);
+unsigned long vswap_usage_in_pages(void);
 
 int add_swap_extent(struct swap_info_struct *sis, unsigned long start_page,
 		unsigned long nr_pages, sector_t start_block);

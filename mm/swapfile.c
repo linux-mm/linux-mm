@@ -2612,9 +2612,8 @@ static void __swap_cluster_free_phys_backing(struct swap_info_struct *psi,
 }
 
 /*
- * Release the cgroup accounting of a batch of freed slots. For vswap the
- * physical swap was already uncharged by __vswap_release_backing(), so only
- * the ID ref is left to drop.
+ * Release cgroup accounting for freed swap slots. Physical backing of
+ * vswap entries was already uncharged by __vswap_release_backing().
  */
 static void memcg_swap_free(unsigned short id, unsigned int nr, bool is_vswap)
 {
@@ -4921,6 +4920,11 @@ early_param("vswap", early_vswap);
 
 /* vswap does no IO on its own. */
 static const struct swap_ops vswap_ops = { };
+
+unsigned long vswap_usage_in_pages(void)
+{
+	return vswap_is_enabled() ? swap_usage_in_pages(vswap_si) : 0;
+}
 
 static int vswap_used_get(void *data, u64 *val)
 {

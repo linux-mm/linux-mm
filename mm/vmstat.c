@@ -1320,6 +1320,9 @@ const char * const vmstat_text[] = {
 	[I(NR_DIRTY_BG_THRESHOLD)]		= "nr_dirty_background_threshold",
 	[I(NR_MEMMAP_PAGES)]			= "nr_memmap_pages",
 	[I(NR_MEMMAP_BOOT_PAGES)]		= "nr_memmap_boot_pages",
+#ifdef CONFIG_SWAP
+	[I(NR_VSWAP)]				= "nr_vswap",
+#endif
 #undef I
 
 #if defined(CONFIG_VM_EVENT_COUNTERS)
@@ -1936,6 +1939,9 @@ static void *vmstat_start(struct seq_file *m, loff_t *pos)
 			    v + NR_DIRTY_THRESHOLD);
 	v[NR_MEMMAP_PAGES] = atomic_long_read(&nr_memmap_pages);
 	v[NR_MEMMAP_BOOT_PAGES] = atomic_long_read(&nr_memmap_boot_pages);
+#ifdef CONFIG_SWAP
+	v[NR_VSWAP] = vswap_usage_in_pages();
+#endif
 	v += NR_VM_STAT_ITEMS;
 
 #ifdef CONFIG_VM_EVENT_COUNTERS
