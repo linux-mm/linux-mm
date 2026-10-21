@@ -936,21 +936,23 @@ static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
 	set_pte_at((mm), (addr), (ptep), __pte(0UL))
 
 #ifdef DCACHE_ALIASING_POSSIBLE
-/* This flushes only the page the PTE maps, so it relies on move_ptes()
- * calling it for one PTE at a time, which the default pte_batch_hint()
- * guarantees.
+/* The nr PTEs map consecutive pages of one folio and all move by the
+ * same offset, so either every page of the batch aliases or none does.
  */
 #define __HAVE_ARCH_MOVE_PTE
-#define move_pte(pte, old_addr, new_addr)				\
+#define move_pte(pte, old_addr, new_addr, nr)				\
 ({									\
 	pte_t newpte = (pte);						\
 	if (tlb_type != hypervisor && pte_present(pte)) {		\
 		unsigned long this_pfn = pte_pfn(pte);			\
+		unsigned int i;						\
 									\
 		if (pfn_valid(this_pfn) &&				\
-		    (((old_addr) ^ (new_addr)) & (1 << 13)))		\
-			flush_dcache_page_all(current->mm,		\
-					      pfn_to_page(this_pfn));	\
+		    (((old_addr) ^ (new_addr)) & (1 << 13))) {		\
+			for (i = 0; i < (nr); i++)			\
+				flush_dcache_page_all(current->mm,	\
+					pfn_to_page(this_pfn + i));	\
+		}							\
 	}								\
 	newpte;								\
 })
