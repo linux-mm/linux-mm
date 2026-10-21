@@ -200,14 +200,24 @@ enum _slab_flag_bits {
 /**
  * define SLAB_ACCOUNT - Account allocations to memcg.
  *
- * All object allocations from this cache will be memcg accounted, regardless of
- * __GFP_ACCOUNT being or not being passed to individual allocations.
+ * All object allocations from this cache will be memcg accounted.
+ * SLAB_ACCOUNT implies SLAB_MAY_ACCOUNT.
  */
 #ifdef CONFIG_MEMCG
 # define SLAB_ACCOUNT		__SLAB_FLAG_BIT(_SLAB_ACCOUNT)
-# define SLAB_MAY_ACCOUNT	__SLAB_FLAG_BIT(_SLAB_MAY_ACCOUNT)
 #else
 # define SLAB_ACCOUNT		__SLAB_FLAG_UNUSED
+#endif
+
+/**
+ * define SLAB_MAY_ACCOUNT
+ *
+ * Objects will be memcg accounted when __GFP_ACCOUNT flag is specified.
+ * Requesting __GFP_ACCOUNT allocations without SLAB_MAY_ACCOUNT is not allowed.
+ */
+#ifdef CONFIG_MEMCG
+# define SLAB_MAY_ACCOUNT	__SLAB_FLAG_BIT(_SLAB_MAY_ACCOUNT)
+#else
 # define SLAB_MAY_ACCOUNT	__SLAB_FLAG_UNUSED
 #endif
 
