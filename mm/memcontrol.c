@@ -66,6 +66,7 @@
 #include "internal.h"
 #include "swap.h"
 #include "swap_table.h"
+#include "vswap.h"
 #include <net/sock.h>
 #include <net/ip.h>
 #include "slab.h"
@@ -459,6 +460,7 @@ static const unsigned int memcg_stat_items[] = {
 	MEMCG_ZSWAP_B,
 	MEMCG_ZSWAPPED,
 	MEMCG_ZSWAP_INCOMP,
+	MEMCG_VSWAP,
 };
 
 #define NR_MEMCG_NODE_STAT_ITEMS ARRAY_SIZE(memcg_node_stat_items)
@@ -1628,6 +1630,7 @@ static const struct memory_stat memory_stats[] = {
 	{ "file_writeback",		NR_WRITEBACK			},
 #ifdef CONFIG_SWAP
 	{ "swapcached",			NR_SWAPCACHE			},
+	{ "vswap",			MEMCG_VSWAP			},
 #endif
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	{ "anon_thp",			NR_ANON_THPS			},
@@ -6011,6 +6014,7 @@ unsigned short __mem_cgroup_swap_get(struct folio *folio)
 	unsigned int nr_pages = folio_nr_pages(folio);
 	struct mem_cgroup *memcg;
 	struct obj_cgroup *objcg;
+	unsigned short id;
 
 	if (do_memsw_account())
 		return 0;
@@ -6027,7 +6031,12 @@ unsigned short __mem_cgroup_swap_get(struct folio *folio)
 		return 0;
 	}
 
-	return mem_cgroup_private_id_get(memcg, nr_pages);
+	id = mem_cgroup_private_id_get(memcg, nr_pages);
+	if (is_vswap_entry(folio->swap)) {
+		memcg = obj_cgroup_memcg(obj_cgroup_from_private_id(id));
+		mod_memcg_state(memcg, MEMCG_VSWAP, nr_pages);
+	}
+	return id;
 }
 
 /**
@@ -6116,7 +6125,7 @@ void __mem_cgroup_swap_uncharge(unsigned short id, unsigned int nr_pages)
  * __mem_cgroup_swap_put - drop the private ID refs taken for swap slots
  * @id: the pinned private ID
  * @nr_pages: number of refs to drop
- * @is_vswap: whether the released swap slots are virtual
+ * @is_vswap: release virtual-swap accounting along with the refs
  */
 void __mem_cgroup_swap_put(unsigned short id, unsigned int nr_pages,
 			   bool is_vswap)
@@ -6124,9 +6133,12 @@ void __mem_cgroup_swap_put(unsigned short id, unsigned int nr_pages,
 	struct mem_cgroup *memcg;
 
 	guard(rcu)();
-	if (do_memsw_account() && !is_vswap) {
+	if (is_vswap || do_memsw_account()) {
 		memcg = obj_cgroup_memcg(obj_cgroup_from_private_id(id));
-		mod_memcg_state(memcg, MEMCG_SWAP, -nr_pages);
+		if (is_vswap)
+			mod_memcg_state(memcg, MEMCG_VSWAP, -nr_pages);
+		else
+			mod_memcg_state(memcg, MEMCG_SWAP, -nr_pages);
 	}
 	mem_cgroup_private_id_put(id, nr_pages);
 }

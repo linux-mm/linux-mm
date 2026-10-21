@@ -1633,6 +1633,9 @@ The following nested keys are defined.
 		against memory usage, and against swap usage when the swap
 		entry has physical backing.
 
+	  vswap
+		Amount of virtual swap usage.
+
 	  anon_thp
 		Amount of memory used in anonymous mappings backed by
 		transparent hugepages
