@@ -445,6 +445,7 @@ fi
 CATEGORY="thp" run_test ./transhuge-stress -d 20
 
 CATEGORY="thp" run_test ./folio_split_race_test
+CATEGORY="thp" run_test ./fork_dax_pud
 
 CATEGORY="migration" run_test ./migration
 
