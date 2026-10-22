@@ -1839,22 +1839,20 @@ static struct folio *only_alloc_fresh_hugetlb_folio(struct hstate *h,
 {
 	struct folio *folio = NULL;
 	int order = huge_page_order(h);
+	bool cma_only = hugetlb_cma_exclusive_alloc(order);
 
 	if (nid == NUMA_NO_NODE)
 		nid = numa_mem_id();
 
-	if (allow_cma && order_is_gigantic(order))
-		folio = hugetlb_cma_alloc_frozen_folio(order, gfp_mask, nid, nmask);
-	if (!folio) {
-		if (hugetlb_cma_exclusive_alloc(order))
-			return NULL;
+	if (!order_is_gigantic(order) && !cma_only)
+		folio = alloc_buddy_frozen_folio(order, gfp_mask, nid, nmask,
+						 node_alloc_noretry);
 
-		if (order_is_gigantic(order))
-			folio = alloc_gigantic_frozen_folio(order, gfp_mask, nid, nmask);
-		else
-			folio = alloc_buddy_frozen_folio(order, gfp_mask, nid, nmask,
-							 node_alloc_noretry);
-	}
+	if (!folio && allow_cma)
+		folio = hugetlb_cma_alloc_frozen_folio(order, gfp_mask, nid, nmask);
+
+	if (!folio && order_is_gigantic(order) && !cma_only)
+		folio = alloc_gigantic_frozen_folio(order, gfp_mask, nid, nmask);
 
 	if (folio)
 		init_new_hugetlb_folio(folio);
