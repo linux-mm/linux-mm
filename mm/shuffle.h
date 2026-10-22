@@ -11,7 +11,8 @@
 #ifdef CONFIG_SHUFFLE_PAGE_ALLOCATOR
 DECLARE_STATIC_KEY_FALSE(page_alloc_shuffle_key);
 extern void __shuffle_free_memory(pg_data_t *pgdat);
-extern bool shuffle_pick_tail(void);
+void __init shuffle_init(void);
+bool shuffle_pick_tail(bool allow_spin);
 static inline void __meminit shuffle_free_memory(pg_data_t *pgdat)
 {
 	if (!static_branch_unlikely(&page_alloc_shuffle_key))
@@ -34,7 +35,11 @@ static inline bool is_shuffle_order(int order)
 	return order >= SHUFFLE_ORDER;
 }
 #else
-static inline bool shuffle_pick_tail(void)
+static inline void __init shuffle_init(void)
+{
+}
+
+static inline bool shuffle_pick_tail(bool allow_spin)
 {
 	return false;
 }
