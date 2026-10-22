@@ -3129,9 +3129,14 @@ EXPORT_SYMBOL(vm_unmap_ram);
  */
 void *vm_map_ram(struct page **pages, unsigned int count, int node)
 {
-	unsigned long size = (unsigned long)count << PAGE_SHIFT;
+	unsigned long size;
 	unsigned long addr;
 	void *mem;
+
+	if (count > ULONG_MAX >> PAGE_SHIFT)
+		return NULL;
+
+	size = (unsigned long)count << PAGE_SHIFT;
 
 	if (likely(count <= VMAP_MAX_ALLOC)) {
 		mem = vb_alloc(size, GFP_KERNEL);
