@@ -999,14 +999,14 @@ done_merging:
 	if (fpi_flags & FPI_TO_TAIL)
 		to_tail = true;
 	else if (is_shuffle_order(order))
-		to_tail = shuffle_pick_tail();
+		to_tail = shuffle_pick_tail(!(fpi_flags & FPI_NOLOCK));
 	else
 		to_tail = buddy_merge_likely(pfn, buddy_pfn, page, order);
 
 	__add_to_free_list(page, zone, order, migratetype, to_tail);
 
-	/* Notify page reporting subsystem of freed page */
-	if (!(fpi_flags & FPI_SKIP_REPORT_NOTIFY))
+	/* No-lock frees may run from NMI, where delayed work cannot be queued. */
+	if (!(fpi_flags & (FPI_SKIP_REPORT_NOTIFY | FPI_NOLOCK)))
 		page_reporting_notify_free(order);
 }
 
