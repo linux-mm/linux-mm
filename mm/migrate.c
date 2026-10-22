@@ -2681,6 +2681,7 @@ static struct folio *alloc_misplaced_dst_folio(struct folio *src,
 	int nid = (int) data;
 	int order = folio_order(src);
 	gfp_t gfp = __GFP_THISNODE;
+	struct folio *dst;
 
 	if (order > 0)
 		gfp |= GFP_TRANSHUGE_LIGHT;
@@ -2689,7 +2690,17 @@ static struct folio *alloc_misplaced_dst_folio(struct folio *src,
 			__GFP_NOWARN;
 		gfp &= ~__GFP_RECLAIM;
 	}
-	return __folio_alloc_node(gfp, order, nid);
+
+	dst = __folio_alloc_node(gfp, order, nid);
+
+	/*
+	 * A node with enough free memory might still be too fragmented to serve
+	 * a large folio. Wake kcompactd to help the next huge folio migration.
+	 */
+	if (!dst && order > 0)
+		wakeup_kcompactd(NODE_DATA(nid), order, gfp_zone(gfp));
+
+	return dst;
 }
 
 /*
