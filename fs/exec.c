@@ -70,6 +70,7 @@
 #include <linux/user_events.h>
 #include <linux/rseq.h>
 #include <linux/ksm.h>
+#include <linux/random.h>
 
 #include <linux/uaccess.h>
 #include <asm/mmu_context.h>
@@ -195,6 +196,33 @@ static bool valid_arg_len(struct linux_binprm *bprm, long len)
 	return len <= MAX_ARG_STRLEN;
 }
 
+/*
+ * Called before credentials exist: treat ADDR_NO_RANDOMIZE as cleared for
+ * files bprm_fill_uid() will treat as set-id.
+ */
+static bool bprm_randomize_args(struct linux_binprm *bprm)
+{
+	struct file *file = bprm->file;
+	const struct mnt_idmap *idmap = file_mnt_idmap(file);
+	struct inode *inode = file_inode(file);
+	/* bprm->cred, not yet set, will be in the caller's namespace. */
+	struct user_namespace *ns = current_user_ns();
+	umode_t mode;
+
+	if (!READ_ONCE(randomize_va_space))
+		return false;
+	if (!(current->personality & ADDR_NO_RANDOMIZE))
+		return true;
+	if (!mnt_may_suid(file->f_path.mnt) || task_no_new_privs(current))
+		return false;
+	mode = READ_ONCE(inode->i_mode);
+	if (!(mode & S_ISUID) &&
+	    (mode & (S_ISGID | S_IXGRP)) != (S_ISGID | S_IXGRP))
+		return false;
+	return vfsuid_has_mapping(ns, i_uid_into_vfsuid(idmap, inode)) &&
+	       vfsgid_has_mapping(ns, i_gid_into_vfsgid(idmap, inode));
+}
+
 #else
 
 static inline void acct_arg_size(struct linux_binprm *bprm, unsigned long pages)
@@ -279,6 +307,10 @@ static int bprm_mm_init(struct linux_binprm *bprm)
 	err = create_init_stack_vma(bprm->mm, &bprm->vma, &bprm->p);
 	if (err)
 		goto err;
+
+	/* Randomize the strings' offset within their page; keep the top word. */
+	if (bprm_randomize_args(bprm))
+		bprm->p -= get_random_u32_below(PAGE_SIZE - sizeof(void *));
 #endif
 
 	return 0;
