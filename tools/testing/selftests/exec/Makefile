@@ -21,6 +21,11 @@ TEST_GEN_PROGS += recursion-depth
 TEST_GEN_PROGS += null-argv
 TEST_GEN_PROGS += check-exec
 
+# The argument block's in-page offset must be random exactly when the
+# ELF loader randomizes the stack. Unprivileged.
+TEST_GEN_PROGS += argblock-offset
+TEST_GEN_FILES += argblock-report
+
 # binfmt_misc must not be reachable as an exec source or as a stacking layer,
 # or an 'F' entry can pin the instance that owns it. Unprivileged, no bpf.
 TEST_GEN_PROGS += binfmt_misc_selfpin

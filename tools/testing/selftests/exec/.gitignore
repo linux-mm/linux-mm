@@ -9,6 +9,9 @@ execveat.ephemeral
 execveat.denatured
 non-regular
 null-argv
+/argblock-offset
+/argblock-offset.*
+/argblock-report
 /check-exec
 /false
 /inc
