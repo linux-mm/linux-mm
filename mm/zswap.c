@@ -926,11 +926,11 @@ static bool zswap_compress(struct folio *folio, long index,
 	 * only adds metadata overhead.  swap_writeout() will put the page back
 	 * to the active LRU list in the case.
 	 */
-	if (comp_ret || !dlen || dlen >= PAGE_SIZE) {
+	if (comp_ret == -ENOSPC || (!comp_ret && dlen >= PAGE_SIZE)) {
 		rcu_read_lock();
 		if (!mem_cgroup_zswap_writeback_enabled(folio_memcg(folio))) {
 			rcu_read_unlock();
-			comp_ret = comp_ret ? comp_ret : -EINVAL;
+			comp_ret = -ENOSPC;
 			goto unlock;
 		}
 		rcu_read_unlock();
@@ -938,6 +938,9 @@ static bool zswap_compress(struct folio *folio, long index,
 		dlen = PAGE_SIZE;
 		dst = kmap_local_folio(folio, index * PAGE_SIZE);
 		mapped = true;
+	} else if (comp_ret || !dlen) {
+		comp_ret = comp_ret ? comp_ret : -EINVAL;
+		goto unlock;
 	}
 
 	gfp = GFP_NOWAIT | __GFP_NORETRY | __GFP_HIGHMEM | __GFP_MOVABLE;
