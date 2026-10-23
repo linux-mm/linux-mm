@@ -599,10 +599,16 @@ static void lru_lazyfree(struct lruvec *lruvec, struct folio *folio)
 
 	lruvec_del_folio(lruvec, folio);
 	folio_clear_active(folio);
-	if (lru_gen_enabled())
-		lru_gen_clear_refs(folio);
-	else
-		folio_clear_referenced(folio);
+	folio_clear_referenced(folio);
+	if (lru_gen_enabled()) {
+		/*
+		 * lru_gen_clear_refs() skips an off-list folio, which
+		 * lruvec_del_folio() has just made this one.  Left set,
+		 * PG_workingset keeps it in the last tier that sort_folio()
+		 * protects from eviction.
+		 */
+		folio_clear_workingset(folio);
+	}
 	/*
 	 * Lazyfree folios are clean anonymous folios.  They have
 	 * the swapbacked flag cleared, to distinguish them from normal
