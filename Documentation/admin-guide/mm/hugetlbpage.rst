@@ -43,7 +43,9 @@ The output of ``cat /proc/meminfo`` will include lines like::
 where:
 
 HugePages_Total
-	is the size of the pool of huge pages.
+	is the number of persistent huge pages of the default size
+	in the pool.  Pools of other huge page sizes are not shown
+	here; see ``/sys/kernel/mm/hugepages`` described below.
 HugePages_Free
 	is the number of huge pages in the pool that are not yet
         allocated.
