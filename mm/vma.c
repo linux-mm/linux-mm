@@ -851,9 +851,15 @@ static int commit_merge(struct vma_merge_struct *vmg)
 	return 0;
 }
 
-/* We can only remove VMAs when merging if they do not have a close hook. */
 static bool can_merge_remove_vma(struct vm_area_struct *vma)
 {
+	if (vma_flags_test(&vma->flags, VMA_MIXEDMAP_BIT))
+		return false;
+
+	/*
+	 * We can only remove VMAs when merging if they do not have a
+	 * close hook.
+	 */
 	return !vma->vm_ops || !vma->vm_ops->close;
 }
 
@@ -1093,6 +1099,20 @@ abort:
 	return NULL;
 }
 
+static bool can_merge_vma(const struct vma_merge_struct *vmg)
+{
+	/* VMAs without prev/next are unmergeable */
+	if (!vmg->prev && !vmg->next)
+		return false;
+
+	/* We can't merge VMA_IO, VMA_DONTEXPAND or VMA_PFNMAP */
+	if (vma_flags_test_any(&vmg->vma_flags, VMA_IO_BIT, VMA_DONTEXPAND_BIT,
+			       VMA_PFNMAP_BIT))
+		return false;
+
+	return true;
+}
+
 /*
  * vma_merge_new_range - Attempt to merge a new VMA into address space
  *
@@ -1152,9 +1172,7 @@ struct vm_area_struct *vma_merge_new_range(struct vma_merge_struct *vmg)
 
 	vmg->state = VMA_MERGE_NOMERGE;
 
-	/* Special VMAs are unmergeable, also if no prev/next. */
-	if (vma_flags_test_any_mask(&vmg->vma_flags, VMA_SPECIAL_FLAGS) ||
-	    (!prev && !next))
+	if (!can_merge_vma(vmg))
 		return NULL;
 
 	can_merge_left = can_vma_merge_left(vmg);
