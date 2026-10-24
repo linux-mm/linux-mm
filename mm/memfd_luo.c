@@ -300,6 +300,17 @@ static int memfd_luo_preserve(struct liveupdate_file_op_args *args)
 	ser->size = inode_size;
 	ser->seals = seals;
 
+	/*
+	 * F_SEAL_EXEC freezes the exec bits as they are at sealing time, so
+	 * the restore has to reproduce them.  Record whether the inode had
+	 * exec bits here; the restore sets the mode of the fresh inode
+	 * accordingly before re-applying the seals.  ser is zero-initialized,
+	 * so a clear bit means the bits were clear (or the record predates
+	 * this flag -- the safe reading for those is also "no exec bits").
+	 */
+	if (inode->i_mode & 0111)
+		ser->flags |= MEMFD_LUO_FL_EXEC_BIT;
+
 	err = memfd_luo_preserve_folios(args->file, &ser->folios,
 					&folios_ser, &nr_folios);
 	if (err)
@@ -533,8 +544,11 @@ static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 	}
 
 	/*
-	 * The seals are preserved. Allow sealing here so they can be added
-	 * later.
+	 * F_SEAL_EXEC freezes the execute bits as they were when the seal was
+	 * applied, so the restore has to reproduce them.  A record that does
+	 * not say the bits were set is restored without them, which is what a
+	 * memfd created under vm.memfd_noexec=2 looks like and is also the safe
+	 * reading for records written before this flag existed.
 	 */
 	file = memfd_alloc_file("", MFD_ALLOW_SEALING);
 	if (IS_ERR(file)) {
@@ -542,6 +556,19 @@ static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 		err = PTR_ERR(file);
 		goto free_ser;
 	}
+
+	/*
+	 * Reproduce the exec bits before the seals are re-applied: F_SEAL_EXEC
+	 * freezes the bits as they were at sealing time, and the W^X rule in
+	 * memfd_add_seals() looks at the mode when it decides whether to imply
+	 * the write seals.  Setting the mode here, directly on the fresh
+	 * anonymous inode, is safe -- the file has not been published and no
+	 * other thread can reach it yet.
+	 */
+	if (ser->flags & MEMFD_LUO_FL_EXEC_BIT)
+		file->f_inode->i_mode |= 0111;
+	else
+		file->f_inode->i_mode &= ~0111;
 
 	err = memfd_add_seals(file, ser->seals);
 	if (err) {
