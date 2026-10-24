@@ -112,6 +112,23 @@ static struct damos_watermarks damon_reclaim_wmarks = {
 };
 DEFINE_DAMON_MODULES_WMARKS_PARAMS(damon_reclaim_wmarks);
 
+/*
+ * Ignore the watermarks-based scheme activation condition.
+ *
+ * With the default ``N``, DAMON_RECLAIM runs its scheme only while the
+ * system's free memory rate is inside [wmarks_low, wmarks_mid].
+ * Reclaiming cold pages itself raises the free rate, so the scheme
+ * deactivates as soon as memory looks plentiful again.  For a VMM parking
+ * an idle sandbox, cold anonymous pages should be reclaimed immediately
+ * even while the host still has plenty of free memory; setting this ``Y``
+ * makes the scheme ignore the watermarks, so the reclaim is bounded only
+ * by min_age and the quota.
+ */
+static bool ignore_wmarks __read_mostly;
+module_param(ignore_wmarks, bool, 0600);
+MODULE_PARM_DESC(ignore_wmarks,
+	"Ignore watermarks: reclaim cold pages even while free memory is plentiful (default: false)");
+
 static struct damon_attrs damon_reclaim_mon_attrs = {
 	.sample_interval = 5000,	/* 5 ms */
 	.aggr_interval = 100000,	/* 100 ms */
@@ -225,6 +242,9 @@ static int damon_reclaim_apply_parameters(void)
 	err = damon_set_attrs(param_ctx, &attrs);
 	if (err)
 		goto out;
+
+	damon_reclaim_wmarks.metric = ignore_wmarks ?
+			DAMOS_WMARK_NONE : DAMOS_WMARK_FREE_MEM_RATE;
 
 	err = -ENOMEM;
 	scheme = damon_reclaim_new_scheme(attrs.aggr_interval);
