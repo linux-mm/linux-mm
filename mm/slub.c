@@ -2873,26 +2873,37 @@ static unsigned int
 refill_objects(struct kmem_cache *s, void **p, gfp_t gfp, unsigned int min,
 	       unsigned int max);
 
-static int refill_sheaf(struct kmem_cache *s, struct slab_sheaf *sheaf,
-			 gfp_t gfp)
+/*
+ * Refill a sheaf with at least min_size objects, up to the sheaf's capacity.
+ * Returns 0 on success, -ENOMEM if the sheaf could not be filled to min_size.
+ */
+static int refill_sheaf_min(struct kmem_cache *s, struct slab_sheaf *sheaf,
+			    gfp_t gfp, unsigned int min_size)
 {
-	int to_fill = s->sheaf_capacity - sheaf->size;
+	int min_fill = min_size - sheaf->size;
+	int max_fill = s->sheaf_capacity - sheaf->size;
 	int filled;
 
-	if (!to_fill)
+	if (!min_fill)
 		return 0;
 
-	filled = refill_objects(s, &sheaf->objects[sheaf->size], gfp, to_fill,
-				to_fill);
+	filled = refill_objects(s, &sheaf->objects[sheaf->size], gfp, min_fill,
+				max_fill);
 
 	sheaf->size += filled;
 
 	stat_add(s, SHEAF_REFILL, filled);
 
-	if (filled < to_fill)
+	if (filled < min_fill)
 		return -ENOMEM;
 
 	return 0;
+}
+
+static int refill_sheaf(struct kmem_cache *s, struct slab_sheaf *sheaf,
+			 gfp_t gfp)
+{
+	return refill_sheaf_min(s, sheaf, gfp, s->sheaf_capacity);
 }
 
 /*
@@ -5074,7 +5085,8 @@ void *kmem_cache_alloc_node_noprof(struct kmem_cache *s, gfp_t gfpflags, int nod
 EXPORT_SYMBOL(kmem_cache_alloc_node_noprof);
 
 static int __prefill_sheaf_pfmemalloc(struct kmem_cache *s,
-				      struct slab_sheaf *sheaf, gfp_t gfp)
+				      struct slab_sheaf *sheaf, gfp_t gfp,
+				      unsigned int size)
 {
 	gfp_t gfp_nomemalloc;
 	int ret;
@@ -5083,7 +5095,7 @@ static int __prefill_sheaf_pfmemalloc(struct kmem_cache *s,
 	if (gfp_pfmemalloc_allowed(gfp))
 		gfp_nomemalloc |= __GFP_NOWARN;
 
-	ret = refill_sheaf(s, sheaf, gfp_nomemalloc);
+	ret = refill_sheaf_min(s, sheaf, gfp_nomemalloc, size);
 
 	if (likely(!ret || !gfp_pfmemalloc_allowed(gfp)))
 		return ret;
@@ -5092,7 +5104,7 @@ static int __prefill_sheaf_pfmemalloc(struct kmem_cache *s,
 	 * if we are allowed to, refill sheaf with pfmemalloc but then remember
 	 * it for when it's returned
 	 */
-	ret = refill_sheaf(s, sheaf, gfp);
+	ret = refill_sheaf_min(s, sheaf, gfp, size);
 	sheaf->pfmemalloc = true;
 
 	return ret;
@@ -5171,7 +5183,7 @@ kmem_cache_prefill_sheaf(struct kmem_cache *s, gfp_t gfp, unsigned int size)
 		sheaf->pfmemalloc = false;
 
 		if (sheaf->size < size &&
-		    __prefill_sheaf_pfmemalloc(s, sheaf, gfp)) {
+		    __prefill_sheaf_pfmemalloc(s, sheaf, gfp, size)) {
 			sheaf_flush_unused(s, sheaf);
 			free_empty_sheaf(s, sheaf);
 			sheaf = NULL;
@@ -5267,7 +5279,7 @@ int kmem_cache_refill_sheaf(struct kmem_cache *s, gfp_t gfp,
 
 	if (likely(sheaf->capacity >= size)) {
 		if (likely(sheaf->capacity == s->sheaf_capacity))
-			return __prefill_sheaf_pfmemalloc(s, sheaf, gfp);
+			return __prefill_sheaf_pfmemalloc(s, sheaf, gfp, size);
 
 		if (!__kmem_cache_alloc_bulk(s, gfp, sheaf->capacity - sheaf->size,
 					     &sheaf->objects[sheaf->size]))
