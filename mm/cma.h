@@ -80,6 +80,8 @@ enum cma_flags {
 	CMA_ZONES_VALID,
 	CMA_ZONES_INVALID,
 	CMA_ACTIVATED,
+	/* Base address was dictated by the caller, not picked by CMA. */
+	CMA_FIXED_BASE,
 };
 
 extern struct cma cma_areas[MAX_CMA_AREAS];
