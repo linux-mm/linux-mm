@@ -2234,7 +2234,9 @@ static long do_semtimedop(int semid, struct sembuf __user *tsops,
 		return -EINVAL;
 
 	if (nsops > SEMOPM_FAST) {
-		sops = kvmalloc_objs(*sops, nsops);
+		gfp_t gfp = nsops > SEMOPM ? GFP_KERNEL_ACCOUNT : GFP_KERNEL;
+
+		sops = kvmalloc_objs(*sops, nsops, gfp);
 		if (sops == NULL)
 			return -ENOMEM;
 	}
