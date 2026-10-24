@@ -5,6 +5,7 @@
 #include <linux/init.h>
 #include <linux/mmzone.h>
 #include <linux/random.h>
+#include <linux/prandom.h>
 #include <linux/moduleparam.h>
 #include "internal.h"
 #include "page_alloc.h"
@@ -13,6 +14,7 @@
 DEFINE_STATIC_KEY_FALSE(page_alloc_shuffle_key);
 
 static bool shuffle_param;
+static DEFINE_PER_CPU(struct rnd_state, shuffle_rnd_state);
 
 static __meminit int shuffle_param_set(const char *val,
 		const struct kernel_param *kp)
@@ -29,6 +31,12 @@ static const struct kernel_param_ops shuffle_param_ops = {
 	.get = param_get_bool,
 };
 module_param_cb(shuffle, &shuffle_param_ops, &shuffle_param, 0400);
+
+void __init shuffle_init(void)
+{
+	if (static_branch_unlikely(&page_alloc_shuffle_key))
+		prandom_seed_full_state(&shuffle_rnd_state);
+}
 
 /*
  * For two pages to be swapped in the shuffle, they must be free (on a
@@ -159,11 +167,25 @@ void __meminit __shuffle_free_memory(pg_data_t *pgdat)
 		shuffle_zone(z);
 }
 
-bool shuffle_pick_tail(void)
+bool shuffle_pick_tail(bool allow_spin)
 {
 	static u64 rand;
 	static u8 rand_bits;
 	bool ret;
+
+	if (!allow_spin) {
+		struct rnd_state *state;
+
+		/*
+		 * An interrupt or NMI handler might interrupt and change
+		 * the state in the middle, but that's safe.
+		 */
+		state = &get_cpu_var(shuffle_rnd_state);
+		ret = prandom_u32_state(state) & 1;
+		put_cpu_var(shuffle_rnd_state);
+
+		return ret;
+	}
 
 	/*
 	 * The lack of locking is deliberate. If 2 threads race to

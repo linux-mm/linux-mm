@@ -2706,6 +2706,7 @@ void __init mm_core_init_early(void)
 void __init mm_core_init(void)
 {
 	arch_mm_preinit();
+	shuffle_init();
 	init_zero_page_pfn();
 
 	/* Initializations relying on SMP setup */
