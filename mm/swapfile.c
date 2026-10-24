@@ -172,6 +172,8 @@ static long swap_usage_in_pages(struct swap_info_struct *si)
 #define TTRS_UNMAPPED		0x2
 /* Reclaim the swap entry if swap is getting full */
 #define TTRS_FULL		0x4
+/* May sleep: wait for the folio lock and for writeback instead of giving up */
+#define TTRS_WAIT		0x8
 
 static bool swap_only_has_cache(struct swap_cluster_info *ci,
 				unsigned long offset, int nr_pages)
@@ -217,9 +219,19 @@ again:
 	 * avoiding deadlock. This is a special case and you should
 	 * use folio_free_swap() with explicit folio_lock() in usual
 	 * operations.
+	 *
+	 * The zap path (TTRS_UNMAPPED) is the one caller for which giving
+	 * up means the slot is never looked at again: it stays allocated
+	 * with count 0 and an unmapped folio pinned in the swap cache. Let
+	 * the sweep worker, which can wait, come back for it.
 	 */
-	if (!folio_trylock(folio))
+	if (flags & TTRS_WAIT) {
+		folio_lock(folio);
+	} else if (!folio_trylock(folio)) {
+		if (flags & TTRS_UNMAPPED)
+			schedule_work(&si->sweep_work);
 		goto out;
+	}
 
 	/*
 	 * Offset could point to the middle of a large folio, or folio
@@ -232,11 +244,20 @@ again:
 	}
 	offset = swp_offset(folio->swap);
 
+	if (flags & TTRS_WAIT)
+		folio_wait_writeback(folio);
+
 	need_reclaim = ((flags & TTRS_ANYWAY) ||
 			((flags & TTRS_UNMAPPED) && !folio_mapped(folio)) ||
 			((flags & TTRS_FULL) && mem_cgroup_swap_full(folio)));
-	if (!need_reclaim || !folio_swapcache_freeable(folio))
+	if (!need_reclaim)
 		goto out_unlock;
+	if (!folio_swapcache_freeable(folio)) {
+		/* Same for a folio the zap caught under writeback. */
+		if ((flags & TTRS_UNMAPPED) && folio_test_writeback(folio))
+			schedule_work(&si->sweep_work);
+		goto out_unlock;
+	}
 
 	/*
 	 * It's safe to delete the folio from swap cache only if the folio
@@ -1097,6 +1118,80 @@ static void swap_reclaim_work(struct work_struct *work)
 	si = container_of(work, struct swap_info_struct, reclaim_work);
 
 	swap_reclaim_full_clusters(si, true);
+}
+
+/*
+ * Free the slots a zap could not take back: swap cache only, count 0, folio
+ * not mapped. The zap runs under the PTL, so when the folio was locked (a
+ * readahead or an asynchronous swap-in still reading into it) or under
+ * writeback, __try_to_reclaim_swap() had to give up and scheduled us. Such
+ * a slot is reachable by nobody but LRU reclaim: no page table holds its
+ * entry, and the allocator skips it until swap is half full. Here we can
+ * wait for the lock and the writeback.
+ */
+static void swap_sweep_work(struct work_struct *work)
+{
+	struct swap_info_struct *si;
+	struct swap_cluster_info *ci;
+	unsigned long offset, end, swp_tb;
+	unsigned long nr_clusters;
+	int nr_reclaim;
+
+	si = container_of(work, struct swap_info_struct, sweep_work);
+	nr_clusters = DIV_ROUND_UP(si->max, SWAPFILE_CLUSTER);
+
+	for (unsigned long i = 0; i < nr_clusters; i++) {
+		ci = si->cluster_info + i;
+		offset = i * SWAPFILE_CLUSTER;
+		end = min(si->max, offset + SWAPFILE_CLUSTER);
+
+		spin_lock(&ci->lock);
+		if (!ci->count) {
+			spin_unlock(&ci->lock);
+			continue;
+		}
+		while (offset < end) {
+			swp_tb = swap_table_get(ci, offset % SWAPFILE_CLUSTER);
+			/*
+			 * A mapped folio with count 0 is a page swapped in and
+			 * kept in the swap cache: useful, and not ours. The
+			 * folio cannot leave the cache while we hold ci->lock,
+			 * so peeking at it is safe; the real check is done
+			 * under the folio lock in __try_to_reclaim_swap().
+			 */
+			if (swp_tb_is_folio(swp_tb) && !__swp_tb_get_count(swp_tb) &&
+			    !folio_mapped(swp_tb_to_folio(swp_tb))) {
+				spin_unlock(&ci->lock);
+				nr_reclaim = __try_to_reclaim_swap(si, offset,
+								   TTRS_UNMAPPED | TTRS_WAIT);
+				spin_lock(&ci->lock);
+				if (nr_reclaim) {
+					offset += abs(nr_reclaim);
+					continue;
+				}
+			}
+			offset++;
+		}
+		spin_unlock(&ci->lock);
+		cond_resched();
+	}
+}
+
+/*
+ * The present-PTE zap path drops a folio that was mapped from the swap
+ * cache. Same rules as the swap-entry zap: free the slot if the folio is
+ * unmapped and unused, let the worker handle it if that is not possible
+ * right now. @entry may already be stale, get_swap_device() sorts that out.
+ */
+void swap_reclaim_entry(swp_entry_t entry)
+{
+	struct swap_info_struct *si;
+
+	si = get_swap_device(entry);
+	if (IS_ERR_OR_NULL(si))
+		return;
+	__try_to_reclaim_swap(si, swp_offset(entry), TTRS_UNMAPPED);
+	put_swap_device(si);
 }
 
 /*
@@ -3264,6 +3359,7 @@ SYSCALL_DEFINE1(swapoff, const char __user *, specialfile)
 
 	flush_work(&p->discard_work);
 	flush_work(&p->reclaim_work);
+	flush_work(&p->sweep_work);
 	flush_percpu_swap_cluster(p);
 
 	destroy_swap_extents(p, p->swap_file);
@@ -3744,6 +3840,7 @@ SYSCALL_DEFINE2(swapon, const char __user *, specialfile, int, swap_flags)
 
 	INIT_WORK(&si->discard_work, swap_discard_work);
 	INIT_WORK(&si->reclaim_work, swap_reclaim_work);
+	INIT_WORK(&si->sweep_work, swap_sweep_work);
 
 	CLASS(filename, name)(specialfile);
 	swap_file = file_open_name(name, O_RDWR | O_LARGEFILE | O_EXCL, 0);
