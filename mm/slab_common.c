@@ -359,12 +359,10 @@ struct kmem_cache *__kmem_cache_create_args(const char *name,
 		goto out_unlock;
 	}
 
-	/*
-	 * For now we assume any cache can be used with __GFP_ACCOUNT and thus
-	 * may need to store objcg pointers for objects
-	 */
-	if (!mem_cgroup_kmem_disabled())
+	if (flags & SLAB_ACCOUNT)
 		flags |= SLAB_MAY_ACCOUNT;
+	if (mem_cgroup_kmem_disabled())
+		flags &= ~SLAB_MAY_ACCOUNT;
 
 	/* Fail closed on bad usersize of useroffset values. */
 	if (!IS_ENABLED(CONFIG_HARDENED_USERCOPY) ||

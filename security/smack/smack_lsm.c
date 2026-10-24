@@ -5352,7 +5352,7 @@ static __init int smack_init(void)
 	struct cred *cred = (struct cred *) current->cred;
 	struct task_smack *tsp;
 
-	smack_rule_cache = KMEM_CACHE(smack_rule, 0);
+	smack_rule_cache = KMEM_CACHE(smack_rule, SLAB_MAY_ACCOUNT);
 	if (!smack_rule_cache)
 		return -ENOMEM;
 
