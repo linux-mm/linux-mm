@@ -553,8 +553,9 @@ memory.stat file includes following statistics:
     pgpgout         # of uncharging events to the memory cgroup. The uncharging
                     event happens each time a page is unaccounted from the
                     cgroup.
-    swap            # of bytes of swap usage
+    swap            # of bytes of physical swap usage
     swapcached      # of bytes of swap cached in memory
+    vswap           # of bytes of virtual swap usage
     dirty           # of bytes that are waiting to get written back to the disk.
     writeback       # of bytes of file/anon cache that are queued for syncing to
                     disk.

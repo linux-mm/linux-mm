@@ -69,6 +69,7 @@
 #include "internal.h"
 #include "page_alloc.h"
 #include "swap.h"
+#include "vswap.h"
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/vmscan.h>
@@ -415,10 +416,12 @@ static inline bool can_reclaim_anon_pages(struct mem_cgroup *memcg,
 	if (memcg == NULL) {
 		/*
 		 * For non-memcg reclaim, is there space in any swap device?
-		 * And under GFP_NOIO, is there enough swapcached anon to make
-		 * scanning anon worthwhile?
+		 * vswap does not contribute to nr_swap_pages. And under
+		 * GFP_NOIO, is there enough swapcached anon to make scanning
+		 * anon worthwhile?
 		 */
-		if (get_nr_swap_pages() > 0 &&
+		if ((get_nr_swap_pages() > 0 ||
+		     (vswap_is_enabled() && zswap_is_enabled())) &&
 		    !reclaimable_anon_is_low(memcg, nid, sc))
 			return true;
 	} else {
@@ -426,7 +429,7 @@ static inline bool can_reclaim_anon_pages(struct mem_cgroup *memcg,
 		 * Is the memcg below its swap limit, and under GFP_NOIO does
 		 * it have enough swapcached anon to make scanning worthwhile?
 		 */
-		if (mem_cgroup_get_nr_swap_pages(memcg) > 0 &&
+		if (mem_cgroup_can_swap(memcg, 1) &&
 		    !reclaimable_anon_is_low(memcg, nid, sc))
 			return true;
 	}
@@ -1142,17 +1145,26 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
 
 static bool may_enter_fs(struct folio *folio, gfp_t gfp_mask)
 {
+	swp_entry_t entry;
+
 	if (gfp_mask & __GFP_FS)
 		return true;
 	/*
 	 * We can "enter_fs" for swap-cache with only __GFP_IO unless backed by
 	 * a swapfile that requires GFP_NOFS I/O.
 	 */
-	if (folio_test_swapcache(folio) && (gfp_mask & __GFP_IO) &&
-	    !(__swap_entry_to_info(folio->swap)->ops->flags &
-			SWAP_OPS_F_REQUIRE_NOFS))
-		return true;
-	return false;
+	if (!folio_test_swapcache(folio) || !(gfp_mask & __GFP_IO))
+		return false;
+
+	entry = folio->swap;
+	if (is_vswap_entry(entry)) {
+		entry = vswap_to_phys(entry);
+		if (!entry.val)
+			return true;
+	}
+
+	return !(__swap_entry_to_info(entry)->ops->flags &
+		 SWAP_OPS_F_REQUIRE_NOFS);
 }
 
 /*
@@ -1169,7 +1181,9 @@ static unsigned int shrink_folio_list(struct list_head *folio_list,
 	unsigned int nr_reclaimed = 0, nr_demoted = 0;
 	unsigned int pgactivate = 0;
 	bool do_demote_pass;
-	struct swap_io_ctx ctx = {};
+	struct swap_io_ctx ctx = {
+		.nofs = !(sc->gfp_mask & __GFP_FS),
+	};
 
 	folio_batch_init(&free_folios);
 	memset(stat, 0, sizeof(*stat));
@@ -1632,7 +1646,8 @@ activate_locked_split:
 activate_locked:
 		/* Not a candidate for swapping, so reclaim swap space. */
 		if (folio_test_swapcache(folio) &&
-		    (mem_cgroup_swap_full(folio) || folio_test_mlocked(folio)))
+		    ((mem_cgroup_swap_full(folio) && folio_phys_swap_backed(folio)) ||
+		     folio_test_mlocked(folio)))
 			folio_free_swap(folio);
 		VM_BUG_ON_FOLIO(folio_test_active(folio), folio);
 		if (!folio_test_mlocked(folio)) {
@@ -2801,7 +2816,7 @@ static bool can_age_anon_pages(struct lruvec *lruvec,
 			       struct scan_control *sc)
 {
 	/* Aging the anon LRU is valuable if swap is present: */
-	if (total_swap_pages > 0)
+	if (total_swap_pages > 0 || (vswap_is_enabled() && zswap_is_enabled()))
 		return true;
 
 	/* Also valuable if anon pages can be demoted: */
@@ -2894,7 +2909,7 @@ static int get_swappiness(struct lruvec *lruvec, struct scan_control *sc)
 		return 0;
 
 	if (!can_demote(pgdat->node_id, sc, memcg) &&
-	    mem_cgroup_get_nr_swap_pages(memcg) < MIN_LRU_BATCH)
+	    !mem_cgroup_can_swap(memcg, MIN_LRU_BATCH))
 		return 0;
 
 	return swappiness;
