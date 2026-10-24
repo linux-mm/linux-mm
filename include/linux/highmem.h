@@ -484,6 +484,65 @@ static inline int copy_mc_highpage(struct page *to, struct page *from)
 }
 #endif
 
+#if defined(copy_mc_to_kernel) && !defined(CONFIG_HIGHMEM) && \
+	!defined(__HAVE_ARCH_COPY_HIGHPAGE)
+/*
+ * copy_mc_highpages() copies the whole range with a single
+ * copy_mc_to_kernel() call, which cannot reschedule. That is fine under
+ * preemptible models, but under cooperatively scheduled models callers
+ * should copy at most COPY_MC_PAGES_NON_PREEMPT_BATCH pages at a time.
+ *
+ * With a value of 32MB and assuming a memory bandwidth of ~10GBps, this
+ * should result in a worst case preemption latency of around 3ms when
+ * copying pages.
+ */
+#define COPY_MC_PAGES_NON_PREEMPT_BATCH		(SZ_32M >> PAGE_SHIFT)
+
+/**
+ * copy_mc_highpages() - copy a page range with machine check handling
+ * @to: first destination page
+ * @from: first source page
+ * @nr_pages: number of pages
+ *
+ * Range variant of copy_mc_highpage(). On a machine check, the poisoned
+ * source page is queued for memory_failure().
+ *
+ * Does not call cond_resched(). Under cooperatively scheduled models the
+ * caller is expected to limit @nr_pages to COPY_MC_PAGES_NON_PREEMPT_BATCH.
+ *
+ * Return: 0 on success, -EHWPOISON if a machine check was handled.
+ */
+static inline int copy_mc_highpages(struct page *to, struct page *from,
+		unsigned long nr_pages)
+{
+	unsigned long len = nr_pages << PAGE_SHIFT;
+	unsigned long ret, i;
+
+	ret = copy_mc_to_kernel(page_address(to), page_address(from), len);
+	if (!ret) {
+		for (i = 0; i < nr_pages; i++)
+			kmsan_copy_page_meta(to + i, from + i);
+		return 0;
+	}
+	memory_failure_queue(page_to_pfn(from) + ((len - ret) >> PAGE_SHIFT), 0);
+	return -EHWPOISON;
+}
+#else
+
+#define COPY_MC_PAGES_NON_PREEMPT_BATCH		1
+
+static inline int copy_mc_highpages(struct page *to, struct page *from,
+		unsigned long nr_pages)
+{
+	unsigned long i;
+
+	for (i = 0; i < nr_pages; i++)
+		if (copy_mc_highpage(to + i, from + i))
+			return -EHWPOISON;
+	return 0;
+}
+#endif
+
 static inline void memcpy_page(struct page *dst_page, size_t dst_off,
 			       struct page *src_page, size_t src_off,
 			       size_t len)
