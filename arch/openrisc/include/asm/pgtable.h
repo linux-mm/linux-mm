@@ -21,6 +21,7 @@
 #ifndef __ASM_OPENRISC_PGTABLE_H
 #define __ASM_OPENRISC_PGTABLE_H
 
+#include <asm/page.h>
 #include <asm-generic/pgtable-nopmd.h>
 
 #ifndef __ASSEMBLER__
