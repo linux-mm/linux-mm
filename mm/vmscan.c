@@ -379,13 +379,6 @@ static inline bool reclaimable_anon_is_low(struct mem_cgroup *memcg,
 	if (!sc || (sc->gfp_mask & __GFP_IO))
 		return false;
 
-	/*
-	 * FIXME: MGLRU doesn't fully respect can_reclaim_anon_pages() for the
-	 * scanning type, so only apply this to the traditional LRU for now.
-	 */
-	if (lru_gen_enabled())
-		return false;
-
 	if (memcg) {
 		struct lruvec *lruvec = mem_cgroup_lruvec(memcg, pgdat);
 
@@ -4351,11 +4344,34 @@ static unsigned long lruvec_evictable_size(struct lruvec *lruvec, int swappiness
 	return total;
 }
 
+/*
+ * Use the same policy for sizing, eviction and aging decisions, so anon
+ * excluded from scanning cannot prevent memcg rotation.
+ *
+ * Keep the original swappiness in try_to_inc_max_seq(): a forced zero
+ * would let inc_min_seq() skip the oldest anon folios and risk cold/hot
+ * inversions. Accept the synchronous aging cost instead.
+ */
+static int get_scan_swappiness(struct lruvec *lruvec, struct scan_control *sc,
+			       int swappiness)
+{
+	if (swappiness == MIN_SWAPPINESS || swappiness == SWAPPINESS_ANON_ONLY)
+		return swappiness;
+
+	if (!can_reclaim_anon_pages(lruvec_memcg(lruvec),
+				    lruvec_pgdat(lruvec)->node_id, sc))
+		return MIN_SWAPPINESS;
+
+	return swappiness;
+}
+
 static bool lruvec_is_sizable(struct lruvec *lruvec, struct scan_control *sc)
 {
 	unsigned long total;
 	int swappiness = get_swappiness(lruvec, sc);
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
+
+	swappiness = get_scan_swappiness(lruvec, sc, swappiness);
 
 	total = lruvec_evictable_size(lruvec, swappiness);
 
@@ -5249,9 +5265,10 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 	bool need_rotate = false, should_age = false;
 	long nr_batch, nr_to_scan;
 	int swappiness = get_swappiness(lruvec, sc);
+	int scan_swappiness = get_scan_swappiness(lruvec, sc, swappiness);
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 
-	nr_to_scan = get_nr_to_scan(lruvec, sc, memcg, swappiness);
+	nr_to_scan = get_nr_to_scan(lruvec, sc, memcg, scan_swappiness);
 	while (nr_to_scan > 0) {
 		int delta;
 		DEFINE_MAX_SEQ(lruvec);
@@ -5261,14 +5278,14 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 			break;
 		}
 
-		if (should_run_aging(lruvec, max_seq, sc, swappiness)) {
+		if (should_run_aging(lruvec, max_seq, sc, scan_swappiness)) {
 			if (try_to_inc_max_seq(lruvec, max_seq, swappiness, false))
 				need_rotate = true;
 			should_age = true;
 		}
 
 		nr_batch = min(nr_to_scan, MIN_LRU_BATCH);
-		delta = evict_folios(nr_batch, lruvec, sc, swappiness);
+		delta = evict_folios(nr_batch, lruvec, sc, scan_swappiness);
 		if (!delta)
 			break;
 
