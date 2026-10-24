@@ -7,14 +7,19 @@
  */
 
 #include <linux/cdev.h>
+#include <linux/cgroup.h>
 #include <linux/device.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
+#include <linux/memcontrol.h>
+#include <linux/sched/mm.h>
 #include <linux/err.h>
 #include <linux/export.h>
 #include <linux/list.h>
 #include <linux/minmax.h>
 #include <linux/nospec.h>
+#include <linux/pidfd.h>
+#include <linux/security.h>
 #include <linux/syscalls.h>
 #include <linux/uaccess.h>
 #include <linux/xarray.h>
@@ -75,10 +80,16 @@ static int dma_heap_open(struct inode *inode, struct file *file)
 
 static struct dma_buf *dma_heap_ioctl_allocate(struct file *file, void *data)
 {
+	struct cgroup *cgrp;
+	struct cgroup_subsys_state *css;
+	const struct cred *tcred;
 	struct dma_heap_allocation_data *heap_allocation = data;
 	struct dma_heap *heap = file->private_data;
 	struct dma_buf *dmabuf;
-	int fd;
+	struct mem_cgroup *memcg = NULL;
+	struct task_struct *task;
+	unsigned int pidfd_flags;
+	int fd, ret;
 	size_t len;
 
 	if (heap_allocation->fd)
@@ -90,15 +101,70 @@ static struct dma_buf *dma_heap_ioctl_allocate(struct file *file, void *data)
 	if (heap_allocation->heap_flags & ~DMA_HEAP_VALID_HEAP_FLAGS)
 		return ERR_PTR(-EINVAL);
 
+	if (heap_allocation->charge_fd) {
+		cgrp = cgroup_get_from_fd(heap_allocation->charge_fd);
+		if (!IS_ERR(cgrp)) {
+			/* charge_fd is a cgroupfd */
+			rcu_read_lock();
+			css = cgroup_css(cgrp, &memory_cgrp_subsys);
+			if (!css || !css_tryget_online(css)) {
+				rcu_read_unlock();
+				cgroup_put(cgrp);
+				return ERR_PTR(-ENOENT);
+			}
+
+			memcg = mem_cgroup_from_css(css);
+			rcu_read_unlock();
+
+			ret = security_dma_buf_charge_cgroup(current_cred(), cgrp);
+			cgroup_put(cgrp);
+			if (ret) {
+				mem_cgroup_put(memcg);
+				return ERR_PTR(ret);
+			}
+		} else {
+			/* charge_fd is a pidfd  */
+			task = pidfd_get_task(heap_allocation->charge_fd, &pidfd_flags);
+			if (IS_ERR(task))
+				return ERR_CAST(task);
+
+			tcred = get_task_cred(task);
+			ret = security_dma_buf_charge_task(current_cred(), tcred);
+			put_cred(tcred);
+			if (ret) {
+				put_task_struct(task);
+				return ERR_PTR(ret);
+			}
+
+			memcg = get_mem_cgroup_from_mm(task->mm);
+			put_task_struct(task);
+		}
+	}
+
 	len = PAGE_ALIGN(heap_allocation->len);
-	if (!len)
+	if (!len) {
+		mem_cgroup_put(memcg);
 		return ERR_PTR(-EINVAL);
+	}
 
 	dmabuf = heap->ops->allocate(heap, len, heap_allocation->fd_flags,
 				     heap_allocation->heap_flags);
 
-	if (IS_ERR(dmabuf))
+	if (IS_ERR(dmabuf)) {
+		mem_cgroup_put(memcg);
 		return dmabuf;
+	}
+
+	if (!memcg && mem_accounting)
+		memcg = get_mem_cgroup_from_mm(current->mm);
+
+	if (memcg) {
+		if (!mem_cgroup_charge_dmabuf(dmabuf, memcg, GFP_KERNEL)) {
+			mem_cgroup_put(memcg);
+			dma_buf_put(dmabuf);
+			return ERR_PTR(-ENOMEM);
+		}
+	}
 
 	fd = get_unused_fd_flags(heap_allocation->fd_flags);
 	if (fd < 0) {
