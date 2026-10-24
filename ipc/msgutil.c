@@ -43,9 +43,8 @@ static kmem_buckets *msg_buckets __ro_after_init;
 
 static int __init init_msg_buckets(void)
 {
-	msg_buckets = kmem_buckets_create("msg_msg", SLAB_ACCOUNT,
-					  sizeof(struct msg_msg),
-					  DATALEN_MSG, NULL);
+	msg_buckets = kmem_buckets_create("msg_msg", sizeof(struct msg_msg),
+					  DATALEN_MSG);
 
 	return 0;
 }
@@ -58,7 +57,8 @@ static struct msg_msg *alloc_msg(size_t len)
 	size_t alen;
 
 	alen = min(len, DATALEN_MSG);
-	msg = kmem_buckets_alloc(msg_buckets, sizeof(*msg) + alen, GFP_KERNEL);
+	msg = kmem_buckets_alloc(msg_buckets, sizeof(*msg) + alen,
+				 GFP_KERNEL_ACCOUNT);
 	if (msg == NULL)
 		return NULL;
 
