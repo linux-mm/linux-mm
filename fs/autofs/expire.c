@@ -514,6 +514,12 @@ retry:
 	}
 	if (state & AUTOFS_INF_EXPIRING) {
 		spin_unlock(&sbi->fs_lock);
+		/*
+		 * The expire waits for the daemon, which may need a pipe that
+		 * the splice of this task holds. Refuse instead of waiting.
+		 */
+		if (unlikely(current->in_splice_pipe_callback))
+			return -EAGAIN;
 
 		pr_debug("waiting for expire %p name=%pd\n", dentry, dentry);
 
