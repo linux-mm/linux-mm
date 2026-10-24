@@ -6268,7 +6268,7 @@ int numa_migrate_check(struct folio *folio, struct vm_fault *vmf,
 	 * to record page access time.  So use default value.
 	 */
 	if (folio_use_access_time(folio))
-		*last_cpupid = (-1 & LAST_CPUPID_MASK);
+		*last_cpupid = LAST_CPUPID_ACCESS_TIME;
 	else
 		*last_cpupid = folio_last_cpupid(folio);
 

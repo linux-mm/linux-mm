@@ -133,6 +133,8 @@ static unsigned int sysctl_sched_cfs_bandwidth_slice		= 5000UL;
 #ifdef CONFIG_NUMA_BALANCING
 /* Restrict the NUMA promotion throughput (MB/s) for each target node. */
 static unsigned int sysctl_numa_balancing_promote_rate_limit = 65536;
+/* Preserve the existing default of using free fast-tier space eagerly. */
+static unsigned int sysctl_numa_balancing_promote_free_space_bypass = 1;
 #endif
 
 #ifdef CONFIG_SYSCTL
@@ -155,6 +157,15 @@ static const struct ctl_table sched_fair_sysctls[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
+	},
+	{
+		.procname	= "numa_balancing_promote_free_space_bypass",
+		.data		= &sysctl_numa_balancing_promote_free_space_bypass,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_douintvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
 	},
 #endif /* CONFIG_NUMA_BALANCING */
 };
@@ -1316,6 +1327,21 @@ static int select_idle_sibling(struct task_struct *p, int prev_cpu, int cpu);
 static unsigned long task_h_load(struct task_struct *p);
 static unsigned long capacity_of(int cpu);
 
+#ifdef CONFIG_NUMA_BALANCING
+static inline bool numa_balancing_normal_enabled(void)
+{
+	return sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL;
+}
+
+static inline int task_numa_preferred_nid(struct task_struct *p)
+{
+	if (!numa_balancing_normal_enabled())
+		return NUMA_NO_NODE;
+
+	return p->numa_preferred_nid;
+}
+#endif
+
 /* Give new sched_entity start runnable values to heavy its load in infant time */
 void init_entity_runnable_average(struct sched_entity *se)
 {
@@ -1878,10 +1904,12 @@ static int get_pref_llc(struct task_struct *p, struct sched_cache_group *grp)
 		 * than sched_setnuma() at least -- and thus the
 		 * conflict only exists for a short period of time.
 		 */
-		if (static_branch_likely(&sched_numa_balancing) &&
-		    p->numa_preferred_nid >= 0 &&
-		    cpu_to_node(mm_sched_cpu) != p->numa_preferred_nid)
-			mm_sched_llc = -1;
+		if (static_branch_likely(&sched_numa_balancing)) {
+			int pref_nid = task_numa_preferred_nid(p);
+
+			if (pref_nid >= 0 && cpu_to_node(mm_sched_cpu) != pref_nid)
+				mm_sched_llc = -1;
+		}
 #endif
 	}
 
@@ -1997,7 +2025,7 @@ static void get_scan_cpumasks(cpumask_var_t cpus, struct task_struct *p,
 	 * current running node to mitigate the bouncing risk.
 	 * TBD: numa_group should be considered during task aggregation.
 	 */
-	pref_nid = p->numa_preferred_nid;
+	pref_nid = task_numa_preferred_nid(p);
 	/* honor the task's preferred node */
 	if (pref_nid == NUMA_NO_NODE)
 		goto out;
@@ -2815,11 +2843,10 @@ static inline bool cpupid_valid(int cpupid)
 }
 
 /*
- * For memory tiering mode, if there are enough free pages (more than
- * enough watermark defined here) in fast memory node, to take full
- * advantage of fast memory capacity, all recently accessed slow
- * memory pages will be migrated to fast memory node without
- * considering hot threshold.
+ * For memory tiering mode, if the target fast memory node has enough free
+ * pages, recently accessed slow memory pages can bypass the normal hotness
+ * check and rate limit so the fast tier can be filled. The bypass can be
+ * disabled by numa_balancing_promote_free_space_bypass.
  */
 static bool pgdat_free_space_enough(struct pglist_data *pgdat)
 {
@@ -2940,7 +2967,8 @@ bool should_numa_migrate_memory(struct task_struct *p, struct folio *folio,
 		long nr = folio_nr_pages(folio);
 
 		pgdat = NODE_DATA(dst_nid);
-		if (pgdat_free_space_enough(pgdat)) {
+		if (sysctl_numa_balancing_promote_free_space_bypass &&
+		    pgdat_free_space_enough(pgdat)) {
 			/* workload changed, reset hot threshold */
 			pgdat->nbp_threshold = 0;
 			mod_node_page_state(pgdat, PGPROMOTE_CANDIDATE_NRL, nr);
@@ -3637,6 +3665,9 @@ static void numa_migrate_preferred(struct task_struct *p)
 	interval = min(interval, msecs_to_jiffies(p->numa_scan_period) / 16);
 	p->numa_migrate_retry = jiffies + interval;
 
+	if (!numa_balancing_normal_enabled())
+		return;
+
 	/* Success if task is already running on preferred CPU */
 	if (task_node(p) == p->numa_preferred_nid)
 		return;
@@ -3674,10 +3705,10 @@ static void numa_group_count_active_nodes(struct numa_group *numa_group)
 
 /*
  * When adapting the scan rate, the period is divided into NUMA_PERIOD_SLOTS
- * increments. The more local the fault statistics are, the higher the scan
- * period will be for the next scan window. If local/(local+remote) ratio is
- * below NUMA_PERIOD_THRESHOLD (where range of ratio is 1..NUMA_PERIOD_SLOTS)
- * the scan period will decrease. Aim for 70% local accesses.
+ * increments. The more local or shared the fault statistics are, the higher
+ * the scan period will be for the next scan window. If the private remote
+ * ratio reaches NUMA_PERIOD_SLOTS - NUMA_PERIOD_THRESHOLD, the scan period
+ * will decrease. Aim for 70% local or shared accesses.
  */
 #define NUMA_PERIOD_SLOTS 10
 #define NUMA_PERIOD_THRESHOLD 7
@@ -3692,11 +3723,15 @@ static void update_task_scan_period(struct task_struct *p,
 			unsigned long shared, unsigned long private)
 {
 	unsigned int period_slot;
-	int lr_ratio, ps_ratio;
+	int lr_ratio, sr_ratio, rp_ratio, ratio;
 	int diff;
 
-	unsigned long remote = p->numa_faults_locality[0];
-	unsigned long local = p->numa_faults_locality[1];
+	unsigned long remote = p->numa_faults_locality[NUMA_FAULT_REMOTE];
+	unsigned long local = p->numa_faults_locality[NUMA_FAULT_LOCAL];
+	unsigned long remote_private =
+		p->numa_faults_locality[NUMA_FAULT_REMOTE_PRIVATE];
+	unsigned long locality_faults = local + remote;
+	unsigned long type_faults = private + shared;
 
 	/*
 	 * If there were no record hinting faults then either the task is
@@ -3705,7 +3740,8 @@ static void update_task_scan_period(struct task_struct *p,
 	 * migration then it implies we are migrating too quickly or the local
 	 * node is overloaded. In either case, scan slower
 	 */
-	if (local + shared == 0 || p->numa_faults_locality[2]) {
+	if (!locality_faults || !type_faults ||
+	    p->numa_faults_locality[NUMA_FAULT_MIGRATE_FAIL]) {
 		p->numa_scan_period = min(p->numa_scan_period_max,
 			p->numa_scan_period << 1);
 
@@ -3718,40 +3754,36 @@ static void update_task_scan_period(struct task_struct *p,
 	/*
 	 * Prepare to scale scan period relative to the current period.
 	 *	 == NUMA_PERIOD_THRESHOLD scan period stays the same
-	 *       <  NUMA_PERIOD_THRESHOLD scan period decreases (scan faster)
+	 *       <  NUMA_PERIOD_THRESHOLD scan period may decrease if the
+	 *                            remote-private signal is strong enough
 	 *	 >= NUMA_PERIOD_THRESHOLD scan period increases (scan slower)
 	 */
 	period_slot = DIV_ROUND_UP(p->numa_scan_period, NUMA_PERIOD_SLOTS);
-	lr_ratio = (local * NUMA_PERIOD_SLOTS) / (local + remote);
-	ps_ratio = (private * NUMA_PERIOD_SLOTS) / (private + shared);
+	lr_ratio = (local * NUMA_PERIOD_SLOTS) / locality_faults;
+	sr_ratio = (shared * NUMA_PERIOD_SLOTS) / type_faults;
+	rp_ratio = (remote_private * NUMA_PERIOD_SLOTS) / locality_faults;
+	ratio = max(lr_ratio, sr_ratio);
 
-	if (ps_ratio >= NUMA_PERIOD_THRESHOLD) {
+	if (ratio >= NUMA_PERIOD_THRESHOLD) {
 		/*
-		 * Most memory accesses are local. There is no need to
-		 * do fast NUMA scanning, since memory is already local.
+		 * Most memory accesses are local or shared. Local faults do not
+		 * need fast scanning; shared faults may just be moved elsewhere by
+		 * other tasks.
 		 */
-		int slot = ps_ratio - NUMA_PERIOD_THRESHOLD;
-		if (!slot)
-			slot = 1;
-		diff = slot * period_slot;
-	} else if (lr_ratio >= NUMA_PERIOD_THRESHOLD) {
-		/*
-		 * Most memory accesses are shared with other tasks.
-		 * There is no point in continuing fast NUMA scanning,
-		 * since other tasks may just move the memory elsewhere.
-		 */
-		int slot = lr_ratio - NUMA_PERIOD_THRESHOLD;
+		int slot = ratio - NUMA_PERIOD_THRESHOLD;
 		if (!slot)
 			slot = 1;
 		diff = slot * period_slot;
 	} else {
 		/*
-		 * Private memory faults exceed (SLOTS-THRESHOLD)/SLOTS,
-		 * yet they are not on the local NUMA node. Speed up
-		 * NUMA scanning to get the memory moved over.
+		 * Only speed up scanning when enough faults are both private
+		 * and remote. Mixed windows dominated by shared remote faults
+		 * should not create extra hinting overhead.
 		 */
-		int ratio = max(lr_ratio, ps_ratio);
-		diff = -(NUMA_PERIOD_THRESHOLD - ratio) * period_slot;
+		if (rp_ratio >= NUMA_PERIOD_SLOTS - NUMA_PERIOD_THRESHOLD)
+			diff = -(NUMA_PERIOD_THRESHOLD - ratio) * period_slot;
+		else
+			diff = 0;
 	}
 
 	p->numa_scan_period = clamp(p->numa_scan_period + diff,
@@ -3903,8 +3935,8 @@ static void task_numa_placement(struct task_struct *p)
 	p->numa_scan_seq = seq;
 	p->numa_scan_period_max = task_scan_max(p);
 
-	total_faults = p->numa_faults_locality[0] +
-		       p->numa_faults_locality[1];
+	total_faults = p->numa_faults_locality[NUMA_FAULT_REMOTE] +
+		       p->numa_faults_locality[NUMA_FAULT_LOCAL];
 	runtime = numa_get_avg_runtime(p, &period);
 
 	/* If the task is part of a group prevent parallel updates to group stats */
@@ -4176,8 +4208,9 @@ void task_numa_free(struct task_struct *p, bool final)
 		kfree(numa_faults);
 	} else {
 		p->total_numa_faults = 0;
-		for (i = 0; i < NR_NUMA_HINT_FAULT_STATS * nr_node_ids; i++)
-			numa_faults[i] = 0;
+		memset(p->numa_faults_locality, 0, sizeof(p->numa_faults_locality));
+		memset(numa_faults, 0, sizeof(*numa_faults) *
+		       NR_NUMA_HINT_FAULT_BUCKETS * nr_node_ids);
 	}
 }
 
@@ -4201,6 +4234,21 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 		return;
 
 	/*
+	 * Slow-tier pages use last_cpupid as access-time metadata instead of
+	 * a real cpupid. Do not feed these faults into normal task placement
+	 * when normal NUMA balancing is disabled.
+	 */
+	if (last_cpupid == LAST_CPUPID_ACCESS_TIME) {
+		if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL)) {
+			if (migrated)
+				p->numa_pages_migrated += pages;
+			return;
+		}
+
+		last_cpupid = LAST_CPUPID_UNSET;
+	}
+
+	/*
 	 * NUMA faults statistics are unnecessary for the slow memory
 	 * node for memory tiering mode.
 	 */
@@ -4208,6 +4256,15 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	    (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING ||
 	     !cpupid_valid(last_cpupid)))
 		return;
+
+	/*
+	 * A stale slow-tier access timestamp can survive after memory tiering
+	 * is disabled and later reach here as if it was a cpupid from a
+	 * top-tier page. Treat any non-cpupid value as an ordinary first
+	 * access before task_numa_group() decodes a CPU from it.
+	 */
+	if (unlikely(!cpupid_valid(last_cpupid)))
+		last_cpupid = LAST_CPUPID_UNSET;
 
 	/* Allocate buffer to track faults on a per-node basis */
 	if (unlikely(!p->numa_faults)) {
@@ -4226,7 +4283,7 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	 * First accesses are treated as private, otherwise consider accesses
 	 * to be private if the accessing pid has not changed
 	 */
-	if (unlikely(last_cpupid == (-1 & LAST_CPUPID_MASK))) {
+	if (unlikely(last_cpupid == LAST_CPUPID_UNSET)) {
 		priv = 1;
 	} else {
 		priv = cpupid_match_pid(p, last_cpupid);
@@ -4258,11 +4315,14 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	if (migrated)
 		p->numa_pages_migrated += pages;
 	if (flags & TNF_MIGRATE_FAIL)
-		p->numa_faults_locality[2] += pages;
+		p->numa_faults_locality[NUMA_FAULT_MIGRATE_FAIL] += pages;
 
 	p->numa_faults[task_faults_idx(NUMA_MEMBUF, mem_node, priv)] += pages;
 	p->numa_faults[task_faults_idx(NUMA_CPUBUF, cpu_node, priv)] += pages;
-	p->numa_faults_locality[local] += pages;
+	if (!local && priv)
+		p->numa_faults_locality[NUMA_FAULT_REMOTE_PRIVATE] += pages;
+	p->numa_faults_locality[local ? NUMA_FAULT_LOCAL :
+				 NUMA_FAULT_REMOTE] += pages;
 }
 
 static void reset_ptenuma_scan(struct task_struct *p)
@@ -10699,6 +10759,9 @@ static long migrate_degrades_locality(struct task_struct *p, struct lb_env *env)
 	if (!static_branch_likely(&sched_numa_balancing))
 		return 0;
 
+	if (!numa_balancing_normal_enabled())
+		return 0;
+
 	if (!p->numa_faults || !(env->sd->flags & SD_NUMA))
 		return 0;
 
@@ -12492,6 +12555,9 @@ has_spare:
 #ifdef CONFIG_NUMA_BALANCING
 static inline enum fbq_type fbq_classify_group(struct sg_lb_stats *sgs)
 {
+	if (!numa_balancing_normal_enabled())
+		return all;
+
 	if (sgs->sum_h_nr_running > sgs->nr_numa_running)
 		return regular;
 	if (sgs->sum_h_nr_running > sgs->nr_preferred_running)
@@ -12501,6 +12567,9 @@ static inline enum fbq_type fbq_classify_group(struct sg_lb_stats *sgs)
 
 static inline enum fbq_type fbq_classify_rq(struct rq *rq)
 {
+	if (!numa_balancing_normal_enabled())
+		return regular;
+
 	if (rq->nr_running > rq->nr_numa_running)
 		return regular;
 	if (rq->nr_running > rq->nr_preferred_running)
@@ -12802,17 +12871,21 @@ sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int
 		if (sd->flags & SD_NUMA) {
 			int imb_numa_nr = sd->imb_numa_nr;
 #ifdef CONFIG_NUMA_BALANCING
-			int idlest_cpu;
+			int pref_nid = task_numa_preferred_nid(p);
 			/*
 			 * If there is spare capacity at NUMA, try to select
 			 * the preferred node
 			 */
-			if (cpu_to_node(this_cpu) == p->numa_preferred_nid)
-				return NULL;
+			if (pref_nid != NUMA_NO_NODE) {
+				int idlest_cpu;
 
-			idlest_cpu = cpumask_first(sched_group_span(idlest));
-			if (cpu_to_node(idlest_cpu) == p->numa_preferred_nid)
-				return idlest;
+				if (cpu_to_node(this_cpu) == pref_nid)
+					return NULL;
+
+				idlest_cpu = cpumask_first(sched_group_span(idlest));
+				if (cpu_to_node(idlest_cpu) == pref_nid)
+					return idlest;
+			}
 #endif /* CONFIG_NUMA_BALANCING */
 			/*
 			 * Otherwise, keep the task close to the wakeup source
