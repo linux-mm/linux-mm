@@ -64,7 +64,22 @@ struct pt_iommu {
 	 * page table which must have dma ops that perform cache flushing.
 	 */
 	struct device *iommu_device;
+
+	/**
+	 * @shrinker_list: Node for the generic_pt global shrinker list
+	 */
+	struct list_head shrinker_list;
+
+	/**
+	 * @nr_reclaimable: Count of empty directories waiting in reclaim_list
+	 */
+	atomic_long_t nr_reclaimable;
 };
+
+extern struct srcu_struct generic_pt_srcu;
+
+void generic_pt_shrinker_add(struct pt_iommu *iommu);
+void generic_pt_shrinker_remove(struct pt_iommu *iommu);
 
 static inline struct pt_iommu *iommupt_from_domain(struct iommu_domain *domain)
 {
@@ -136,6 +151,20 @@ struct pt_iommu_ops {
 	size_t (*unmap_range)(struct pt_iommu *iommu_table, dma_addr_t iova,
 			      dma_addr_t len,
 			      struct iommu_iotlb_gather *iotlb_gather);
+
+	/**
+	 * @sever_branch: Locklessly sever an empty page table branch
+	 * @iommu_table: Table to manipulate
+	 * @iova: IO virtual address associated with the branch
+	 * @expected_phys: Expected physical address of the child directory
+	 *
+	 * Context: Executed locklessly by a background Shrinker.
+	 * Uses cmpxchg to write 0x0 to the parent slot.
+	 *
+	 * Returns: true if successfully severed, false if aborted.
+	 */
+	bool (*sever_branch)(struct pt_iommu *iommu_table, dma_addr_t iova,
+			     phys_addr_t expected_phys);
 
 	/**
 	 * @set_dirty: Make the iova write dirty
