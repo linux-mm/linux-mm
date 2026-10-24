@@ -78,6 +78,8 @@
 #include <linux/sched/sysctl.h>
 #include <linux/pgalloc.h>
 #include <linux/uaccess.h>
+#include <linux/ppm/gfp_types.h>
+#include <linux/slab.h>
 
 #include <trace/events/kmem.h>
 
@@ -93,6 +95,137 @@
 #if defined(LAST_CPUPID_NOT_IN_PAGE_FLAGS) && !defined(CONFIG_COMPILE_TEST)
 #warning Unfortunate NUMA and NUMA Balancing config, growing page-frame for last_cpupid.
 #endif
+
+/* Small Variables for 
+  PPM uses 
+ */
+int ppm_free_error;
+int ppm_alloc_error;
+int ppm_success;
+unsigned int order;
+unsigned int nr_pages = 1 << order;
+unsigned int i;
+struct vm_area_struct *vma;
+spinlock_t *ptl;
+
+/* Initializer of PPM */
+void __init_ppm_memory() 
+{
+	
+	/* 1. Define the variables for 
+	 the rest of System uses 
+	 */
+	ppm_free_error = __PPM_FREE_ERROR;
+	ppm_alloc_error = __PPM_ALLOC_ERROR;
+	ppm_success = __PPM_SUCCESS;
+
+	/* 2. Connect __PPM_OBJ_CDE_BITS to 
+	   flags under gfp_types.h 
+	 */
+	__PPM_OBJ_CDE_BITS.__PPM_OBJECT_CACHE = 4 * 1024 * 1024; /* 4MB for alloc, used to store important objects */
+	__PPM_OBJ_CDE_BITS.__PPM_OBTAIN_CODE = 0; /* Is modifyed in ppm_kalloc() and ppm_kfree() */
+	__PPM_OBJ_CDE_BITS.__PPM_FLAGS__ = GFP_MASK; /* The Kernel uses this for test */
+
+	/* 3. Alloc the Cache of Objects */
+	char *ppm_identifier = "PPM Cache";
+	int *result_ptr = kmem_cache_create(ppm_identifier, 
+		8, 
+		_slab_flag_bits._SLAB_HWCACHE_ALIGN,
+		_slab_flag_bits._SLAB_PANIC 
+	); /* Number 8 for a 64-bit Pointer */
+	__PPM_OBJ_CDE_BITS.__PPM_OBJECT_CACHE = result_ptr;
+
+	/* 4. Return success */
+	ppm_success = __PPM_SUCCESS; /* The Kernel Optional-Action is verify if ppm_success is __PPM_SUCCESS */
+}
+
+/* Allocator to PPM */
+int ppm_kalloc(unsigned long address, uint64_t size, gfp_t flags) 
+{
+	if (unlikely(!size)) 
+		return __PPM_ALLOC_ERROR;
+
+	/* 1. Alloc the size */
+	order = get_order(size);
+	struct page *pages_ppm = alloc_pages(
+		flags | GFP_PLUG_MEMORY,
+		order
+	);
+
+	/* 2. Navigation in PTE (Page Table Walk) */
+	/* 2.1. Obtain PGD */
+	pgd_t *pgd = pgd_offset(current->mm, address);
+	/* 2.2. Obtain P4D */
+	p4d_t *p4d = p4d_alloc(current->mm, pgd, address);
+	/* 2.3. Obtain PUD */
+	pud_t *pud = pud_alloc(current->mm, p4d, address);
+	/* 2.4. Obtain PMD */
+	pmd_t *pmd = pmd_alloc(current->mm, pud, address);
+	
+	/* 3. Plugging */
+	/* Entry in PTE */
+	pte_t *pte = pte_offset_map_lock(current->mm, pmd, address, &ptl);
+	for (int i = 0; i < nr_pages; i++)
+	{
+		/* Calcle the memory allocated in 1 step */
+		pte_t entry = pfn_pte(page_to_pfn(pages_ppm) + i, vma->vma_page_prot);
+		entry = pte_mkdirty(entry); /* Active bit dirty */
+		entry = pte_mkyoung(entry); /* Active bit young/present */
+	}
+
+	/* 4. Finalize setting in the RAM the page */
+	pte_t *new_pte;
+	set_pte_at(current->mm, address, pte, new_pte);
+
+	/* 5. Unlock */
+	pte_unmap_unlock(pte, ptl);
+
+	/* 6. Return */
+	ppm_success = __PPM_SUCCESS; /* If value returned == __PPM_SUCCESS? */
+	return ppm_success;
+}
+
+/* Desallocator to PPM */
+int ppm_kfree(uint64_t size) 
+{
+	if (unlikely(!size)) 
+		return __PPM_FREE_ERROR;
+	
+	/* 1. Entry in MMU Directories */
+	pgd_t pgd = pgd_offset(current->mm, address);
+	p4d_t p4d = p4d_alloc(current->mm, pgd, address);
+	pud_t pud = pud_alloc(current->mm, p4d, address);
+	pmd_t pmd = pmd_alloc(current->mm, pud, address);
+
+	/* 2. Entry in PTE */
+	pte_t pte = pte_offset_map_lock(current->mm, pmd, address, &ptl);
+	/* Verify if the PPM plugged the page */
+	pte_t result_for_check = ptep_get(pte);
+	pte_val(result_for_check) & GFP_PLUG_MEMORY;
+	if (result_for_check > 1) 
+	{
+		pte_clear(current->mm, address, pte);
+	} else `{
+		/* No executes/call, is ignored */
+		
+	}
+
+	/* 3. Flush for clear the TLB */
+	flush_tlb_page();
+
+	/* 4. Unlock PTE */
+	pte_unmap_unlock(pte, ptl);
+
+	/* 6. Extract the Pointer to free */
+	int identifier_numeric = pte_pfn(result_for_check);
+	struct page *ptr_result = pfn_to_page(identifier_numeric);
+	free_pages(ptr_result, order);
+
+	/* 7. Return success */
+	ppm_success = __PPM_SUCCESS;
+	return ppm_success;
+}
+
 
 static vm_fault_t do_fault(struct vm_fault *vmf);
 static vm_fault_t do_anonymous_page(struct vm_fault *vmf);
@@ -6935,6 +7068,31 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 	bool is_droppable;
 
 	__set_current_state(TASK_RUNNING);
+
+	/* If PPM returns no is == __PPM_SUCCESS, ignore the PPM Mode and 
+	   sign the default flow 
+	 */
+	int code_error = __init_ppm_memory();
+	if (code_error == 0) 
+	{
+		/* Verify flags */
+		unsigned int ppm_check = flags & GFP_MASK;
+		if (ppm_check == GFP_PLUG_MEMORY)
+		{
+			ppm_kalloc(address, size, flags);
+			return VM_FAULT_NOPAGE;
+		} else if (ppm_check == GFP_FREE_T) {
+			ppm_kfree(size);
+			return VM_FAULT_NOPAGE;
+		} else {
+			/* Executes none */
+		}
+
+	} else {
+		/* Executes none, is jump to the instruction of 
+		   'ret = sanitize_fault_flags(vma, &flags)' and next 
+		 */		
+	}
 
 	ret = sanitize_fault_flags(vma, &flags);
 	if (ret)
