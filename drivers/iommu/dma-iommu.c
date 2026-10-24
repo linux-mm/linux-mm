@@ -18,6 +18,7 @@
 #include <linux/gfp.h>
 #include <linux/huge_mm.h>
 #include <linux/iommu.h>
+#include <linux/dma-pmd.h>
 #include <linux/iommu-dma.h>
 #include <linux/iova.h>
 #include <linux/irq.h>
@@ -36,6 +37,7 @@
 #include <trace/events/swiotlb.h>
 
 #include "dma-iommu.h"
+#include "dma-pmd-priv.h"
 #include "iommu-pages.h"
 
 struct iommu_dma_msi_page {
@@ -75,6 +77,8 @@ struct iommu_dma_cookie {
 	struct iommu_domain *fq_domain;
 	/* Options for dma-iommu use */
 	struct iommu_dma_options options;
+	/* IOVA window reserved for DMA_PMD pages. Nothing else can go here. */
+	struct dma_pmd_window win_dma_pmd;
 };
 
 struct iommu_dma_msi_cookie {
@@ -426,6 +430,12 @@ void iommu_put_dma_cookie(struct iommu_domain *domain)
 	struct iommu_dma_cookie *cookie = domain->iova_cookie;
 	struct iommu_dma_msi_page *msi, *tmp;
 
+	/*
+	 * Drop any DMA_PMD mappings cached against this domain before its
+	 * page tables and IOVA domain go away.
+	 */
+	dma_pmd_domain_release(domain);
+
 	if (cookie->iovad.granule) {
 		iommu_dma_free_fq(cookie);
 		put_iova_domain(&cookie->iovad);
@@ -732,7 +742,7 @@ static int iommu_dma_init_domain(struct iommu_domain *domain, struct device *dev
  *
  * Return: corresponding IOMMU API page protection flags
  */
-static int dma_info_to_prot(enum dma_data_direction dir, bool coherent,
+int dma_info_to_prot(enum dma_data_direction dir, bool coherent,
 		     unsigned long attrs)
 {
 	int prot;
@@ -1214,6 +1224,39 @@ static inline size_t iova_unaligned(struct iova_domain *iovad, phys_addr_t phys,
 	return iova_offset(iovad, phys | size);
 }
 
+/**
+ * dma_pmd_dma_window - This domain's IOVA window for DMA_PMD
+ * @domain: Domain to look at
+ *
+ * For the DMA_PMD code's slow paths, which need a window but do not have the
+ * cookie layout. The DMA map path is handed the pointer by its caller instead,
+ * so this is never called at map frequency.
+ *
+ * Return: the window, or NULL if @domain is NULL or does not carry a DMA-IOVA
+ * cookie. The cookie shares a union with the MSI, iommufd and fault-handler
+ * ones, so the type has to be tested rather than the pointer. An identity,
+ * passthrough, or MSI-only domain has no window, and a device can be moved to
+ * one after its pool was created (e.g. via sysfs domain type changes or VFIO
+ * attachment).
+ */
+struct dma_pmd_window *dma_pmd_dma_window(struct iommu_domain *domain)
+{
+	/*
+	 * Also decline in kdump kernels (iommu_deferred_attach_enabled);
+	 * dma_pmd_dma_iovad() uses this check so win->size stays 0.
+	 */
+	if (static_branch_unlikely(&iommu_deferred_attach_enabled) ||
+	    !domain || domain->cookie_type != IOMMU_COOKIE_DMA_IOVA)
+		return NULL;
+
+	return &domain->iova_cookie->win_dma_pmd;
+}
+
+struct iova_domain *dma_pmd_dma_iovad(struct iommu_domain *domain)
+{
+	return dma_pmd_dma_window(domain) ? &domain->iova_cookie->iovad : NULL;
+}
+
 dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 		enum dma_data_direction dir, unsigned long attrs)
 {
@@ -1243,6 +1286,14 @@ dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 		arch_sync_dma_flush();
 	}
 
+	if (dma_is_pmd_phys(phys)) {
+		iova = dma_pmd_dma_map_phys(dev, domain,
+					    &domain->iova_cookie->win_dma_pmd,
+					    phys, size, prot, dma_mask);
+		if (likely(iova != DMA_MAPPING_ERROR))
+			return iova;
+	}
+
 	iova = __iommu_dma_map(dev, phys, size, prot, dma_mask);
 	if (iova == DMA_MAPPING_ERROR &&
 	    !(attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT)))
@@ -1253,14 +1304,19 @@ dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 void iommu_dma_unmap_phys(struct device *dev, dma_addr_t dma_handle,
 		size_t size, enum dma_data_direction dir, unsigned long attrs)
 {
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);
 	phys_addr_t phys;
+
+	/* DMA_PMD mapped buffer: nothing to unmap or release. */
+	if (dma_pmd_window_owns(&domain->iova_cookie->win_dma_pmd, dma_handle))
+		return;
 
 	if (attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT)) {
 		__iommu_dma_unmap(dev, dma_handle, size);
 		return;
 	}
 
-	phys = iommu_iova_to_phys(iommu_get_dma_domain(dev), dma_handle);
+	phys = iommu_iova_to_phys(domain, dma_handle);
 	if (WARN_ON(!phys))
 		return;
 
@@ -1456,6 +1512,18 @@ int iommu_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 			 */
 			break;
 		case PCI_P2PDMA_MAP_NONE:
+			if (dma_is_pmd_phys(sg_phys(s))) {
+				iova = dma_pmd_dma_map_phys(dev, domain,
+							    &cookie->win_dma_pmd,
+							    sg_phys(s), s_length,
+							    prot, dma_get_mask(dev));
+				if (likely(iova != DMA_MAPPING_ERROR)) {
+					s->dma_address = iova;
+					sg_dma_len(s) = s_length;
+					sg_dma_mark_bus_address(s);
+					continue;
+				}
+			}
 			break;
 		case PCI_P2PDMA_MAP_BUS_ADDR:
 			/*
