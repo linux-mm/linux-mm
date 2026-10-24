@@ -1319,6 +1319,7 @@ nfsd_write_dio_iters_init(struct nfsd_file *nf, struct bio_vec *bvec,
 	size_t prefix, middle, suffix;
 	loff_t offset = iocb->ki_pos;
 	unsigned int nsegs = 0;
+	unsigned long cut;
 
 	/*
 	 * Check if direct I/O is feasible for this write request.
@@ -1329,9 +1330,24 @@ nfsd_write_dio_iters_init(struct nfsd_file *nf, struct bio_vec *bvec,
 	    unlikely(total < max(offset_align, mem_align)))
 		goto no_dio;
 
-	prefix_end = round_up(offset, offset_align);
 	orig_end = offset + total;
-	middle_end = round_down(orig_end, offset_align);
+
+	/*
+	 * The direct middle invalidates the page cache over its range, so it
+	 * must not share a folio with a buffered end.  An aligned end needs no
+	 * buffered segment.  A misaligned one is cut on a boundary of the
+	 * smallest folio the mapping allows, even where the offset alignment
+	 * is finer.  A WRITE may end at OFFSET_MAX, so the prefix is sized as
+	 * a distance rather than by rounding @offset up, which could wrap.
+	 */
+	cut = max_t(unsigned long, offset_align,
+		    mapping_min_folio_nrbytes(nf->nf_file->f_mapping));
+	prefix_end = offset;
+	if (!IS_ALIGNED(offset, offset_align))
+		prefix_end += min_t(loff_t, cut - (offset & (cut - 1)), total);
+	middle_end = orig_end;
+	if (!IS_ALIGNED(orig_end, offset_align))
+		middle_end = max(round_down(orig_end, cut), prefix_end);
 
 	prefix = prefix_end - offset;
 	middle = middle_end - prefix_end;
