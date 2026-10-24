@@ -4552,6 +4552,22 @@ bool __folio_unqueue_deferred_split(struct folio *folio)
 	return unqueued;	/* useful for debug warnings */
 }
 
+/*
+ * At the sysctl maximum the user tolerates any number of zero-filled pages,
+ * so no folio is ever underused.
+ */
+static bool thp_underused_never(unsigned long max_ptes_none)
+{
+	return max_ptes_none == HPAGE_PMD_NR - 1;
+}
+
+/*
+ * Smallest mTHP folio that is queued for underused splitting. Kept
+ * conservative, as small folios are unlikely to free enough memory to be
+ * worth queueing and scanning.
+ */
+#define THP_UNDERUSED_MIN_SIZE	SZ_2M
+
 /* partially_mapped=false won't clear PG_partially_mapped folio flag */
 void deferred_split_folio(struct folio *folio, bool partially_mapped)
 {
@@ -4567,8 +4583,24 @@ void deferred_split_folio(struct folio *folio, bool partially_mapped)
 	if (folio_order(folio) <= 1)
 		return;
 
-	if (!partially_mapped && !split_underused_thp)
-		return;
+	if (!partially_mapped) {
+		if (!split_underused_thp)
+			return;
+		/*
+		 * Nothing will ever split this folio for being underused, so
+		 * keep it off the queue entirely rather than paying for the
+		 * list_lru lock here and a shrinker scan later.
+		 */
+		if (thp_underused_never(khugepaged_max_ptes_none))
+			return;
+		/*
+		 * Keep queueing PMD-sized folios as before, even where the PMD
+		 * size is below the minimum (eg 1M on s390).
+		 */
+		if (folio_size(folio) < THP_UNDERUSED_MIN_SIZE &&
+		    !is_pmd_order(folio_order(folio)))
+			return;
+	}
 
 	/*
 	 * Exclude swapcache: originally to avoid a corrupt deferred split
@@ -4613,25 +4645,35 @@ static unsigned long deferred_split_count(struct shrinker *shrink,
 
 static bool thp_underused(struct folio *folio)
 {
-	int num_zero_pages = 0, num_filled_pages = 0;
-	int i;
+	const unsigned long nr_pages = folio_nr_pages(folio);
+	unsigned long num_zero_pages = 0, num_filled_pages = 0;
+	unsigned long max_ptes_none = khugepaged_max_ptes_none;
+	unsigned long i;
 
-	if (khugepaged_max_ptes_none == HPAGE_PMD_NR - 1)
+	if (thp_underused_never(max_ptes_none))
 		return false;
 
 	if (folio_contain_hwpoisoned_page(folio))
 		return false;
 
-	for (i = 0; i < folio_nr_pages(folio); i++) {
+	/*
+	 * khugepaged_max_ptes_none is a number of pages out of HPAGE_PMD_NR.
+	 * Scale it to this folio's size (rounding up so that the folio is never
+	 * split when fewer than the configured fraction of its pages are
+	 * zero-filled).
+	 */
+	max_ptes_none = DIV_ROUND_UP(max_ptes_none * nr_pages, HPAGE_PMD_NR);
+
+	for (i = 0; i < nr_pages; i++) {
 		if (pages_identical(folio_page(folio, i), ZERO_PAGE(0))) {
-			if (++num_zero_pages > khugepaged_max_ptes_none)
+			if (++num_zero_pages > max_ptes_none)
 				return true;
 		} else {
 			/*
 			 * Another path for early exit once the number
 			 * of non-zero filled pages exceeds threshold.
 			 */
-			if (++num_filled_pages >= HPAGE_PMD_NR - khugepaged_max_ptes_none)
+			if (++num_filled_pages >= nr_pages - max_ptes_none)
 				return false;
 		}
 	}
