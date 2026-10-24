@@ -176,6 +176,7 @@ static int sysvipc_sem_proc_show(struct seq_file *s, void *it);
 
 #define SEMMSL_FAST	256 /* 512 bytes on stack */
 #define SEMOPM_FAST	64  /* ~ 372 bytes on stack */
+#define SEMOPM_NOACCOUNT	1000 /* ~ 2 pages for struct sembuf */
 
 /*
  * Switching from the mode suitable for simple ops
@@ -248,6 +249,7 @@ static int sysvipc_sem_proc_show(struct seq_file *s, void *it);
 
 void sem_init_ns(struct ipc_namespace *ns)
 {
+	mutex_init(&ns->sem_ctls_mutex);
 	ns->sc_semmsl = SEMMSL;
 	ns->sc_semmns = SEMMNS;
 	ns->sc_semopm = SEMOPM;
@@ -2234,7 +2236,10 @@ static long do_semtimedop(int semid, struct sembuf __user *tsops,
 		return -EINVAL;
 
 	if (nsops > SEMOPM_FAST) {
-		sops = kvmalloc_objs(*sops, nsops);
+		gfp_t gfp = nsops > SEMOPM_NOACCOUNT ?
+			GFP_KERNEL_ACCOUNT : GFP_KERNEL;
+
+		sops = kvmalloc_objs(*sops, nsops, gfp);
 		if (sops == NULL)
 			return -ENOMEM;
 	}
