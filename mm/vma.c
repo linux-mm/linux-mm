@@ -1139,6 +1139,7 @@ struct vm_area_struct *vma_merge_new_range(struct vma_merge_struct *vmg)
 {
 	struct vm_area_struct *prev = vmg->prev;
 	struct vm_area_struct *next = vmg->next;
+	unsigned long start = vmg->start;
 	unsigned long end = vmg->end;
 	bool can_merge_left, can_merge_right;
 
@@ -1197,6 +1198,10 @@ struct vm_area_struct *vma_merge_new_range(struct vma_merge_struct *vmg)
 		vmg->state = VMA_MERGE_SUCCESS;
 		return vmg->target;
 	}
+
+	/* Undo the vma_prev() above so the caller can insert a new VMA. */
+	if (can_merge_left && !vmg->just_expand)
+		vma_iter_set(vmg->vmi, start);
 
 	return NULL;
 }
