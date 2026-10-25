@@ -3500,7 +3500,7 @@ shmem_write_end(const struct kiocb *iocb, struct address_space *mapping,
 {
 	struct inode *inode = mapping->host;
 
-	if (pos + copied > inode->i_size)
+	if (copied && pos + copied > inode->i_size)
 		i_size_write(inode, pos + copied);
 
 	if (!folio_test_uptodate(folio)) {
