@@ -4106,7 +4106,8 @@ static int __folio_freeze_split_anon(struct folio *folio,
 out_no_split:
 	local_irq_enable();
 	if (anon_vma) {
-		if (!ret && !folio_is_device_private(folio))
+		if (!ret && !folio_is_device_private(folio) &&
+		    split_underused_thp)
 			ttu_flags = TTU_USE_SHARED_ZEROPAGE;
 		remap_anon_folio(folio, 1 << old_order, ttu_flags);
 	}
