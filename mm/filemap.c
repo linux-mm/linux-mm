@@ -4502,9 +4502,18 @@ ssize_t __generic_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		 */
 		if (ret < 0 || !iov_iter_count(from) || IS_DAX(inode))
 			return ret;
+		if ((iocb->ki_flags & IOCB_NOWAIT) &&
+		    atomic_read(&inode->i_dio_count))
+			return ret ?: -EAGAIN;
+		inode_dio_wait(inode);
 		return direct_write_fallback(iocb, from, ret,
 				generic_perform_write(iocb, from));
 	}
+
+	if ((iocb->ki_flags & IOCB_NOWAIT) &&
+	    atomic_read(&inode->i_dio_count))
+		return -EAGAIN;
+	inode_dio_wait(inode);
 
 	return generic_perform_write(iocb, from);
 }
