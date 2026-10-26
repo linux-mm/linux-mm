@@ -3865,7 +3865,8 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 		DECLARE_WAIT_QUEUE_HEAD_ONSTACK(shmem_falloc_waitq);
 
 		/* protected by i_rwsem */
-		if (info->seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE)) {
+		if (info->seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE |
+				   F_SEAL_PUNCH_HOLE)) {
 			error = -EPERM;
 			goto out;
 		}
