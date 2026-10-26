@@ -474,12 +474,21 @@ static inline int copy_mc_user_highpage(struct page *to, struct page *from,
 					unsigned long vaddr, struct vm_area_struct *vma)
 {
 	copy_user_highpage(to, from, vaddr, vma);
+	/*
+	 * The flag can be set while the copy runs, so check after it;
+	 * a flag landing later can no longer have corrupted this copy.
+	 */
+	if (folio_contain_hwpoisoned_page(page_folio(from)))
+		return PAGE_SIZE;
 	return 0;
 }
 
 static inline int copy_mc_highpage(struct page *to, struct page *from)
 {
 	copy_highpage(to, from);
+	/* Same reasoning as in copy_mc_user_highpage(). */
+	if (folio_contain_hwpoisoned_page(page_folio(from)))
+		return PAGE_SIZE;
 	return 0;
 }
 #endif
