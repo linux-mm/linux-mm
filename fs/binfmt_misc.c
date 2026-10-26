@@ -41,6 +41,9 @@
 
 #include "internal.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/binfmt_misc.h>
+
 /* Entry status and match type bit numbers. */
 enum binfmt_misc_entry_bits {
 	MISC_FMT_ENABLED_BIT	= 0,
@@ -650,6 +653,11 @@ static int load_misc_binary(struct linux_binprm *bprm)
 		return PTR_ERR(interpreter);
 
 	flags = entry_invocation_flags(fmt, bprm);
+
+	trace_binfmt_misc_select(bprm, interpreter,
+				 test_bit(MISC_FMT_BPF_BIT, &fmt->flags) ?
+				 fmt->bpf_ops->name : "",
+				 flags & MISC_FMT_INVOCATION_FLAGS);
 
 	/* No argv is built for a staged argument to land in. */
 	if ((flags & (MISC_FMT_LOADER | MISC_FMT_TRANSPARENT)) &&
