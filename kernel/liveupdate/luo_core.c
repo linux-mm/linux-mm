@@ -66,9 +66,13 @@
 
 static struct {
 	bool enabled;
-	struct luo_ser *luo_ser_out;
+	struct luo_ser_wrap *luo_ser_out;
 	u64 liveupdate_num;
 } luo_global;
+
+static const bool luo_core_supported_feats[LUO_CORE_FEAT_MAX] = {
+	[LUO_CORE_FEAT_CORE] = true,
+};
 
 /*
  * luo_register_rwlock - Protects registration of file handlers and FLBs.
@@ -84,7 +88,8 @@ early_param("liveupdate", early_liveupdate_param);
 static int __init luo_early_startup(void)
 {
 	phys_addr_t luo_ser_phys;
-	struct luo_ser *luo_ser;
+	struct luo_ser_hdr *hdr;
+	const struct luo_ser *ser;
 	size_t len;
 	int err;
 
@@ -107,31 +112,38 @@ static int __init luo_early_startup(void)
 		return 0;
 	}
 
-	if (len < sizeof(*luo_ser)) {
-		pr_err("LUO state is too small (%zu < %zu)\n", len, sizeof(*luo_ser));
-		return -EINVAL;
+	hdr = phys_to_virt(luo_ser_phys);
+	if (len < sizeof(*hdr) || hdr->size > len) {
+		pr_err("LUO state size invalid (source kernel header size=%u, KHO len=%zu)\n",
+		       len >= sizeof(*hdr) ? hdr->size : 0, len);
+		err = -EINVAL;
+		goto out_free_ser;
 	}
 
-	luo_ser = phys_to_virt(luo_ser_phys);
-	if (strncmp(luo_ser->compatible, LUO_ABI_COMPATIBLE, LUO_ABI_COMPAT_LEN)) {
-		pr_err("LUO state is incompatible with '%s'\n", LUO_ABI_COMPATIBLE);
-		return -EINVAL;
+	/* Only the core fields are needed; later fields are checked per feature. */
+	err = luo_ser_hdr_validate(hdr, luo_core_supported_feats,
+				   ARRAY_SIZE(luo_core_supported_feats));
+	if (err) {
+		pr_err("LUO state feature header validation failed (size=%u, nr_features=%u): %pe\n",
+		       hdr->size, hdr->nr_features, ERR_PTR(err));
+		goto out_free_ser;
 	}
 
-	luo_global.liveupdate_num = luo_ser->liveupdate_num;
+	ser = luo_ser_payload(hdr);
+	luo_global.liveupdate_num = ser->liveupdate_num;
 	pr_info("Retrieved live update data, liveupdate number: %lld\n",
 		luo_global.liveupdate_num);
 
-	err = luo_session_setup_incoming(luo_ser->sessions_pa);
+	err = luo_session_setup_incoming(ser->sessions_pa);
 	if (err)
 		goto out_free_ser;
 
-	luo_flb_setup_incoming(luo_ser->flbs_pa);
+	luo_flb_setup_incoming(ser->flbs_pa);
 
 	err = 0;
 
 out_free_ser:
-	kho_restore_free(luo_ser);
+	kho_restore_free(hdr);
 	return err;
 }
 
@@ -153,34 +165,36 @@ early_initcall(liveupdate_early_init);
 /* Called during boot to create outgoing LUO state */
 static int __init luo_state_setup(void)
 {
-	struct luo_ser *luo_ser;
+	struct luo_ser_wrap *wrap;
 	int err;
 
-	luo_ser = kho_alloc_preserve(sizeof(*luo_ser));
-	if (IS_ERR(luo_ser)) {
+	wrap = kho_alloc_preserve(sizeof(*wrap));
+	if (IS_ERR(wrap)) {
 		pr_err("failed to allocate/preserve LUO state memory\n");
-		return PTR_ERR(luo_ser);
+		return PTR_ERR(wrap);
 	}
 
-	strscpy(luo_ser->compatible, LUO_ABI_COMPATIBLE, sizeof(luo_ser->compatible));
-	luo_ser->liveupdate_num = luo_global.liveupdate_num + 1;
+	luo_ser_wrap_init(wrap);
+	luo_ser_set_feat(&wrap->hdr, LUO_CORE_FEAT_CORE, LUO_FEAT_REQUIRED);
 
-	luo_session_setup_outgoing(&luo_ser->sessions_pa);
+	wrap->ser.liveupdate_num = luo_global.liveupdate_num + 1;
 
-	err = luo_flb_setup_outgoing(&luo_ser->flbs_pa);
+	luo_session_setup_outgoing(&wrap->ser.sessions_pa);
+
+	err = luo_flb_setup_outgoing(&wrap->ser.flbs_pa);
 	if (err)
 		goto exit_free_luo_ser;
 
-	err = kho_add_subtree(LUO_KHO_ENTRY_NAME, luo_ser, sizeof(*luo_ser));
+	err = kho_add_subtree(LUO_KHO_ENTRY_NAME, wrap, sizeof(*wrap));
 	if (err)
 		goto exit_free_luo_ser;
 
-	luo_global.luo_ser_out = luo_ser;
+	luo_global.luo_ser_out = wrap;
 
 	return 0;
 
 exit_free_luo_ser:
-	kho_unpreserve_free(luo_ser);
+	kho_unpreserve_free(wrap);
 	pr_err("failed to prepare LUO state: %d\n", err);
 
 	return err;
