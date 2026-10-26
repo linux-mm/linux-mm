@@ -359,11 +359,14 @@ int vmap_page_range(unsigned long addr, unsigned long end,
 
 	err = vmap_range_noflush(addr, end, phys_addr, pgprot_nx(prot),
 				 ioremap_max_page_shift);
-	flush_cache_vmap(addr, end);
 	if (!err)
 		err = kmsan_ioremap_page_range(addr, end, phys_addr, prot,
 					       ioremap_max_page_shift);
-	return err;
+	if (err)
+		return err;
+
+	flush_cache_vmap(addr, end);
+	return 0;
 }
 
 int ioremap_page_range(unsigned long addr, unsigned long end,
@@ -745,8 +748,11 @@ static int __vmap_pages_range(unsigned long addr, unsigned long end,
 	int err;
 
 	err = vmap_pages_range_noflush(addr, end, prot, pages, page_shift, gfp_mask);
+	if (err)
+		return err;
+
 	flush_cache_vmap(addr, end);
-	return err;
+	return 0;
 }
 
 /**
