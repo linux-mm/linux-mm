@@ -725,39 +725,51 @@ static void rdma_umap_close(struct vm_area_struct *vma)
 
 /*
  * Once the zap_special_vma_range has been called touches to the VMA will come here and
- * we return a dummy writable zero page for all the pfns.
+ * we map a dummy page for all the pfns.
  */
 static vm_fault_t rdma_umap_fault(struct vm_fault *vmf)
 {
 	struct ib_uverbs_file *ufile = vmf->vma->vm_file->private_data;
 	struct rdma_umap_priv *priv = vmf->vma->vm_private_data;
 	vm_fault_t ret = 0;
+	struct page *page;
 
 	if (!priv)
 		return VM_FAULT_SIGBUS;
-
-	/* Read only pages can just use the system zero page. */
-	if (!(vmf->vma->vm_flags & (VM_WRITE | VM_MAYWRITE))) {
-		vmf->page = ZERO_PAGE(vmf->address);
-		get_page(vmf->page);
-		return 0;
-	}
 
 	mutex_lock(&ufile->umap_lock);
 	if (!ufile->disassociate_page)
 		ufile->disassociate_page =
 			alloc_pages(vmf->gfp_mask | __GFP_ZERO, 0);
 
-	if (ufile->disassociate_page) {
-		/*
-		 * This VMA is forced to always be shared so this doesn't have
-		 * to worry about COW.
-		 */
-		vmf->page = ufile->disassociate_page;
-		get_page(vmf->page);
-	} else {
+	page = ufile->disassociate_page;
+	if (!page) {
 		ret = VM_FAULT_SIGBUS;
+		goto out;
 	}
+
+	/* Make sure the page is usable, like what __do_fault() does */
+	if (PageHWPoison(page)) {
+		ret = VM_FAULT_HWPOISON;
+		goto out;
+	}
+
+	/*
+	 * VMAs that cannot become writable map the page as a raw pfn, like
+	 * the device memory it replaces. The page lives as long as the file.
+	 */
+	if (!(vmf->vma->vm_flags & (VM_WRITE | VM_MAYWRITE))) {
+		ret = vmf_insert_pfn(vmf->vma, vmf->address, page_to_pfn(page));
+		goto out;
+	}
+
+	/*
+	 * This VMA is forced to always be shared so this doesn't have
+	 * to worry about COW.
+	 */
+	vmf->page = page;
+	get_page(page);
+out:
 	mutex_unlock(&ufile->umap_lock);
 
 	return ret;
