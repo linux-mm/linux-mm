@@ -557,6 +557,9 @@ static int vmap_pages_pte_range(pmd_t *pmd, unsigned long addr,
 	int err = 0;
 	pte_t *pte;
 
+	if (WARN_ON_ONCE(!PAGE_ALIGNED(end - addr)))
+		return -EINVAL;
+
 	/*
 	 * nr is a running index into the array which helps higher level
 	 * callers keep track of where we're up to.
