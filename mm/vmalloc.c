@@ -393,6 +393,11 @@ static void vunmap_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	pte_t ptent;
 	unsigned long size = PAGE_SIZE;
 
+	if (WARN_ON_ONCE(!PAGE_ALIGNED(end - addr)))
+		end = addr + PAGE_ALIGN_DOWN(end - addr);
+	if (end == addr)
+		return;
+
 	pte = pte_offset_kernel(pmd, addr);
 	lazy_mmu_mode_enable();
 
