@@ -1426,6 +1426,36 @@ static void invalidate_reclaim_iterators(struct mem_cgroup *dead_memcg)
 						dead_memcg);
 }
 
+/*
+ * Take one task per thread group: the leader, or the first live thread once
+ * the leader is exiting, since migrating the group leaves an exiting leader
+ * behind.  Exiting threads are skipped, as one left behind may belong to a
+ * group that has moved out.
+ */
+static bool mem_cgroup_scan_skip(struct task_struct *task)
+{
+	struct task_struct *leader = task->group_leader;
+	struct task_struct *t;
+	bool skip = true;
+
+	if (READ_ONCE(task->flags) & PF_EXITING)
+		return true;
+	if (task == leader)
+		return false;
+	if (!(READ_ONCE(leader->flags) & PF_EXITING))
+		return true;
+
+	rcu_read_lock();
+	for_each_thread(leader, t) {
+		if (!(READ_ONCE(t->flags) & PF_EXITING)) {
+			skip = t != task;
+			break;
+		}
+	}
+	rcu_read_unlock();
+	return skip;
+}
+
 /**
  * mem_cgroup_scan_tasks - iterate over tasks of a memory cgroup hierarchy
  * @memcg: hierarchy root
@@ -1451,9 +1481,10 @@ void mem_cgroup_scan_tasks(struct mem_cgroup *memcg,
 		struct css_task_iter it;
 		struct task_struct *task;
 
-		css_task_iter_start(&iter->css, CSS_TASK_ITER_PROCS, &it);
+		css_task_iter_start(&iter->css, 0, &it);
 		while (!ret && (task = css_task_iter_next(&it))) {
-			ret = fn(task, arg);
+			if (!mem_cgroup_scan_skip(task))
+				ret = fn(task, arg);
 			/* Avoid potential softlockup warning */
 			cond_resched();
 		}
