@@ -2394,6 +2394,8 @@ int memory_failure(unsigned long pfn, int flags)
 	if (!sysctl_memory_failure_recovery)
 		panic("Memory failure on page %lx", pfn);
 
+	/* Keep the page online from the check below until we are done */
+	get_online_mems();
 	mutex_lock(&mf_mutex);
 
 	if (!(flags & MF_SW_SIMULATED))
@@ -2608,11 +2610,13 @@ try_again:
 identify_page_state:
 	res = identify_page_state(pfn, p, page_flags);
 	mutex_unlock(&mf_mutex);
+	put_online_mems();
 	return res;
 unlock_page:
 	folio_unlock(folio);
 unlock_mutex:
 	mutex_unlock(&mf_mutex);
+	put_online_mems();
 	return res;
 }
 EXPORT_SYMBOL_GPL(memory_failure);
@@ -2742,9 +2746,12 @@ int unpoison_memory(unsigned long pfn)
 	static DEFINE_RATELIMIT_STATE(unpoison_rs, DEFAULT_RATELIMIT_INTERVAL,
 					DEFAULT_RATELIMIT_BURST);
 
+	get_online_mems();
 	p = pfn_to_online_page(pfn);
-	if (!p)
+	if (!p) {
+		put_online_mems();
 		return -EIO;
+	}
 	folio = page_folio(p);
 
 	mutex_lock(&mf_mutex);
@@ -2833,6 +2840,7 @@ unlock_mutex:
 		unpoison_pr_info("%#lx: software-unpoisoned page\n",
 				 page_to_pfn(p), &unpoison_rs);
 	}
+	put_online_mems();
 	return ret;
 }
 EXPORT_SYMBOL(unpoison_memory);
@@ -2974,17 +2982,21 @@ int soft_offline_page(unsigned long pfn, int flags)
 		return -ENXIO;
 	}
 
-	/* Only online pages can be soft-offlined (esp., not ZONE_DEVICE). */
-	page = pfn_to_online_page(pfn);
-	if (!page) {
-		put_ref_page(pfn, flags);
-		return -EIO;
-	}
-
 	if (!sysctl_enable_soft_offline) {
 		pr_info_once("disabled by /proc/sys/vm/enable_soft_offline\n");
 		put_ref_page(pfn, flags);
 		return -EOPNOTSUPP;
+	}
+
+	/* Keep the page online from the check below until we are done */
+	get_online_mems();
+
+	/* Only online pages can be soft-offlined (esp., not ZONE_DEVICE). */
+	page = pfn_to_online_page(pfn);
+	if (!page) {
+		put_online_mems();
+		put_ref_page(pfn, flags);
+		return -EIO;
 	}
 
 	mutex_lock(&mf_mutex);
@@ -2993,19 +3005,19 @@ int soft_offline_page(unsigned long pfn, int flags)
 		pr_info("%#lx: page already poisoned\n", pfn);
 		put_ref_page(pfn, flags);
 		mutex_unlock(&mf_mutex);
+		put_online_mems();
 		return 0;
 	}
 
 retry:
-	get_online_mems();
 	ret = get_hwpoison_page(page, flags | MF_SOFT_OFFLINE);
-	put_online_mems();
 
 	if (hwpoison_filter(page)) {
 		if (ret > 0)
 			put_page(page);
 
 		mutex_unlock(&mf_mutex);
+		put_online_mems();
 		return -EOPNOTSUPP;
 	}
 
@@ -3023,6 +3035,7 @@ retry:
 	}
 
 	mutex_unlock(&mf_mutex);
+	put_online_mems();
 
 	return ret;
 }
