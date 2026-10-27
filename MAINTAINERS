@@ -28171,8 +28171,10 @@ M:	Hugh Dickins <hughd@google.com>
 R:	Baolin Wang <baolin.wang@linux.alibaba.com>
 L:	linux-mm@kvack.org
 S:	Maintained
+F:	Documentation/trace/events-shmem.rst
 F:	include/linux/memfd.h
 F:	include/linux/shmem_fs.h
+F:	include/trace/events/shmem.h
 F:	mm/memfd.c
 F:	mm/shmem.c
 F:	mm/shmem_quota.c
