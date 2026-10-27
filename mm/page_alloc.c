@@ -7250,6 +7250,16 @@ static void __free_contig_frozen_range(unsigned long pfn, unsigned long nr_pages
 	__free_contig_range_common(pfn, nr_pages, /* is_frozen= */ true);
 }
 
+static bool pfn_range_online(unsigned long start, unsigned long end)
+{
+	unsigned long pfn;
+
+	for (pfn = start; pfn < end; pfn += pageblock_nr_pages)
+		if (!pfn_to_online_page(pfn))
+			return false;
+	return true;
+}
+
 /**
  * alloc_contig_frozen_range() -- tries to allocate given range of frozen pages
  * @start:	start PFN to allocate
@@ -7283,7 +7293,6 @@ int alloc_contig_frozen_range_noprof(unsigned long start, unsigned long end,
 	struct compact_control cc = {
 		.nr_migratepages = 0,
 		.order = -1,
-		.zone = page_zone(pfn_to_page(start)),
 		.mode = MIGRATE_SYNC,
 		.ignore_skip_hint = true,
 		.no_set_skip_hint = true,
@@ -7328,13 +7337,29 @@ int alloc_contig_frozen_range_noprof(unsigned long start, unsigned long end,
 	 */
 
 	/*
-	 * On failure this has undone its own isolation, and any other
-	 * isolated blocks in the range belong to someone else, e.g. offline.
+	 * Part of the range may go offline under us.  Offline cannot poison
+	 * the memmap while we hold pfn_walk, but isolation silently skips
+	 * blocks that are already offline, so check before and after.  On
+	 * failure, start_isolate_page_range() has undone its own isolation,
+	 * and any other isolated blocks belong to someone else, e.g. offline.
 	 */
-	ret = start_isolate_page_range(start, end, mode);
+	scoped_guard(pfn_walk) {
+		unsigned long first = pageblock_start_pfn(start);
+		unsigned long last = pageblock_align(end);
+
+		if (!pfn_range_online(first, last))
+			return -EBUSY;
+		ret = start_isolate_page_range(start, end, mode);
+		if (!ret && !pfn_range_online(first, last)) {
+			/* Every online isolated block in the range is ours */
+			undo_isolate_page_range(start, end);
+			ret = -EBUSY;
+		}
+	}
 	if (ret)
 		return ret;
 
+	cc.zone = page_zone(pfn_to_page(start));
 	drain_all_pages(cc.zone);
 
 	/*
