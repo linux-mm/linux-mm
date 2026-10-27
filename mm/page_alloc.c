@@ -357,6 +357,21 @@ static __always_inline bool is_standalone_pb_bit(enum pageblock_bits pb_bit)
 	return pb_bit >= PB_compact_skip && pb_bit < __NR_PAGEBLOCK_BITS;
 }
 
+/* Memory hotplug can resize the zone while we look at its span */
+static bool __maybe_unused zone_spans_pfn_stable(struct zone *zone,
+						 unsigned long pfn)
+{
+	unsigned int seq;
+	bool ret;
+
+	do {
+		seq = zone_span_seqbegin(zone);
+		ret = zone_spans_pfn(zone, pfn);
+	} while (zone_span_seqretry(zone, seq));
+
+	return ret;
+}
+
 static __always_inline void
 get_pfnblock_bitmap_bitidx(const struct page *page, unsigned long pfn,
 			   unsigned long **bitmap_word, unsigned long *bitidx)
@@ -370,7 +385,7 @@ get_pfnblock_bitmap_bitidx(const struct page *page, unsigned long pfn,
 	BUILD_BUG_ON(NR_PAGEBLOCK_BITS != 4);
 #endif
 	BUILD_BUG_ON(__MIGRATE_TYPE_END > PAGEBLOCK_MIGRATETYPE_MASK);
-	VM_BUG_ON_PAGE(!zone_spans_pfn(page_zone(page), pfn), page);
+	VM_BUG_ON_PAGE(!zone_spans_pfn_stable(page_zone(page), pfn), page);
 
 	bitmap = get_pageblock_bitmap(page, pfn);
 	*bitidx = pfn_to_bitidx(page, pfn);
