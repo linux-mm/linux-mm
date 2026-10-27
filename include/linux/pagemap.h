@@ -209,6 +209,7 @@ enum mapping_flags {
 	AS_WRITEBACK_MAY_DEADLOCK_ON_RECLAIM = 9,
 	AS_KERNEL_FILE = 10,	/* mapping for a fake kernel file that shouldn't
 				   account usage to user cgroups */
+	AS_FROZEN = 11,		/* index -> folio mapping must not change */
 	/* Bits 16-25 are used for FOLIO_ORDER */
 	AS_FOLIO_ORDER_BITS = 5,
 	AS_FOLIO_ORDER_MIN = 16,
@@ -342,6 +343,40 @@ static inline void mapping_set_writeback_may_deadlock_on_reclaim(struct address_
 static inline bool mapping_writeback_may_deadlock_on_reclaim(const struct address_space *mapping)
 {
 	return test_bit(AS_WRITEBACK_MAY_DEADLOCK_ON_RECLAIM, &mapping->flags);
+}
+
+/*
+ * A frozen mapping disallows any change to its i_pages: no folio can be added,
+ * removed, replaced (migration, swap out), split, or collapsed.
+ *
+ * Only the page cache is frozen, not the file. Operations that need to change
+ * the page cache fail with -EBUSY, e.g. a write or fault that needs to allocate
+ * a new folio. Others, like reading or writing (to pages already in i_pages),
+ * still work.
+ *
+ * Locking: the flag is flipped under the i_pages lock. The filesystem must
+ * ensure mapping_set_frozen() doesn't race with a truncate or fallocate, since
+ * those can fail if frozen mid-way.
+ *
+ * The mapping must be unfrozen before the inode is evicted.
+ */
+static inline void mapping_set_frozen(struct address_space *mapping)
+{
+	xa_lock_irq(&mapping->i_pages);
+	set_bit(AS_FROZEN, &mapping->flags);
+	xa_unlock_irq(&mapping->i_pages);
+}
+
+static inline void mapping_clear_frozen(struct address_space *mapping)
+{
+	xa_lock_irq(&mapping->i_pages);
+	clear_bit(AS_FROZEN, &mapping->flags);
+	xa_unlock_irq(&mapping->i_pages);
+}
+
+static inline bool mapping_frozen(const struct address_space *mapping)
+{
+	return test_bit(AS_FROZEN, &mapping->flags);
 }
 
 static inline gfp_t mapping_gfp_mask(const struct address_space *mapping)

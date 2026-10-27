@@ -171,6 +171,8 @@ int truncate_inode_folio(struct address_space *mapping, struct folio *folio)
 {
 	if (folio->mapping != mapping)
 		return -EIO;
+	if (mapping_frozen(mapping))
+		return -EBUSY;
 
 	truncate_cleanup_folio(folio);
 	filemap_remove_folio(folio);
@@ -367,6 +369,8 @@ long mapping_evict_folio(struct address_space *mapping, struct folio *folio)
 		return 0;
 	if (folio_test_dirty(folio) || folio_test_writeback(folio))
 		return 0;
+	if (mapping_frozen(mapping))
+		return 0;
 	/* The refcount will be elevated if any page in the folio is mapped */
 	if (folio_ref_count(folio) >
 			folio_nr_pages(folio) + folio_has_private(folio) + 1)
@@ -419,6 +423,13 @@ void truncate_inode_pages_range(struct address_space *mapping,
 	if (mapping_empty(mapping))
 		return;
 
+	/*
+	 * Callers must not try to truncate a frozen mapping. Filesystems that
+	 * support frozen mappings must refuse shrinking and hole punching
+	 * before getting here.
+	 */
+	if (WARN_ON_ONCE(mapping_frozen(mapping)))
+		return;
 	/*
 	 * 'start' and 'end' always covers the range of folios to be fully
 	 * truncated, with both boundaries aligned inwards to 1 << min_order.
@@ -668,6 +679,9 @@ int folio_unmap_invalidate(struct address_space *mapping, struct folio *folio,
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
 
+	if (mapping_frozen(mapping))
+		return -EBUSY;
+
 	if (folio_mapped(folio))
 		unmap_mapping_folio(folio);
 	BUG_ON(folio_mapped(folio));
@@ -682,7 +696,7 @@ int folio_unmap_invalidate(struct address_space *mapping, struct folio *folio,
 
 	spin_lock(&mapping->host->i_lock);
 	xa_lock_irq(&mapping->i_pages);
-	if (folio_test_dirty(folio))
+	if (folio_test_dirty(folio) || mapping_frozen(mapping))
 		goto failed;
 
 	BUG_ON(folio_has_private(folio));

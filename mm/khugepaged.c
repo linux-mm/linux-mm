@@ -2531,6 +2531,12 @@ xa_unlocked:
 		i_mmap_lock_read(mapping);
 		xas_lock_irq(&xas);
 
+		/* Can't collapse folios in a frozen mapping. */
+		if (mapping_frozen(mapping)) {
+			result = SCAN_FAIL;
+			goto immap_locked;
+		}
+
 		xas_set(&xas, start);
 		for (index = start; index < end; index++) {
 			if (!xas_next(&xas)) {
@@ -2582,6 +2588,12 @@ immap_locked:
 		}
 	} else {
 		xas_lock_irq(&xas);
+		/* Can't collapse folios in a frozen mapping. */
+		if (mapping_frozen(mapping)) {
+			xas_unlock_irq(&xas);
+			result = SCAN_FAIL;
+			goto rollback;
+		}
 	}
 
 	if (is_shmem) {

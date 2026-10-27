@@ -1121,6 +1121,10 @@ int shmem_add_to_page_cache(struct folio *folio,
 	do {
 		iter = swap;
 		xas_lock_irq(&xas);
+		if (unlikely(mapping_frozen(mapping))) {
+			xas_set_err(&xas, -EBUSY);
+			goto unlock;
+		}
 		xas_for_each_conflict(&xas, entry) {
 			/*
 			 * The range must either be empty, or filled with
@@ -1344,6 +1348,10 @@ static void shmem_undo_range(struct inode *inode, loff_t lstart, uoff_t lend,
 
 	if (lend == -1)
 		end = -1;	/* unsigned, so actually very big */
+
+	/* Callers must not try to truncate a frozen mapping. */
+	if (WARN_ON_ONCE(mapping_frozen(mapping)))
+		return;
 
 	if (info->fallocend > start && info->fallocend <= end && !unfalloc)
 		info->fallocend = start;
@@ -1820,6 +1828,10 @@ int shmem_writeout(struct swap_io_ctx *ctx, struct folio *folio,
 	bool split = false;
 
 	if ((info->flags & SHMEM_F_LOCKED) || sbinfo->noswap)
+		goto redirty;
+
+	/* Swapping out would replace the folio in a frozen mapping. */
+	if (mapping_frozen(mapping))
 		goto redirty;
 
 	if (!total_swap_pages)
@@ -2482,6 +2494,13 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 
 	if (softleaf_is_poison_marker(index_entry))
 		return -EIO;
+
+	/*
+	 * Swapping in would change the i_pages of a frozen mapping. A frozen
+	 * mapping should not have swap entries in the first place.
+	 */
+	if (unlikely(mapping_frozen(mapping)))
+		return -EBUSY;
 
 	si = get_swap_device(index_entry);
 	order = shmem_confirm_swap(mapping, index, index_entry);

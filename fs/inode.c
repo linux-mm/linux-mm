@@ -7,6 +7,7 @@
 #include <linux/fs.h>
 #include <linux/filelock.h>
 #include <linux/mm.h>
+#include <linux/pagemap.h>
 #include <linux/backing-dev.h>
 #include <linux/hash.h>
 #include <linux/swap.h>
@@ -817,6 +818,14 @@ static void evict(struct inode *inode)
 	 */
 	inode_wait_for_writeback(inode);
 	spin_unlock(&inode->i_lock);
+
+	/*
+	 * Whoever froze the mapping must hold an inode reference until it is
+	 * unfrozen, so this should never happen. If it does, unfreeze it so
+	 * the final truncate does not leak folios.
+	 */
+	if (WARN_ON_ONCE(mapping_frozen(&inode->i_data)))
+		clear_bit(AS_FROZEN, &inode->i_data.flags);
 
 	if (op->evict_inode) {
 		op->evict_inode(inode);

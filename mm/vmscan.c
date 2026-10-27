@@ -766,6 +766,9 @@ static int __remove_mapping(struct address_space *mapping, struct folio *folio,
 	} else {
 		spin_lock(&mapping->host->i_lock);
 		xa_lock_irq(&mapping->i_pages);
+		/* Can't remove folios from a frozen mapping. */
+		if (mapping_frozen(mapping))
+			goto cannot_free;
 	}
 
 	/*

@@ -138,6 +138,7 @@ static void page_cache_delete(struct address_space *mapping,
 	nr = folio_nr_pages(folio);
 
 	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	VM_WARN_ON_ONCE_FOLIO(mapping_frozen(mapping), folio);
 
 	xas_store(&xas, shadow);
 	xas_init_marks(&xas);
@@ -284,6 +285,7 @@ static void page_cache_delete_batch(struct address_space *mapping,
 	int i = 0;
 	struct folio *folio;
 
+	VM_WARN_ON_ONCE(mapping_frozen(mapping));
 	mapping_set_update(&xas, mapping);
 	xas_for_each(&xas, folio, ULONG_MAX) {
 		if (i >= folio_batch_count(fbatch))
@@ -826,6 +828,7 @@ void replace_page_cache_folio(struct folio *old, struct folio *new)
 	mem_cgroup_replace_folio(old, new);
 
 	xas_lock_irq(&xas);
+	VM_WARN_ON_ONCE_FOLIO(mapping_frozen(mapping), old);
 	xas_store(&xas, new);
 
 	old->mapping = NULL;
@@ -873,6 +876,10 @@ noinline int __filemap_add_folio(struct address_space *mapping,
 		void *entry, *old = NULL;
 
 		xas_lock_irq(&xas);
+		if (unlikely(mapping_frozen(mapping))) {
+			xas_set_err(&xas, -EBUSY);
+			goto unlock;
+		}
 		xas_for_each_conflict(&xas, entry) {
 			old = entry;
 			if (!xa_is_value(entry)) {

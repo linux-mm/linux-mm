@@ -614,10 +614,16 @@ static int __folio_migrate_mapping(struct address_space *mapping,
 	oldzone = folio_zone(folio);
 	newzone = folio_zone(newfolio);
 
-	if (folio_test_swapcache(folio))
+	if (folio_test_swapcache(folio)) {
 		ci = swap_cluster_get_and_lock_irq(folio);
-	else
+	} else {
 		xas_lock_irq(&xas);
+		/* Can't replace folios in a frozen mapping. */
+		if (mapping_frozen(mapping)) {
+			xas_unlock_irq(&xas);
+			return -EBUSY;
+		}
+	}
 
 	if (!folio_ref_freeze(folio, expected_count)) {
 		if (ci)
@@ -750,6 +756,10 @@ int migrate_huge_page_move_mapping(struct address_space *mapping,
 		return rc;
 
 	xas_lock_irq(&xas);
+	if (mapping_frozen(mapping)) {
+		xas_unlock_irq(&xas);
+		return -EBUSY;
+	}
 	if (!folio_ref_freeze(src, expected_count)) {
 		xas_unlock_irq(&xas);
 		return -EAGAIN;

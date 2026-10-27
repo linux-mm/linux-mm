@@ -3948,6 +3948,10 @@ int folio_check_splittable(struct folio *folio, unsigned int new_order,
 	if (!folio->mapping && !is_anon)
 		return -EBUSY;
 
+	/* Splitting would change a frozen mapping. */
+	if (!folio_test_anon(folio) && mapping_frozen(folio->mapping))
+		return -EBUSY;
+
 	/* order-1 is not supported for anonymous THP. */
 	if (is_anon && new_order == 1)
 		return -EINVAL;
@@ -4185,6 +4189,12 @@ static int __folio_freeze_split_file(struct folio *folio,
 		goto fail_mmap_unlock;
 
 	xas_lock_irq(&xas);
+
+	/* Can't change a frozen mapping. */
+	if (mapping_frozen(mapping)) {
+		ret = -EBUSY;
+		goto fail;
+	}
 
 	/*
 	 * Check if the folio is present in page cache.
