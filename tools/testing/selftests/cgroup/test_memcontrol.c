@@ -4,6 +4,8 @@
 #include <linux/limits.h>
 #include <linux/oom.h>
 #include <fcntl.h>
+#include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +20,7 @@
 #include <netdb.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/sysinfo.h>
 
 #include "kselftest.h"
@@ -1417,6 +1420,125 @@ static bool memcg_sockets_disabled(void)
  * The TCP client interleaves reads from the socket with check whether
  * memory.current and memory.stat.sock are similar.
  */
+static int exited_leader_pipe[2];
+
+static int exited_leader_thread(void *arg)
+{
+	char c;
+
+	/* Wait until the process has been moved, then fill memory. */
+	if (read(exited_leader_pipe[0], &c, 1) == 1)
+		alloc_anon(NULL, (void *)MB(100));
+	for (;;)
+		pause();
+	return 0;
+}
+
+/* Start a thread and exit only the thread group leader. */
+static int exited_leader_fn(const char *cgroup, void *arg)
+{
+	const size_t stack_size = 64 * 1024;
+	char *stack = malloc(stack_size);
+
+	if (!stack)
+		return EXIT_FAILURE;
+
+	if (clone(exited_leader_thread, stack + stack_size,
+		  CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+		  CLONE_THREAD | CLONE_SYSVSEM, NULL) < 0)
+		return EXIT_FAILURE;
+
+	syscall(SYS_exit, 0);
+	return EXIT_FAILURE;
+}
+
+/*
+ * Moving a process whose leader has exited leaves the leader behind, so
+ * the destination's cgroup.procs is empty.  Check that the destination's
+ * OOM killer still finds the process using its memory.
+ */
+static int test_memcg_oom_exited_leader(const char *root)
+{
+	char *parent = NULL, *src = NULL, *dst = NULL;
+	int ret = KSFT_FAIL;
+	pid_t pid = -ESRCH;
+	int i;
+
+	if (pipe(exited_leader_pipe))
+		return KSFT_FAIL;
+
+	parent = cg_name(root, "memcg_test_exited_leader");
+	if (!parent)
+		goto cleanup;
+	src = cg_name(parent, "src");
+	if (!src)
+		goto cleanup;
+	dst = cg_name(parent, "dst");
+	if (!dst)
+		goto cleanup;
+
+	if (cg_create(parent))
+		goto cleanup;
+	if (cg_write(parent, "cgroup.subtree_control", "+memory"))
+		goto cleanup;
+	if (cg_create(src) || cg_create(dst))
+		goto cleanup;
+	if (cg_write(dst, "memory.max", "30M"))
+		goto cleanup;
+	if (cg_write(dst, "memory.swap.max", "0"))
+		goto cleanup;
+
+	pid = cg_run_nowait(src, exited_leader_fn, NULL);
+	if (pid < 0)
+		goto cleanup;
+
+	for (i = 0; i < 100; i++) {
+		if (!proc_read_strstr(pid, false, "stat", ") Z "))
+			break;
+		usleep(10000);
+	}
+	if (i == 100)
+		goto cleanup;
+
+	/* The exited leader stays in src, the live thread moves. */
+	if (cg_enter(dst, pid))
+		goto cleanup;
+	if (cg_read_strcmp(dst, "cgroup.procs", ""))
+		goto cleanup;
+
+	if (write(exited_leader_pipe[1], "x", 1) != 1)
+		goto cleanup;
+
+	if (cg_read_key_long_poll(dst, "memory.events", "oom_kill ", 1,
+				  50, 100000) != 1)
+		goto cleanup;
+
+	if (cg_read_strcmp_wait(dst, "cgroup.events", "populated 0\n"))
+		goto cleanup;
+
+	ret = KSFT_PASS;
+
+cleanup:
+	if (dst)
+		cg_write(dst, "cgroup.kill", "1");
+	if (pid > 0) {
+		kill(pid, SIGKILL);
+		waitpid(pid, NULL, 0);
+	}
+	close(exited_leader_pipe[0]);
+	close(exited_leader_pipe[1]);
+	if (dst)
+		cg_destroy(dst);
+	if (src)
+		cg_destroy(src);
+	if (parent)
+		cg_destroy(parent);
+	free(dst);
+	free(src);
+	free(parent);
+	return ret;
+}
+
 static int test_memcg_sock(const char *root)
 {
 	int bind_retries = 5, ret = KSFT_FAIL, pid, err;
@@ -1816,6 +1938,7 @@ struct memcg_test {
 	T(test_memcg_oom_group_leaf_events),
 	T(test_memcg_oom_group_parent_events),
 	T(test_memcg_oom_group_score_events),
+	T(test_memcg_oom_exited_leader),
 	T(test_memcg_inotify_delete_file),
 	T(test_memcg_inotify_delete_dir),
 };
