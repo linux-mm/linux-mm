@@ -215,11 +215,13 @@ void get_online_mems(void)
 {
 	percpu_down_read(&mem_hotplug_lock);
 }
+EXPORT_SYMBOL_FOR_MODULES(get_online_mems, "hwpoison-inject");
 
 void put_online_mems(void)
 {
 	percpu_up_read(&mem_hotplug_lock);
 }
+EXPORT_SYMBOL_FOR_MODULES(put_online_mems, "hwpoison-inject");
 
 bool movable_node_enabled = false;
 

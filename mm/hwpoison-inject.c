@@ -9,6 +9,7 @@
 #include <linux/hugetlb.h>
 #include <linux/page-flags.h>
 #include <linux/memcontrol.h>
+#include <linux/memory_hotplug.h>
 #include "internal.h"
 
 static u32 hwpoison_filter_enable;
@@ -99,11 +100,41 @@ static int hwpoison_filter(struct page *p)
 
 static struct dentry *hwpoison_dir;
 
+/* Returns true if the filter rejects the page at @pfn */
+static bool hwpoison_inject_filtered(unsigned long pfn)
+{
+	struct page *p;
+	struct folio *folio;
+
+	/*
+	 * Offline and ZONE_DEVICE pages are not LRU, hugetlb or free buddy
+	 * pages, so the checks below never let them through.
+	 */
+	p = pfn_to_online_page(pfn);
+	if (!p)
+		return true;
+	folio = page_folio(p);
+
+	shake_folio(folio);
+	/*
+	 * This implies unable to support non-LRU pages except free page.
+	 */
+	if (!folio_test_lru(folio) && !folio_test_hugetlb(folio) &&
+	    !is_free_buddy_page(p))
+		return true;
+
+	/*
+	 * do a racy check to make sure PG_hwpoison will only be set for
+	 * the targeted owner (or on a free page).
+	 * memory_failure() will redo the check reliably inside page lock.
+	 */
+	return hwpoison_filter(&folio->page);
+}
+
 static int hwpoison_inject(void *data, u64 val)
 {
 	unsigned long pfn = val;
-	struct page *p;
-	struct folio *folio;
+	bool filtered;
 	int err;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -112,30 +143,18 @@ static int hwpoison_inject(void *data, u64 val)
 	if (!pfn_valid(pfn))
 		return -ENXIO;
 
-	p = pfn_to_page(pfn);
-	folio = page_folio(p);
+	if (hwpoison_filter_enable) {
+		/*
+		 * Keep the page online while the filter looks at it.
+		 * memory_failure() takes this again, so drop it first.
+		 */
+		get_online_mems();
+		filtered = hwpoison_inject_filtered(pfn);
+		put_online_mems();
+		if (filtered)
+			return 0;
+	}
 
-	if (!hwpoison_filter_enable)
-		goto inject;
-
-	shake_folio(folio);
-	/*
-	 * This implies unable to support non-LRU pages except free page.
-	 */
-	if (!folio_test_lru(folio) && !folio_test_hugetlb(folio) &&
-	    !is_free_buddy_page(p))
-		return 0;
-
-	/*
-	 * do a racy check to make sure PG_hwpoison will only be set for
-	 * the targeted owner (or on a free page).
-	 * memory_failure() will redo the check reliably inside page lock.
-	 */
-	err = hwpoison_filter(&folio->page);
-	if (err)
-		return 0;
-
-inject:
 	pr_info("Injecting memory failure at pfn %#lx\n", pfn);
 	err = memory_failure(pfn, MF_SW_SIMULATED);
 	return (err == -EOPNOTSUPP) ? 0 : err;
