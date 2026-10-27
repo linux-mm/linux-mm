@@ -692,6 +692,8 @@ int mem_cgroup_charge_hugetlb(struct folio *folio, struct mm_struct *mm,
 int mem_cgroup_swapin_charge_folio(struct folio *folio, unsigned short id,
 				   struct mm_struct *mm, gfp_t gfp);
 
+struct mem_cgroup *mem_cgroup_get_from_fd(int fd);
+
 bool mem_cgroup_reserve_dmabuf(struct mem_cgroup *memcg, gfp_t gfp,
 			       unsigned int nr_pages);
 
@@ -1215,6 +1217,11 @@ static inline int mem_cgroup_swapin_charge_folio(struct folio *folio,
 		 unsigned short id, struct mm_struct *mm, gfp_t gfp)
 {
 	return 0;
+}
+
+static inline struct mem_cgroup *mem_cgroup_get_from_fd(int fd)
+{
+	return ERR_PTR(-EOPNOTSUPP);
 }
 
 static inline bool mem_cgroup_reserve_dmabuf(struct mem_cgroup *memcg,
