@@ -40,6 +40,9 @@ void *workingset_eviction(struct folio *folio,
 void workingset_refault(struct folio *folio, void *shadow);
 void workingset_activation(struct folio *folio);
 
+/* mm/page-writeback.c */
+long folio_accounted_dirty_pages(struct folio *folio);
+
 /* mm/folio.c */
 void folio_add_lru_vma(struct folio *folio, struct vm_area_struct *vma);
 

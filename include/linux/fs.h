@@ -407,6 +407,13 @@ struct address_space_operations {
 	/* Mark a folio dirty.  Return true if this dirtied it */
 	bool (*dirty_folio)(struct address_space *, struct folio *);
 
+	/*
+	 * Pages of the folio currently charged to the dirty counters, for
+	 * filesystems that account dirty state at sub-folio (per-block)
+	 * granularity.
+	 */
+	long (*accounted_dirty_pages)(struct folio *folio);
+
 	void (*readahead)(struct readahead_control *);
 
 	int (*write_begin)(const struct kiocb *, struct address_space *mapping,
