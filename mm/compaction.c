@@ -360,6 +360,7 @@ static void __reset_isolation_suitable(struct zone *zone)
 	if (!zone->compact_blockskip_flush)
 		return;
 
+	guard(pfn_walk)();
 	zone->compact_blockskip_flush = false;
 
 	/*
@@ -716,6 +717,7 @@ isolate_freepages_range(struct compact_control *cc,
 	unsigned long isolated, pfn, block_start_pfn, block_end_pfn;
 	int order;
 
+	guard(pfn_walk)();
 	for (order = 0; order < NR_PAGE_ORDERS; order++)
 		INIT_LIST_HEAD(&cc->freepages[order]);
 
@@ -1340,6 +1342,7 @@ isolate_migratepages_range(struct compact_control *cc, unsigned long start_pfn,
 	unsigned long pfn, block_start_pfn, block_end_pfn;
 	int ret = 0;
 
+	guard(pfn_walk)();
 	/* Scan block by block. First and last block may be incomplete */
 	pfn = start_pfn;
 	block_start_pfn = pageblock_start_pfn(pfn);
@@ -1732,6 +1735,7 @@ static void isolate_freepages(struct compact_control *cc)
 	unsigned long low_pfn;	     /* lowest pfn scanner is able to scan */
 	unsigned int stride;
 
+	guard(pfn_walk)();
 	/* Try a small search of the free lists for a candidate */
 	fast_isolate_freepages(cc);
 	if (cc->nr_freepages)
@@ -2099,6 +2103,7 @@ static isolate_migrate_t isolate_migratepages(struct compact_control *cc)
 		(cc->mode != MIGRATE_SYNC ? ISOLATE_ASYNC_MIGRATE : 0);
 	bool fast_find_block;
 
+	guard(pfn_walk)();
 	/*
 	 * Start at where we last stopped, or beginning of the zone as
 	 * initialized by compact_zone(). The first failure will use
@@ -2115,6 +2120,9 @@ static isolate_migrate_t isolate_migratepages(struct compact_control *cc)
 	 * below again, check whether the fast search was successful.
 	 */
 	fast_find_block = low_pfn != cc->migrate_pfn && !cc->fast_search_fail;
+
+	/* Offline may have shrunk the zone start past an old migrate_pfn */
+	low_pfn = max(low_pfn, block_start_pfn);
 
 	/* Only scan within a pageblock boundary */
 	block_end_pfn = pageblock_end_pfn(low_pfn);

@@ -18,6 +18,7 @@
 #include <linux/rmap.h>
 #include <linux/swap.h>
 #include <linux/leafops.h>
+#include <linux/srcu.h>
 #include <linux/tracepoint-defs.h>
 
 /* Internal core VMA manipulation functions. */
@@ -1206,6 +1207,46 @@ struct tlbflush_unmap_batch;
  * any allocations or locks which might depend on allocations
  */
 extern struct workqueue_struct *mm_percpu_wq;
+
+/*
+ * Compaction checks that a pageblock is online and then uses its pages,
+ * possibly across sleeps.  remove_pfn_range_from_zone() waits for these
+ * readers before it poisons the memmap of a range taken offline.
+ */
+#ifdef CONFIG_MEMORY_HOTREMOVE
+extern struct srcu_struct pfn_walk_srcu;
+
+static inline struct srcu_ctr __percpu *pfn_walk_lock(void)
+{
+	return srcu_read_lock_fast(&pfn_walk_srcu);
+}
+
+static inline void pfn_walk_unlock(struct srcu_ctr __percpu *scp)
+{
+	srcu_read_unlock_fast(&pfn_walk_srcu, scp);
+}
+
+static inline void pfn_walk_synchronize(void)
+{
+	synchronize_srcu(&pfn_walk_srcu);
+}
+#else
+static inline struct srcu_ctr __percpu *pfn_walk_lock(void)
+{
+	return NULL;
+}
+
+static inline void pfn_walk_unlock(struct srcu_ctr __percpu *scp)
+{
+}
+
+static inline void pfn_walk_synchronize(void)
+{
+}
+#endif
+
+DEFINE_LOCK_GUARD_0(pfn_walk, _T->scp = pfn_walk_lock(),
+		    pfn_walk_unlock(_T->scp), struct srcu_ctr __percpu *scp)
 
 #ifdef CONFIG_ARCH_WANT_BATCHED_UNMAP_TLB_FLUSH
 void try_to_unmap_flush(void);

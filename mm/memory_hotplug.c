@@ -543,6 +543,16 @@ void remove_pfn_range_from_zone(struct zone *zone,
 	struct pglist_data *pgdat = zone->zone_pgdat;
 	unsigned long pfn, cur_nr_pages;
 
+	/*
+	 * The range is offline, but compaction may still use pages it found
+	 * online.  Make new scans check the online state instead of trusting
+	 * zone->contiguous, and wait for the old ones before poisoning.
+	 */
+	if (!zone_is_zone_device(zone)) {
+		clear_zone_contiguous(zone);
+		pfn_walk_synchronize();
+	}
+
 	/* Poison struct pages because they are now uninitialized again. */
 	for (pfn = start_pfn; pfn < end_pfn; pfn += cur_nr_pages) {
 		cond_resched();
@@ -562,8 +572,6 @@ void remove_pfn_range_from_zone(struct zone *zone,
 	 */
 	if (zone_is_zone_device(zone))
 		return;
-
-	clear_zone_contiguous(zone);
 
 	shrink_zone_span(zone, start_pfn, start_pfn + nr_pages);
 	update_pgdat_span(pgdat);
@@ -1782,6 +1790,8 @@ bool mhp_range_allowed(u64 start, u64 size, bool need_mapping)
 }
 
 #ifdef CONFIG_MEMORY_HOTREMOVE
+
+DEFINE_SRCU_FAST(pfn_walk_srcu);
 
 static int check_no_memblock_for_node_cb(struct memory_block *mem, void *arg)
 {
