@@ -2906,6 +2906,22 @@ config LIVEUPDATE_TEST
 
 	  If unsure, say N
 
+config LIVEUPDATE_FEATURE_KUNIT_TEST
+	tristate "KUnit test for the Live Update feature header helpers" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  This option enables the KUnit test suite for the Live Update
+	  Orchestrator feature header helpers defined in
+	  include/linux/kho/abi/luo.h. It checks the feature flag encoding,
+	  the flags array sizing, the source/target kernel validation
+	  truth table, header initialization and the payload size checks.
+
+	  The helpers are self-contained, so the test does not depend on
+	  CONFIG_LIVEUPDATE and can also run under UML.
+
+	  If unsure, say N.
+
 config CMDLINE_KUNIT_TEST
 	tristate "KUnit test for cmdline API" if !KUNIT_ALL_TESTS
 	depends on KUNIT

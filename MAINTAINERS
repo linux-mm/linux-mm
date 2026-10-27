@@ -15190,6 +15190,7 @@ F:	include/linux/liveupdate.h
 F:	include/uapi/linux/liveupdate.h
 F:	kernel/liveupdate/
 F:	lib/tests/liveupdate.c
+F:	lib/tests/liveupdate_feature_kunit.c
 F:	mm/memfd_luo.c
 F:	tools/testing/selftests/liveupdate/
 

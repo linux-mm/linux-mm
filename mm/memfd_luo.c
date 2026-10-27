@@ -84,6 +84,10 @@
 
 #include "internal.h"
 
+static const bool memfd_luo_supported_feats[MEMFD_LUO_FEAT_MAX] = {
+	[MEMFD_LUO_FEAT_CORE] = true,
+};
+
 static int memfd_luo_preserve_folios(struct file *file,
 				     struct kho_vmalloc *kho_vmalloc,
 				     struct memfd_luo_folio_ser **out_folios_ser,
@@ -259,6 +263,7 @@ static int memfd_luo_preserve(struct liveupdate_file_op_args *args)
 {
 	struct inode *inode = file_inode(args->file);
 	struct memfd_luo_folio_ser *folios_ser;
+	struct memfd_luo_ser_wrap *wrap;
 	struct memfd_luo_ser *ser;
 	u64 nr_folios, inode_size;
 	int err = 0, seals;
@@ -267,9 +272,9 @@ static int memfd_luo_preserve(struct liveupdate_file_op_args *args)
 	shmem_freeze(inode, true);
 
 	/* Allocate the main serialization structure in preserved memory */
-	ser = kho_alloc_preserve(sizeof(*ser));
-	if (IS_ERR(ser)) {
-		err = PTR_ERR(ser);
+	wrap = kho_alloc_preserve(sizeof(*wrap));
+	if (IS_ERR(wrap)) {
+		err = PTR_ERR(wrap);
 		goto err_unlock;
 	}
 
@@ -285,6 +290,10 @@ static int memfd_luo_preserve(struct liveupdate_file_op_args *args)
 		goto err_free_ser;
 	}
 
+	memfd_luo_ser_wrap_init(wrap);
+	luo_ser_set_feat(&wrap->hdr, MEMFD_LUO_FEAT_CORE, LUO_FEAT_REQUIRED);
+
+	ser = &wrap->ser;
 	ser->pos = args->file->f_pos;
 	inode_size = i_size_read(inode);
 
@@ -309,12 +318,12 @@ static int memfd_luo_preserve(struct liveupdate_file_op_args *args)
 	inode_unlock(inode);
 
 	args->private_data = folios_ser;
-	args->serialized_data = virt_to_phys(ser);
+	args->serialized_data = virt_to_phys(wrap);
 
 	return 0;
 
 err_free_ser:
-	kho_unpreserve_free(ser);
+	kho_unpreserve_free(wrap);
 err_unlock:
 	shmem_freeze(inode, false);
 	inode_unlock(inode);
@@ -323,18 +332,18 @@ err_unlock:
 
 static int memfd_luo_freeze(struct liveupdate_file_op_args *args)
 {
-	struct memfd_luo_ser *ser;
+	struct memfd_luo_ser_wrap *wrap;
 
 	if (WARN_ON_ONCE(!args->serialized_data))
 		return -EINVAL;
 
-	ser = phys_to_virt(args->serialized_data);
+	wrap = phys_to_virt(args->serialized_data);
 
 	/*
 	 * The pos might have changed since prepare. Everything else stays the
 	 * same.
 	 */
-	ser->pos = args->file->f_pos;
+	wrap->ser.pos = args->file->f_pos;
 
 	return 0;
 }
@@ -342,7 +351,7 @@ static int memfd_luo_freeze(struct liveupdate_file_op_args *args)
 static void memfd_luo_unpreserve(struct liveupdate_file_op_args *args)
 {
 	struct inode *inode = file_inode(args->file);
-	struct memfd_luo_ser *ser;
+	struct memfd_luo_ser_wrap *wrap;
 
 	if (WARN_ON_ONCE(!args->serialized_data))
 		return;
@@ -350,12 +359,12 @@ static void memfd_luo_unpreserve(struct liveupdate_file_op_args *args)
 	inode_lock(inode);
 	shmem_freeze(inode, false);
 
-	ser = phys_to_virt(args->serialized_data);
+	wrap = phys_to_virt(args->serialized_data);
 
-	memfd_luo_unpreserve_folios(&ser->folios, args->private_data,
-				    ser->nr_folios);
+	memfd_luo_unpreserve_folios(&wrap->ser.folios, args->private_data,
+				    wrap->ser.nr_folios);
 
-	kho_unpreserve_free(ser);
+	kho_unpreserve_free(wrap);
 	inode_unlock(inode);
 }
 
@@ -386,6 +395,7 @@ static void memfd_luo_discard_folios(const struct memfd_luo_folio_ser *folios_se
 
 static void memfd_luo_finish(struct liveupdate_file_op_args *args)
 {
+	struct luo_ser_hdr *hdr;
 	struct memfd_luo_folio_ser *folios_ser;
 	struct memfd_luo_ser *ser;
 
@@ -397,10 +407,17 @@ static void memfd_luo_finish(struct liveupdate_file_op_args *args)
 	if (args->retrieve_status)
 		return;
 
-	ser = phys_to_virt(args->serialized_data);
-	if (!ser)
+	if (WARN_ON_ONCE(!args->serialized_data))
 		return;
 
+	hdr = phys_to_virt(args->serialized_data);
+	if (luo_ser_hdr_validate(hdr, memfd_luo_supported_feats,
+				 ARRAY_SIZE(memfd_luo_supported_feats))) {
+		pr_warn("invalid feature header, folios not discarded\n");
+		goto out;
+	}
+
+	ser = luo_ser_payload(hdr);
 	if (ser->nr_folios) {
 		folios_ser = kho_restore_vmalloc(&ser->folios);
 		if (!folios_ser)
@@ -411,7 +428,7 @@ static void memfd_luo_finish(struct liveupdate_file_op_args *args)
 	}
 
 out:
-	kho_restore_free(ser);
+	kho_restore_free(hdr);
 }
 
 static int memfd_luo_retrieve_folios(struct file *file,
@@ -517,14 +534,25 @@ put_folios:
 
 static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 {
+	struct luo_ser_hdr *hdr;
 	struct memfd_luo_folio_ser *folios_ser;
 	struct memfd_luo_ser *ser;
 	struct file *file;
 	int err;
 
-	ser = phys_to_virt(args->serialized_data);
-	if (!ser)
+	if (WARN_ON_ONCE(!args->serialized_data))
 		return -EINVAL;
+
+	hdr = phys_to_virt(args->serialized_data);
+	err = luo_ser_hdr_validate(hdr, memfd_luo_supported_feats,
+				   ARRAY_SIZE(memfd_luo_supported_feats));
+	if (err) {
+		pr_err("memfd_luo_ser feature header validation failed (size=%u, nr_features=%u): %pe\n",
+		       hdr->size, hdr->nr_features, ERR_PTR(err));
+		goto free_ser;
+	}
+
+	ser = luo_ser_payload(hdr);
 
 	/* Make sure the file only has seals supported by this version. */
 	if (ser->seals & ~MEMFD_LUO_ALL_SEALS) {
@@ -566,14 +594,14 @@ static int memfd_luo_retrieve(struct liveupdate_file_op_args *args)
 	}
 
 	args->file = file;
-	kho_restore_free(ser);
+	kho_restore_free(hdr);
 
 	return 0;
 
 put_file:
 	fput(file);
 free_ser:
-	kho_restore_free(ser);
+	kho_restore_free(hdr);
 	return err;
 }
 
