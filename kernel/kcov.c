@@ -25,6 +25,9 @@
 #include <linux/kcov.h>
 #include <linux/refcount.h>
 #include <linux/log2.h>
+#include <linux/kmemleak.h>
+#include <linux/memblock.h>
+#include <linux/workqueue.h>
 #include <asm/setup.h>
 
 #define kcov_debug(fmt, ...) pr_debug("%s: " fmt, __func__, ##__VA_ARGS__)
@@ -1115,6 +1118,187 @@ struct kcov_common_handle_id kcov_common_handle(void)
 	return (struct kcov_common_handle_id){ .val = current->kcov_handle };
 }
 EXPORT_SYMBOL(kcov_common_handle);
+
+#ifdef CONFIG_EARLY_KCOV
+/*
+ * Early boot coverage.
+ *
+ * Every PC executed by init_task from right after early parameter parsing in
+ * start_kernel() (that is, after setup_arch()) until the start of rest_init()
+ * is recorded, with the same semantics as KCOV_TRACE_PC, into a buffer
+ * allocated from memblock. The buffer uses the regular kcov layout: area[0] is
+ * the number of recorded PCs, followed by the PCs. It is exported via
+ * /sys/kernel/debug/early_kcov; writing to that file removes it and frees the
+ * buffer.
+ */
+#define EARLY_KCOV_DEFAULT_SIZE	((unsigned long)CONFIG_EARLY_KCOV_SIZE_MB << 20)
+
+/* Requested buffer size in bytes, 0 disables early coverage. */
+static unsigned long early_kcov_size __initdata = EARLY_KCOV_DEFAULT_SIZE;
+/* Buffer that was attached to init_task, kept for the debugfs reader. */
+static unsigned long *early_kcov_area;
+/* Size of early_kcov_area in unsigned longs. */
+static unsigned long early_kcov_nr_entries;
+static struct dentry *early_kcov_dentry;
+
+static int __init early_kcov_size_setup(char *arg)
+{
+	/* task_struct::kcov_size is an unsigned int number of longs. */
+	const u64 max = round_down(min_t(u64, ULONG_MAX,
+					 (u64)UINT_MAX * sizeof(unsigned long)),
+				   PAGE_SIZE);
+	unsigned long long size;
+	char *end;
+
+	if (!arg)
+		return -EINVAL;
+
+	/* Range check before narrowing, memparse() returns a 64-bit value. */
+	size = memparse(arg, &end);
+	if (end == arg || size > max)
+		return -EINVAL;
+
+	early_kcov_size = PAGE_ALIGN(size);
+	return 0;
+}
+early_param("early_kcov_size", early_kcov_size_setup);
+
+void __init early_kcov_init(void)
+{
+	unsigned long *area;
+	unsigned long nr_entries;
+
+	if (!early_kcov_size) {
+		pr_info("Early boot coverage disabled\n");
+		return;
+	}
+
+	area = memblock_alloc(early_kcov_size, PAGE_SIZE);
+	if (!area) {
+		pr_warn("Failed to allocate %lu bytes for early boot coverage\n",
+			early_kcov_size);
+		return;
+	}
+
+	nr_entries = early_kcov_size / sizeof(unsigned long);
+	/* The first word is the number of PCs, see __sanitizer_cov_trace_pc(). */
+	area[0] = 0;
+	early_kcov_area = area;
+	early_kcov_nr_entries = nr_entries;
+
+	init_task.kcov_size = nr_entries;
+	init_task.kcov_area = area;
+	/* See comment in check_kcov_mode(). */
+	barrier();
+	WRITE_ONCE(init_task.kcov_mode, KCOV_MODE_TRACE_PC);
+
+	pr_info("Early boot coverage started (%lu bytes, %lu PCs max)\n",
+		early_kcov_size, nr_entries - 1);
+}
+
+void __init early_kcov_stop(void)
+{
+	unsigned long nr_pcs;
+
+	if (!early_kcov_area)
+		return;
+
+	WRITE_ONCE(init_task.kcov_mode, KCOV_MODE_DISABLED);
+	barrier();
+	init_task.kcov_area = NULL;
+	init_task.kcov_size = 0;
+
+	nr_pcs = READ_ONCE(early_kcov_area[0]);
+	pr_info("Early boot coverage stopped. Recorded %lu / %lu PCs%s\n",
+		nr_pcs, early_kcov_nr_entries - 1,
+		nr_pcs >= early_kcov_nr_entries - 1 ?
+		" (buffer full, coverage truncated; increase early_kcov_size=)" :
+		"");
+}
+
+static ssize_t early_kcov_read(struct file *file, char __user *buf,
+			       size_t count, loff_t *ppos)
+{
+	unsigned long nr_words;
+
+	/* Coverage collection has stopped, the buffer does not change. */
+	nr_words = min(READ_ONCE(early_kcov_area[0]) + 1, early_kcov_nr_entries);
+
+	return simple_read_from_buffer(buf, count, ppos, early_kcov_area,
+				       nr_words * sizeof(unsigned long));
+}
+
+static void early_kcov_release(struct work_struct *work)
+{
+	unsigned long size = early_kcov_nr_entries * sizeof(unsigned long);
+
+	if (!early_kcov_dentry)
+		return;
+
+	/* Waits for readers that are still in early_kcov_read(). */
+	debugfs_remove(early_kcov_dentry);
+	early_kcov_dentry = NULL;
+
+	kmemleak_free_part_phys(__pa(early_kcov_area), size);
+	free_reserved_area(early_kcov_area, (void *)early_kcov_area + size, -1,
+			   "early boot coverage");
+	early_kcov_area = NULL;
+	early_kcov_nr_entries = 0;
+}
+static DECLARE_WORK(early_kcov_release_work, early_kcov_release);
+
+static ssize_t early_kcov_write(struct file *file, const char __user *buf,
+				size_t count, loff_t *ppos)
+{
+	/*
+	 * Removing the file from here would deadlock: debugfs_remove() waits
+	 * for this write to return.
+	 */
+	schedule_work(&early_kcov_release_work);
+	return count;
+}
+
+static const struct file_operations early_kcov_fops = {
+	.read		= early_kcov_read,
+	.write		= early_kcov_write,
+	.llseek		= default_llseek,
+};
+
+static int __init early_kcov_late_init(void)
+{
+	unsigned long size, used;
+
+	if (!early_kcov_area)
+		return 0;
+
+	/*
+	 * Deferred struct page init has completed by now, so memblock memory
+	 * can be handed to the page allocator: drop the unused tail of the
+	 * buffer.
+	 */
+	size = early_kcov_nr_entries * sizeof(unsigned long);
+	used = PAGE_ALIGN((READ_ONCE(early_kcov_area[0]) + 1) *
+			  sizeof(unsigned long));
+	if (used < size) {
+		memblock_free((void *)early_kcov_area + used, size - used);
+		early_kcov_nr_entries = used / sizeof(unsigned long);
+		pr_info("Freed %lu KiB of unused early boot coverage buffer\n",
+			(size - used) >> 10);
+	}
+
+	early_kcov_dentry = debugfs_create_file("early_kcov", 0600, NULL, NULL,
+						&early_kcov_fops);
+	if (IS_ERR(early_kcov_dentry)) {
+		/* Nobody can read the coverage, do not keep it around. */
+		early_kcov_dentry = NULL;
+		memblock_free(early_kcov_area, used);
+		early_kcov_area = NULL;
+		early_kcov_nr_entries = 0;
+	}
+	return 0;
+}
+late_initcall(early_kcov_late_init);
+#endif /* CONFIG_EARLY_KCOV */
 
 #ifdef CONFIG_KCOV_SELFTEST
 static unsigned long selftest_area[16] __initdata;

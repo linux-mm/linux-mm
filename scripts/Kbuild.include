@@ -53,6 +53,12 @@ basetarget = $(basename $(notdir $@))
 real-prereqs = $(filter-out $(PHONY), $^)
 
 ###
+# KCOV_INSTRUMENT value for code that is excluded from KCOV only because its
+# coverage is noise for syscall fuzzing, see CONFIG_KCOV_INSTRUMENT_NOISY.
+# Usage: KCOV_INSTRUMENT_foo.o := $(kcov-noisy)
+kcov-noisy = $(if $(CONFIG_KCOV_INSTRUMENT_NOISY),,n)
+
+###
 # Escape single quote for use in echo statements
 escsq = $(subst $(squote),'\$(squote)',$1)
 
