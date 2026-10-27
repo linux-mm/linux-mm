@@ -4670,7 +4670,11 @@ static unsigned long deferred_split_scan(struct shrinker *shrink,
 		bool did_split = false;
 		bool underused = false;
 
-		list_del_init(&folio->_deferred_list);
+		/*
+		 * deferred_split_folio() may queue the folio again as soon as
+		 * list_empty() in __list_lru_add() sees it empty.
+		 */
+		list_del_init_careful(&folio->_deferred_list);
 
 		if (!folio_test_partially_mapped(folio)) {
 			/*
