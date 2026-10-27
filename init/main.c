@@ -35,6 +35,7 @@
 #include <linux/percpu.h>
 #include <linux/kmod.h>
 #include <linux/kprobes.h>
+#include <linux/kcov.h>
 #include <linux/kmsan.h>
 #include <linux/ksysfs.h>
 #include <linux/vmalloc.h>
@@ -745,6 +746,7 @@ static noinline void __ref __noreturn rest_init(void)
 	struct task_struct *tsk;
 	int pid;
 
+	early_kcov_stop();
 	rcu_scheduler_starting();
 	/*
 	 * We need to spawn init first so that it obtains pid 1, however
@@ -1080,6 +1082,8 @@ void start_kernel(void)
 	print_kernel_cmdline(saved_command_line);
 	/* parameters may set static keys */
 	parse_early_param();
+	/* Needs early_kcov_size= and must run before memblock is retired */
+	early_kcov_init();
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
 				  __stop___param - __start___param,

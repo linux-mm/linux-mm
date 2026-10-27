@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 # Any varying coverage in these files is non-deterministic
 # and is generally not a function of system call inputs.
-KCOV_INSTRUMENT		:= n
+KCOV_INSTRUMENT		:= $(kcov-noisy)
 
 CONTEXT_ANALYSIS_mutex.o := y
 CONTEXT_ANALYSIS_rtmutex_api.o := y

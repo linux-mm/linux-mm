@@ -383,3 +383,63 @@ local tasks spawned by the process and the global task that handles USB bus #1:
 		perror("close"), exit(1);
 	return 0;
     }
+
+Early boot coverage
+-------------------
+
+KCOV can also record the code executed while the kernel boots, before any
+task can open the ``kcov`` file. To enable it, configure the kernel with::
+
+        CONFIG_KCOV=y
+        CONFIG_KCOV_INSTRUMENT_ALL=y
+        CONFIG_EARLY_KCOV=y
+
+Every PC executed by the boot task (``init_task``) from right after early
+parameter parsing in ``start_kernel()`` until the start of ``rest_init()`` is
+recorded with the same semantics as ``KCOV_TRACE_PC``. ``setup_arch()`` runs
+before that point and is not covered. Coverage ends before the initcalls run.
+
+The buffer is allocated from memblock. Its size defaults to
+``CONFIG_EARLY_KCOV_SIZE_MB`` and can be changed with the ``early_kcov_size=``
+boot parameter, where ``early_kcov_size=0`` disables the collection. Boot loops
+execute the same blocks millions of times, so a full x86_64 boot records tens of
+millions of PCs. If the buffer fills up, the remaining PCs are not recorded and
+the kernel log says so::
+
+        kcov: Early boot coverage stopped. Recorded 2097151 / 2097151 PCs (buffer full, coverage truncated; increase early_kcov_size=)
+
+After boot, the coverage can be read from ``/sys/kernel/debug/early_kcov``. It
+has the same layout as the buffer of the ``kcov`` file: the first word (an
+``unsigned long``) is the number of recorded PCs, followed by the PCs in
+execution order. No ``ioctl()`` or ``mmap()`` is needed. As with the ``kcov``
+file, the KASLR offset is subtracted from the PCs, so they must be resolved
+against ``vmlinux``, not ``/proc/kallsyms``. On a 64-bit kernel::
+
+        cat /sys/kernel/debug/early_kcov > early_kcov.raw
+        od -An -v -t x8 -w8 -j8 early_kcov.raw | awk '{ print "0x" $1 }' |
+                sort -u | addr2line -f -e vmlinux
+
+The unused part of the buffer is freed at the end of boot. The rest stays
+allocated until the file is written to: writing anything to it removes the file
+and frees the buffer::
+
+        echo 1 > /sys/kernel/debug/early_kcov
+
+Like the per-task coverage, early boot coverage skips interrupt context. Some
+interrupt entry code runs before the hardirq count is raised, for example the
+x86 FRED system vector wrappers, and is recorded as if ``init_task`` executed it.
+If such an interrupt arrives in the middle of recording a PC, one of the two
+PCs can be lost.
+
+Many objects are built without KCOV instrumentation because their coverage is
+not a function of syscall inputs: the scheduler, RCU, locking, the page and slab
+allocators and parts of ``lib/``. They run during boot too. To include them in
+the early boot coverage, set::
+
+        CONFIG_KCOV_INSTRUMENT_NOISY=y
+
+which instruments every object whose Makefile excludes it from KCOV with
+``KCOV_INSTRUMENT_foo.o := $(kcov-noisy)`` (or ``KCOV_INSTRUMENT :=
+$(kcov-noisy)`` for a whole directory). Objects that cannot be instrumented
+safely keep ``KCOV_INSTRUMENT := n``. As this option degrades the coverage
+signal for syscall fuzzing, it depends on ``CONFIG_EARLY_KCOV``.
