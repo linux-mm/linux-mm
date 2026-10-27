@@ -80,6 +80,61 @@ TRACE_EVENT(shmem_swapin_folio,
 		  __entry->fallback_error, __entry->error)
 );
 
+#define SHMEM_ALLOC_ALLOC	0
+#define SHMEM_ALLOC_CHARGE	1
+#define SHMEM_ALLOC_CACHE		2
+#define SHMEM_ALLOC_ACCOUNT	3
+#define SHMEM_ALLOC_DONE		4
+#define SHMEM_ALLOC_FILTER	5
+
+TRACE_EVENT(shmem_alloc_folio_finish,
+
+	TP_PROTO(struct inode *inode, pgoff_t index,
+		 int requested_order, int suitable_order, int actual_order,
+		 unsigned int stage, int error, int ret),
+
+	TP_ARGS(inode, index, requested_order, suitable_order, actual_order,
+		stage, error, ret),
+
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__field(unsigned long, ino)
+		__field(unsigned long, index)
+		__field(int, requested_order)
+		__field(int, suitable_order)
+		__field(int, actual_order)
+		__field(unsigned int, stage)
+		__field(int, error)
+		__field(int, ret)
+	),
+
+	TP_fast_assign(
+		__entry->dev = inode->i_sb->s_dev;
+		__entry->ino = inode->i_ino;
+		__entry->index = index;
+		__entry->requested_order = requested_order;
+		__entry->suitable_order = suitable_order;
+		__entry->actual_order = actual_order;
+		__entry->stage = stage;
+		__entry->error = error;
+		__entry->ret = ret;
+	),
+
+	TP_printk("dev=%d:%d ino=%lu index=%lu requested_order=%d suitable_order=%d actual_order=%d stage=%s error=%d ret=%d",
+		  MAJOR(__entry->dev), MINOR(__entry->dev),
+		  __entry->ino, __entry->index,
+		  __entry->requested_order, __entry->suitable_order,
+		  __entry->actual_order,
+		  __print_symbolic(__entry->stage,
+				   { SHMEM_ALLOC_ALLOC, "alloc" },
+				   { SHMEM_ALLOC_CHARGE, "charge" },
+				   { SHMEM_ALLOC_CACHE, "cache" },
+				   { SHMEM_ALLOC_ACCOUNT, "account" },
+				   { SHMEM_ALLOC_DONE, "done" },
+				   { SHMEM_ALLOC_FILTER, "filter" }),
+		  __entry->error, __entry->ret)
+);
+
 #endif /* _TRACE_SHMEM_H */
 
 /* This part must be outside protection */

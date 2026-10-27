@@ -71,3 +71,48 @@ Filter or aggregate by both ``dev`` and ``ino``; inode numbers alone are
 not unique across mounts. Trace filters use the numeric values shown by
 the event's ``format`` file. Check ``per_cpu/cpu*/stats`` for dropped events
 before interpreting counts.
+
+Allocation attempts
+-------------------
+
+``shmem_alloc_folio_finish`` records failed calls to
+``shmem_alloc_and_add_folio()`` and successful calls that allocate below
+their requested order. Successes at the requested order are omitted,
+including ordinary order-0 allocations.
+
+This is an attempt result, not the final result of a read, write or fault.
+After a higher-order failure the caller may retry at order 0, or restart
+its lookup on ``-EEXIST``. A successful order-0 retry is not recorded.
+Do not count all nonzero returns as failed user operations.
+
+``requested_order`` is the highest order allowed by this call's order mask,
+or 0 for a base-page request. ``suitable_order`` is the highest remaining
+order after VMA and page-cache filtering, or -1 if none remains.
+``actual_order`` is the allocated folio's order, or -1 if allocation did
+not produce a folio. Orders refer to base pages, not bytes.
+
+``stage`` identifies where the attempt ended:
+
+* ``filter``: filtering removed every candidate order, so no folio
+  allocation was attempted. ``suitable_order=-1`` identifies this case.
+* ``alloc``: a suitable order existed, but every allocation failed.
+* ``charge``: memcg charging failed.
+* ``cache``: page-cache insertion failed.
+* ``account``: filesystem block accounting failed after its retry.
+* ``done``: allocation succeeded at a smaller order.
+
+``error`` is the error at that stage; ``ret`` is the error returned to the
+caller. ``stage=filter`` has ``error=0`` because no allocator call occurred,
+while ``ret=-ENOMEM`` preserves the helper's return value. Both are zero for
+``done``. For a charge failure followed by a page-cache conflict, ``error``
+retains the charge error (such as ``-ENOMEM``), while ``ret=-EEXIST``
+requests a lookup retry. A direct insertion race instead has
+``stage=cache error=-EEXIST ret=-EEXIST``. Accounting errors retain
+``-ENOSPC`` or ``-EDQUOT`` as appropriate.
+
+Enable ``events/shmem/shmem_alloc_folio_finish/enable`` in the trace
+instance to collect these records. On successful fallbacks,
+``suitable_order < requested_order`` shows filtering, and
+``actual_order < suitable_order`` shows allocator fallback. Both may
+occur in one attempt. The existing shmem allocation and fallback
+counters remain useful for aggregate statistics.

@@ -2156,17 +2156,23 @@ static struct folio *shmem_alloc_and_add_folio(struct vm_fault *vmf,
 	unsigned long suitable_orders = 0;
 	struct folio *folio = NULL;
 	pgoff_t aligned_index;
+	pgoff_t orig_index = index;
 	long pages;
 	int error, order;
+	int requested_order, suitable_order;
+	int charge_error = 0;
+	unsigned int stage;
 
 	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
 		orders = 0;
 
+	requested_order = orders ? highest_order(orders) : 0;
 	if (orders > 0) {
 		suitable_orders = shmem_suitable_orders(inode, vmf,
 							mapping, index, orders);
 
 		order = highest_order(suitable_orders);
+		suitable_order = order;
 		while (suitable_orders) {
 			pages = 1UL << order;
 			aligned_index = round_down(index, pages);
@@ -2182,19 +2188,35 @@ static struct folio *shmem_alloc_and_add_folio(struct vm_fault *vmf,
 			order = next_order(&suitable_orders, order);
 		}
 	} else {
+		suitable_order = 0;
 		pages = 1;
 		folio = shmem_alloc_folio(gfp, 0, info, index);
 	}
-	if (!folio)
+	if (!folio) {
+		if (suitable_order < 0)
+			trace_shmem_alloc_folio_finish(inode, orig_index,
+						       requested_order,
+						       suitable_order, -1,
+						       SHMEM_ALLOC_FILTER, 0,
+						       -ENOMEM);
+		else
+			trace_shmem_alloc_folio_finish(inode, orig_index,
+						       requested_order,
+						       suitable_order, -1,
+						       SHMEM_ALLOC_ALLOC, -ENOMEM,
+						       -ENOMEM);
 		return ERR_PTR(-ENOMEM);
+	}
 
 allocated:
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
 
 	gfp &= GFP_RECLAIM_MASK;
+	stage = SHMEM_ALLOC_CHARGE;
 	error = mem_cgroup_charge(folio, fault_mm, gfp);
 	if (error) {
+		charge_error = error;
 		if (xa_find(&mapping->i_pages, &index,
 				index + pages - 1, XA_PRESENT)) {
 			error = -EEXIST;
@@ -2209,10 +2231,12 @@ allocated:
 		goto unlock;
 	}
 
+	stage = SHMEM_ALLOC_CACHE;
 	error = shmem_add_to_page_cache(folio, mapping, index, NULL, gfp);
 	if (error)
 		goto unlock;
 
+	stage = SHMEM_ALLOC_ACCOUNT;
 	error = shmem_inode_acct_blocks(inode, pages);
 	if (error) {
 		struct shmem_sb_info *sbinfo = SHMEM_SB(inode->i_sb);
@@ -2243,9 +2267,17 @@ allocated:
 
 	shmem_recalc_inode(inode, pages, 0);
 	folio_add_lru(folio);
+	if (folio_order(folio) < requested_order)
+		trace_shmem_alloc_folio_finish(inode, orig_index,
+					       requested_order, suitable_order,
+					       folio_order(folio),
+					       SHMEM_ALLOC_DONE, 0, 0);
 	return folio;
 
 unlock:
+	trace_shmem_alloc_folio_finish(inode, orig_index, requested_order,
+				       suitable_order, folio_order(folio), stage,
+				       charge_error ?: error, error);
 	folio_unlock(folio);
 	folio_put(folio);
 	return ERR_PTR(error);
