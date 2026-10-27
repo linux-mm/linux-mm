@@ -13,6 +13,7 @@
 #include <linux/memcontrol.h>
 #include <linux/sched/clock.h>
 
+#include "internal.h"
 #include "page_alloc.h"
 
 /*
@@ -600,19 +601,13 @@ static inline int print_page_owner_memcg(char *kbuf, size_t count, int ret,
 #endif
 
 static ssize_t
-print_page_owner(char __user *buf, size_t count, unsigned long pfn,
+print_page_owner(char *kbuf, size_t count, unsigned long pfn,
 		struct page *page, struct page_owner *page_owner,
 		depot_stack_handle_t handle,
 		struct page_owner_filter_state *state)
 {
 	int ret, pageblock_mt, page_mt;
-	char *kbuf;
 	enum page_owner_print_mode print_mode;
-
-	count = min_t(size_t, count, PAGE_SIZE);
-	kbuf = kmalloc(count, GFP_KERNEL);
-	if (!kbuf)
-		return -ENOMEM;
 
 	print_mode = state->print_mode;
 
@@ -637,14 +632,14 @@ print_page_owner(char __user *buf, size_t count, unsigned long pfn,
 	if (print_mode != PAGE_OWNER_PRINT_HANDLE) {
 		ret += stack_depot_snprint(handle, kbuf + ret, count - ret, 0);
 		if (ret >= count)
-			goto err;
+			return -ENOMEM;
 	}
 
 	if (print_mode != PAGE_OWNER_PRINT_STACK) {
 		ret += scnprintf(kbuf + ret, count - ret, "handle: %u\n",
 				 handle);
 		if (ret >= count)
-			goto err;
+			return -ENOMEM;
 	}
 
 	if (page_owner->last_migrate_reason != MR_NEVER) {
@@ -657,17 +652,9 @@ print_page_owner(char __user *buf, size_t count, unsigned long pfn,
 
 	ret += snprintf(kbuf + ret, count - ret, "\n");
 	if (ret >= count)
-		goto err;
+		return -ENOMEM;
 
-	if (copy_to_user(buf, kbuf, ret))
-		ret = -EFAULT;
-
-	kfree(kbuf);
 	return ret;
-
-err:
-	kfree(kbuf);
-	return -ENOMEM;
 }
 
 void __dump_page_owner(const struct page *page)
@@ -734,9 +721,16 @@ read_page_owner(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	struct page_owner *page_owner;
 	depot_stack_handle_t handle;
 	struct page_owner_filter_state *state = file->private_data;
+	ssize_t ret = 0;
+	char *kbuf;
 
 	if (!static_branch_unlikely(&page_owner_inited))
 		return -EINVAL;
+
+	count = min_t(size_t, count, PAGE_SIZE);
+	kbuf = kmalloc(count, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
 
 	page = NULL;
 	if (*ppos == 0)
@@ -766,7 +760,12 @@ read_page_owner(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 			continue;
 		}
 
-		page = pfn_to_page(pfn);
+		/* Offline waits for us before it poisons the memmap */
+		guard(pfn_walk)();
+		page = pfn_to_online_page(pfn);
+		if (!page)
+			continue;
+
 		if (skip_buddy_pages(&pfn, page))
 			continue;
 
@@ -825,14 +824,18 @@ read_page_owner(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 
 		page_owner_tmp = *page_owner;
 		page_ext_put(page_ext);
-		return print_page_owner(buf, count, pfn, page,
+		ret = print_page_owner(kbuf, count, pfn, page,
 				&page_owner_tmp, handle, state);
+		break;
 ext_put_continue:
 		page_ext_put(page_ext);
 		cond_resched();
 	}
 
-	return 0;
+	if (ret > 0 && copy_to_user(buf, kbuf, ret))
+		ret = -EFAULT;
+	kfree(kbuf);
+	return ret;
 }
 
 static loff_t lseek_page_owner(struct file *file, loff_t offset, int orig)
