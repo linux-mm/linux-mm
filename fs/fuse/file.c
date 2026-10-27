@@ -3102,6 +3102,7 @@ static const struct address_space_operations fuse_file_aops  = {
 	.writepages	= fuse_writepages,
 	.launder_folio	= fuse_launder_folio,
 	.dirty_folio	= iomap_dirty_folio,
+	.accounted_dirty_pages = iomap_accounted_dirty_pages,
 	.release_folio	= iomap_release_folio,
 	.invalidate_folio = iomap_invalidate_folio,
 	.is_partially_uptodate = iomap_is_partially_uptodate,

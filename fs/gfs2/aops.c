@@ -713,6 +713,7 @@ static const struct address_space_operations gfs2_aops = {
 	.read_folio = gfs2_read_folio,
 	.readahead = gfs2_readahead,
 	.dirty_folio = iomap_dirty_folio,
+	.accounted_dirty_pages = iomap_accounted_dirty_pages,
 	.release_folio = iomap_release_folio,
 	.invalidate_folio = iomap_invalidate_folio,
 	.bmap = gfs2_bmap,

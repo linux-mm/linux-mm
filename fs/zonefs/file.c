@@ -192,6 +192,7 @@ const struct address_space_operations zonefs_file_aops = {
 	.readahead		= zonefs_readahead,
 	.writepages		= zonefs_writepages,
 	.dirty_folio		= iomap_dirty_folio,
+	.accounted_dirty_pages	= iomap_accounted_dirty_pages,
 	.release_folio		= iomap_release_folio,
 	.invalidate_folio	= iomap_invalidate_folio,
 	.migrate_folio		= filemap_migrate_folio,
