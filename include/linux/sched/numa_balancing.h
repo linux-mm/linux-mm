@@ -14,6 +14,7 @@
 #define TNF_SHARED	0x04
 #define TNF_FAULT_LOCAL	0x08
 #define TNF_MIGRATE_FAIL 0x10
+#define TNF_ACCESS_TIME	0x20
 
 enum numa_vmaskip_reason {
 	NUMAB_SKIP_UNSUITABLE,

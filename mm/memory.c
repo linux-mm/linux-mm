@@ -6276,10 +6276,12 @@ int numa_migrate_check(struct folio *folio, struct vm_fault *vmf,
 	 * For memory tiering mode, cpupid of slow memory page is used
 	 * to record page access time.  So use default value.
 	 */
-	if (folio_use_access_time(folio))
+	if (folio_use_access_time(folio)) {
+		*flags |= TNF_ACCESS_TIME;
 		*last_cpupid = (-1 & LAST_CPUPID_MASK);
-	else
+	} else {
 		*last_cpupid = folio_last_cpupid(folio);
+	}
 
 	/* Record the current PID accessing VMA */
 	vma_set_access_pid_bit(vma);
