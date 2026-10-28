@@ -719,6 +719,22 @@ static void zswap_lru_del(struct zswap_entry *entry)
 	rcu_read_unlock();
 }
 
+/* Like zswap_lru_del(), but does not decrement the node item count. */
+static void zswap_lru_del_nocnt(struct zswap_entry *entry)
+{
+	int nid = entry_to_nid(entry);
+	struct mem_cgroup *memcg;
+	struct list_lru_one *l;
+
+	rcu_read_lock();
+	memcg = obj_cgroup_memcg(entry->objcg);
+	l = list_lru_lock(&zswap_list_lru, nid, &memcg);
+	if (!list_empty(&entry->lru))
+		list_lru_isolate(l, &entry->lru);
+	list_lru_unlock(l);
+	rcu_read_unlock();
+}
+
 void zswap_lruvec_state_init(struct lruvec *lruvec)
 {
 	atomic_long_set(&lruvec->zswap_lruvec_state.nr_disk_swapins, 0);
@@ -781,11 +797,10 @@ static void zswap_entry_cache_free(struct zswap_entry *entry)
  * Carries out the common pattern of freeing an entry's zsmalloc allocation,
  * freeing the entry itself, and decrementing the number of stored pages.
  */
-static void zswap_entry_free(struct zswap_entry *entry)
+static void __zswap_entry_free(struct zswap_entry *entry)
 {
 	struct zswap_pool *pool = zswap_entry_pool(entry);
 
-	zswap_lru_del(entry);
 	if (!WARN_ON_ONCE(!pool)) {
 		zs_free(pool->zs_pool, entry->handle);
 		zswap_pool_put(pool);
@@ -798,6 +813,12 @@ static void zswap_entry_free(struct zswap_entry *entry)
 		atomic_long_dec(&zswap_stored_incompressible_pages);
 	zswap_entry_cache_free(entry);
 	atomic_long_dec(&zswap_stored_pages);
+}
+
+static void zswap_entry_free(struct zswap_entry *entry)
+{
+	zswap_lru_del(entry);
+	__zswap_entry_free(entry);
 }
 
 /*********************************
@@ -1119,7 +1140,8 @@ static int zswap_writeback_entry(struct zswap_entry *entry,
 	if (entry->objcg)
 		count_objcg_events(entry->objcg, ZSWPWB, 1);
 
-	zswap_entry_free(entry);
+	zswap_lru_del_nocnt(entry);
+	__zswap_entry_free(entry);
 
 	/* folio is up to date */
 	folio_mark_uptodate(folio);
