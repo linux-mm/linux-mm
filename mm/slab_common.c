@@ -1373,6 +1373,10 @@ void __init kvfree_rcu_init(void)
  * per-CPU. Object size is equal to one page. This value
  * can be changed at boot time.
  */
+/* These used to be rcutree parameters; keep their documented names. */
+#undef MODULE_PARAM_PREFIX
+#define MODULE_PARAM_PREFIX "rcutree."
+
 static int rcu_min_cached_objs = 5;
 module_param(rcu_min_cached_objs, int, 0444);
 
