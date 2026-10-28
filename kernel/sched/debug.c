@@ -736,6 +736,8 @@ static __init int sched_init_debug(void)
 	debugfs_create_u32("scan_period_max_ms", 0644, numa, &sysctl_numa_balancing_scan_period_max);
 	debugfs_create_u32("scan_size_mb", 0644, numa, &sysctl_numa_balancing_scan_size);
 	debugfs_create_u32("hot_threshold_ms", 0644, numa, &sysctl_numa_balancing_hot_threshold);
+	debugfs_create_bool("promote_free_space_bypass", 0644, numa,
+			    &numa_balancing_promote_free_space_bypass);
 #endif /* CONFIG_NUMA_BALANCING */
 
 #ifdef CONFIG_SCHED_CACHE
