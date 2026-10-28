@@ -8,6 +8,7 @@
  */
 
 #include <linux/sched.h>
+#include <linux/sched/sysctl.h>
 
 #define TNF_MIGRATED	0x01
 #define TNF_NO_GROUP	0x02
@@ -15,6 +16,14 @@
 #define TNF_FAULT_LOCAL	0x08
 #define TNF_MIGRATE_FAIL 0x10
 #define TNF_ACCESS_TIME	0x20
+
+static inline bool numa_balancing_tiering_only(void)
+{
+	int mode = sysctl_numa_balancing_mode;
+
+	return (mode & NUMA_BALANCING_MEMORY_TIERING) &&
+	       !(mode & NUMA_BALANCING_NORMAL);
+}
 
 enum numa_vmaskip_reason {
 	NUMAB_SKIP_UNSUITABLE,

@@ -2760,6 +2760,32 @@ static inline bool cpupid_valid(int cpupid)
 	return cpupid_to_cpu(cpupid) < nr_cpu_ids;
 }
 
+static void task_numa_tiering_placement(struct task_struct *p);
+
+static bool task_numa_tiering_update(struct task_struct *p)
+{
+	if (!numa_balancing_tiering_only() || !p->mm)
+		return false;
+
+	task_numa_tiering_placement(p);
+	return true;
+}
+
+static void task_numa_tiering_no_feedback(struct task_struct *p)
+{
+	task_numa_tiering_update(p);
+}
+
+static void task_numa_tiering_fault(struct task_struct *p,
+				    enum numa_tiering_fault_stats stat,
+				    unsigned long pages)
+{
+	if (!task_numa_tiering_update(p))
+		return;
+
+	p->numa_tiering_faults[stat] += pages;
+}
+
 /*
  * For memory tiering mode, if the target fast memory node has enough free
  * pages, recently accessed slow memory pages can bypass the normal hotness
@@ -2887,6 +2913,7 @@ bool should_numa_migrate_memory(struct task_struct *p, struct folio *folio,
 		pgdat = NODE_DATA(dst_nid);
 		if (numa_balancing_promote_free_space_bypass &&
 		    pgdat_free_space_enough(pgdat)) {
+			task_numa_tiering_no_feedback(p);
 			/* workload changed, reset hot threshold */
 			pgdat->nbp_threshold = 0;
 			mod_node_page_state(pgdat, PGPROMOTE_CANDIDATE_NRL, nr);
@@ -2899,10 +2926,18 @@ bool should_numa_migrate_memory(struct task_struct *p, struct folio *folio,
 
 		th = pgdat->nbp_threshold ? : def_th;
 		latency = numa_hint_fault_latency(folio);
-		if (latency >= th)
+		if (latency >= th) {
+			task_numa_tiering_fault(p, NUMA_TIERING_FAULT_COLD, nr);
 			return false;
+		}
 
-		return !numa_promotion_rate_limit(pgdat, rate_limit, nr);
+		if (numa_promotion_rate_limit(pgdat, rate_limit, nr)) {
+			task_numa_tiering_fault(p, NUMA_TIERING_FAULT_THROTTLED, nr);
+			return false;
+		}
+
+		task_numa_tiering_fault(p, NUMA_TIERING_FAULT_HOT, nr);
+		return true;
 	}
 
 	this_cpupid = cpu_pid_to_cpupid(dst_cpu, current->pid);
@@ -3709,6 +3744,48 @@ out:
 }
 
 /*
+ * Memory tiering uses NUMA hint faults to identify recently accessed slow
+ * memory that should be promoted. In tiering-only mode, those faults are not
+ * normal task-placement feedback, so use tiering-specific outcomes to adjust
+ * the scan period.
+ */
+static void update_task_tiering_scan_period(struct task_struct *p)
+{
+	unsigned long cold, hot, throttled, failed;
+	unsigned long total;
+	s64 period, period_slot;
+	s64 diff = 0;
+
+	cold = p->numa_tiering_faults[NUMA_TIERING_FAULT_COLD];
+	hot = p->numa_tiering_faults[NUMA_TIERING_FAULT_HOT];
+	throttled = p->numa_tiering_faults[NUMA_TIERING_FAULT_THROTTLED];
+	failed = p->numa_tiering_faults[NUMA_TIERING_FAULT_MIGRATE_FAIL];
+	total = cold + hot + throttled + failed;
+
+	period = p->numa_scan_period;
+	period_slot = DIV_ROUND_UP_ULL(period, NUMA_PERIOD_SLOTS);
+
+	if (!total) {
+		diff = period;
+	} else if (failed) {
+		diff = period_slot;
+	} else if (throttled * NUMA_PERIOD_SLOTS >=
+		   total * (NUMA_PERIOD_SLOTS - NUMA_PERIOD_THRESHOLD)) {
+		diff = period_slot;
+	} else if (cold * NUMA_PERIOD_SLOTS >=
+		   total * NUMA_PERIOD_THRESHOLD) {
+		diff = period_slot;
+	} else if (hot * NUMA_PERIOD_SLOTS >=
+		   total * NUMA_PERIOD_THRESHOLD) {
+		diff = -period_slot;
+	}
+
+	p->numa_scan_period = clamp_t(s64, period + diff,
+				      task_scan_min(p), task_scan_max(p));
+	memset(p->numa_tiering_faults, 0, sizeof(p->numa_tiering_faults));
+}
+
+/*
  * Get the fraction of time the task has been running since the last
  * NUMA placement cycle. The scheduler keeps similar statistics, but
  * decays those on a 32ms period, which is orders of magnitude off
@@ -3974,6 +4051,22 @@ static void task_numa_placement(struct task_struct *p)
 	update_task_scan_period(p, fault_types[0], fault_types[1]);
 }
 
+static void task_numa_tiering_placement(struct task_struct *p)
+{
+	int seq;
+
+	if (!p->mm)
+		return;
+
+	seq = READ_ONCE(p->mm->numa_scan_seq);
+	if (p->numa_scan_seq == seq)
+		return;
+	p->numa_scan_seq = seq;
+	p->numa_scan_period_max = task_scan_max(p);
+
+	update_task_tiering_scan_period(p);
+}
+
 static inline int get_numa_group(struct numa_group *grp)
 {
 	return refcount_inc_not_zero(&grp->refcount);
@@ -4105,6 +4198,8 @@ void task_numa_free(struct task_struct *p, bool final)
 	unsigned long flags;
 	int i;
 
+	memset(p->numa_tiering_faults, 0, sizeof(p->numa_tiering_faults));
+
 	if (!numa_faults)
 		return;
 
@@ -4158,6 +4253,11 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 		if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL)) {
 			if (migrated)
 				p->numa_pages_migrated += pages;
+			if (numa_balancing_tiering_only() &&
+			    (flags & TNF_MIGRATE_FAIL))
+				task_numa_tiering_fault(p,
+						NUMA_TIERING_FAULT_MIGRATE_FAIL,
+						pages);
 			return;
 		}
 	}
@@ -4530,6 +4630,14 @@ out:
 	mmap_read_unlock(mm);
 
 	/*
+	 * Tiering-only placement feedback is still scan-window based. Consume
+	 * the window when a scan sequence completes, so an empty tiering
+	 * window can back off after qualifying tiering faults stop.
+	 */
+	if (numa_balancing_tiering_only())
+		task_numa_tiering_placement(p);
+
+	/*
 	 * Make sure tasks use at least 32x as much time to run other code
 	 * than they used here, to limit NUMA PTE scanning overhead to 3% max.
 	 * Usually update_task_scan_period slows down scanning enough; on an
@@ -4562,6 +4670,7 @@ void init_numa_balancing(u64 clone_flags, struct task_struct *p)
 	p->numa_faults			= NULL;
 	p->numa_pages_migrated		= 0;
 	p->total_numa_faults		= 0;
+	memset(p->numa_tiering_faults, 0, sizeof(p->numa_tiering_faults));
 	RCU_INIT_POINTER(p->numa_group, NULL);
 	p->last_task_numa_placement	= 0;
 	p->last_sum_exec_runtime	= 0;
