@@ -1437,6 +1437,7 @@ void remove_hugetlb_folio(struct hstate *h, struct folio *folio,
 void add_hugetlb_folio(struct hstate *h, struct folio *folio,
 		       bool adjust_surplus)
 {
+	bool cma = folio_test_hugetlb_cma(folio);
 	int nid = folio_nid(folio);
 
 	VM_BUG_ON_FOLIO(!folio_test_hugetlb_vmemmap_optimized(folio), folio);
@@ -1453,9 +1454,11 @@ void add_hugetlb_folio(struct hstate *h, struct folio *folio,
 	}
 
 	__folio_set_hugetlb(folio);
-	/* Clear all folio->private flags except hugetlb_vmemmap_optimized. */
+	/* Preserve the vmemmap optimization state and CMA allocation origin. */
 	folio->private = NULL;
 	folio_set_hugetlb_vmemmap_optimized(folio);
+	if (cma)
+		folio_set_hugetlb_cma(folio);
 
 	arch_clear_hugetlb_flags(folio);
 	enqueue_hugetlb_folio(h, folio);
