@@ -193,6 +193,13 @@ DAMON_RECLAIM becomes inactive, so it does nothing but periodically checks the
 watermarks.  In the case, the system falls back to the LRU-list based page
 granularity reclamation logic.
 
+To keep DAMON_RECLAIM always active regardless of the free memory rate, set
+``wmarks_high``, ``wmarks_mid`` and ``wmarks_low`` to ``1000``, ``1000`` and
+``0``, respectively.  Then the reclamation is limited only by ``min_age`` and
+the quotas.  This is useful for reclaiming cold pages even while the system
+has plenty of free memory, e.g., right after an idle virtual machine is
+paused.
+
 sample_interval
 ---------------
 
