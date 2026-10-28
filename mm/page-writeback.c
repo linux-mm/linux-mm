@@ -2601,7 +2601,7 @@ EXPORT_SYMBOL(noop_dirty_folio);
  * NOTE: This relies on being atomic wrt interrupts.
  */
 static void folio_account_dirtied(struct folio *folio,
-		struct address_space *mapping)
+		struct address_space *mapping, bool accounted)
 {
 	struct inode *inode = mapping->host;
 
@@ -2614,19 +2614,47 @@ static void folio_account_dirtied(struct folio *folio,
 		inode_attach_wb(inode, folio);
 		wb = inode_to_wb(inode);
 
-		lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, nr);
-		if (folio_test_dropbehind(folio))
-			wb_stat_mod(wb, WB_DONTCACHE_DIRTY, nr);
-		__zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
-		__node_stat_mod_folio(folio, NR_DIRTIED, nr);
-		wb_stat_mod(wb, WB_RECLAIMABLE, nr);
-		wb_stat_mod(wb, WB_DIRTIED, nr);
-		task_io_account_write(nr * PAGE_SIZE);
+		/*
+		 * @accounted means the filesystem charged these per dirty page
+		 * already; the rate limiters below stay per-folio.  Keep in sync
+		 * with folio_account_cleaned() and folio_clear_dirty_for_io().
+		 */
+		if (!accounted) {
+			lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, nr);
+			if (folio_test_dropbehind(folio))
+				wb_stat_mod(wb, WB_DONTCACHE_DIRTY, nr);
+			__zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
+			wb_stat_mod(wb, WB_RECLAIMABLE, nr);
+			__node_stat_mod_folio(folio, NR_DIRTIED, nr);
+			wb_stat_mod(wb, WB_DIRTIED, nr);
+			task_io_account_write(nr * PAGE_SIZE);
+		}
 		current->nr_dirtied += nr;
 		__this_cpu_add(bdp_ratelimits, nr);
 
 		mem_cgroup_track_foreign_dirty(folio, wb);
 	}
+}
+
+/**
+ * folio_accounted_dirty_pages - pages of @folio charged to the dirty counters
+ * @folio: folio to query
+ *
+ * Use this rather than folio_nr_pages() when moving or discharging a folio's dirty
+ * accounting, as a folio is not necessarily charged for all of its pages.  Walks
+ * per-block state that truncation frees, so the caller must hold the folio lock.
+ *
+ * Return: the whole folio for the usual per-folio accounting, otherwise only the
+ * pages holding a dirty block, and zero once those have been discharged.
+ */
+long folio_accounted_dirty_pages(struct folio *folio)
+{
+	struct address_space *mapping = folio->mapping;
+
+	if (mapping && mapping_dirty_per_block(mapping) && folio->private &&
+	    mapping->a_ops->accounted_dirty_pages)
+		return mapping->a_ops->accounted_dirty_pages(folio);
+	return folio_nr_pages(folio);
 }
 
 /*
@@ -2635,7 +2663,14 @@ static void folio_account_dirtied(struct folio *folio,
  */
 void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb)
 {
-	long nr = folio_nr_pages(folio);
+	/*
+	 * Discharge exactly what was charged; zero if the fs already did it.
+	 * Counters below mirror folio_account_dirtied().
+	 */
+	long nr = folio_accounted_dirty_pages(folio);
+
+	if (!nr)
+		return;
 
 	lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
 	if (folio_test_dropbehind(folio))
@@ -2661,7 +2696,7 @@ void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb)
  * try_to_free_buffers() to fail.
  */
 void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
-			     int warn)
+			     int warn, bool accounted)
 {
 	unsigned long flags;
 
@@ -2674,7 +2709,7 @@ void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
 	xa_lock_irqsave(&mapping->i_pages, flags);
 	if (folio->mapping) {	/* Race with truncate? */
 		WARN_ON_ONCE(warn && !folio_test_uptodate(folio));
-		folio_account_dirtied(folio, mapping);
+		folio_account_dirtied(folio, mapping, accounted);
 		__xa_set_mark(&mapping->i_pages, folio->index,
 			      PAGECACHE_TAG_DIRTY);
 	}
@@ -2700,18 +2735,25 @@ void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
  * simply hold the folio lock, but e.g. zap_pte_range() calls with the
  * folio mapped and the pte lock held, which also locks out truncation.
  */
-bool filemap_dirty_folio(struct address_space *mapping, struct folio *folio)
+bool __filemap_dirty_folio(struct address_space *mapping, struct folio *folio,
+		bool accounted)
 {
 	if (folio_test_set_dirty(folio))
 		return false;
 
-	__folio_mark_dirty(folio, mapping, !folio_test_private(folio));
+	__folio_mark_dirty(folio, mapping, !folio_test_private(folio), accounted);
 
 	if (mapping->host) {
 		/* !PageAnon && !swapper_space */
 		__mark_inode_dirty(mapping->host, I_DIRTY_PAGES);
 	}
 	return true;
+}
+EXPORT_SYMBOL_GPL(__filemap_dirty_folio);
+
+bool filemap_dirty_folio(struct address_space *mapping, struct folio *folio)
+{
+	return __filemap_dirty_folio(mapping, folio, false);
 }
 EXPORT_SYMBOL(filemap_dirty_folio);
 
@@ -2912,12 +2954,21 @@ bool folio_clear_dirty_for_io(struct folio *folio)
 		 */
 		wb = unlocked_inode_to_wb_begin(inode, &cookie);
 		if (folio_test_clear_dirty(folio)) {
-			long nr = folio_nr_pages(folio);
-			lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
-			if (folio_test_dropbehind(folio))
-				wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
-			zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
-			wb_stat_mod(wb, WB_RECLAIMABLE, -nr);
+			/*
+			 * Per-block folios keep their dirty bits, and the charge,
+			 * until the fs writes them back.  Folios of such a mapping
+			 * that never got per-block state were charged whole, so
+			 * they discharge here as usual.
+			 */
+			if (!mapping_dirty_per_block(mapping) || !folio->private) {
+				long nr = folio_nr_pages(folio);
+
+				lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
+				if (folio_test_dropbehind(folio))
+					wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
+				zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
+				wb_stat_mod(wb, WB_RECLAIMABLE, -nr);
+			}
 			ret = true;
 		}
 		unlocked_inode_to_wb_end(inode, &cookie);

@@ -210,6 +210,7 @@ enum mapping_flags {
 	AS_WRITEBACK_MAY_DEADLOCK_ON_RECLAIM = 9,
 	AS_KERNEL_FILE = 10,	/* mapping for a fake kernel file that shouldn't
 				   account usage to user cgroups */
+	AS_DIRTY_PER_BLOCK = 11, /* fs accounts dirty pages, not whole folios */
 	/* Bits 16-25 are used for FOLIO_ORDER */
 	AS_FOLIO_ORDER_BITS = 5,
 	AS_FOLIO_ORDER_MIN = 16,
@@ -302,6 +303,20 @@ static inline void mapping_set_release_always(struct address_space *mapping)
 static inline void mapping_clear_release_always(struct address_space *mapping)
 {
 	clear_bit(AS_RELEASE_ALWAYS, &mapping->flags);
+}
+
+/*
+ * Set by filesystems that charge the mm dirty counters per dirty page rather
+ * than per folio, so the generic paths must not also account whole folios.
+ */
+static inline void mapping_set_dirty_per_block(struct address_space *mapping)
+{
+	set_bit(AS_DIRTY_PER_BLOCK, &mapping->flags);
+}
+
+static inline bool mapping_dirty_per_block(const struct address_space *mapping)
+{
+	return test_bit(AS_DIRTY_PER_BLOCK, &mapping->flags);
 }
 
 static inline bool mapping_stable_writes(const struct address_space *mapping)
@@ -1311,7 +1326,10 @@ void folio_end_writeback(struct folio *folio);
 void folio_end_writeback_no_dropbehind(struct folio *folio);
 void folio_end_dropbehind(struct folio *folio);
 void folio_wait_stable(struct folio *folio);
-void __folio_mark_dirty(struct folio *folio, struct address_space *, int warn);
+void __folio_mark_dirty(struct folio *folio, struct address_space *mapping,
+		int warn, bool accounted);
+bool __filemap_dirty_folio(struct address_space *mapping, struct folio *folio,
+		bool accounted);
 void folio_account_cleaned(struct folio *folio, struct bdi_writeback *wb);
 void __folio_cancel_dirty(struct folio *folio);
 static inline void folio_cancel_dirty(struct folio *folio)

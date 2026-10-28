@@ -588,6 +588,7 @@ static int __folio_migrate_mapping(struct address_space *mapping,
 	struct zone *oldzone, *newzone;
 	int dirty;
 	long nr = folio_nr_pages(folio);
+	long nr_dirty = nr;
 
 	if (!mapping) {
 		/* Take off deferred split queue while frozen and memcg set */
@@ -613,6 +614,14 @@ static int __folio_migrate_mapping(struct address_space *mapping,
 
 	oldzone = folio_zone(folio);
 	newzone = folio_zone(newfolio);
+
+	/*
+	 * Only what was charged moves between the zones below, which may be less
+	 * than the whole folio.  Sample it outside the i_pages lock, as it walks
+	 * the per-block state, and while the folio is still dirty.
+	 */
+	if (folio_test_dirty(folio))
+		nr_dirty = folio_accounted_dirty_pages(folio);
 
 	if (folio_test_swapcache(folio))
 		ci = swap_cluster_get_and_lock_irq(folio);
@@ -708,10 +717,10 @@ static int __folio_migrate_mapping(struct address_space *mapping,
 		}
 #endif
 		if (dirty && mapping_can_writeback(mapping)) {
-			mod_lruvec_state(old_lruvec, NR_FILE_DIRTY, -nr);
-			__mod_zone_page_state(oldzone, NR_ZONE_WRITE_PENDING, -nr);
-			mod_lruvec_state(new_lruvec, NR_FILE_DIRTY, nr);
-			__mod_zone_page_state(newzone, NR_ZONE_WRITE_PENDING, nr);
+			mod_lruvec_state(old_lruvec, NR_FILE_DIRTY, -nr_dirty);
+			__mod_zone_page_state(oldzone, NR_ZONE_WRITE_PENDING, -nr_dirty);
+			mod_lruvec_state(new_lruvec, NR_FILE_DIRTY, nr_dirty);
+			__mod_zone_page_state(newzone, NR_ZONE_WRITE_PENDING, nr_dirty);
 		}
 		rcu_read_unlock();
 	}

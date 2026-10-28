@@ -2304,6 +2304,7 @@ const struct address_space_operations ntfs_aops = {
 	.writepages	= ntfs_writepages,
 	.bmap		= ntfs_bmap,
 	.dirty_folio	= iomap_dirty_folio,
+	.accounted_dirty_pages = iomap_accounted_dirty_pages,
 	.migrate_folio	= filemap_migrate_folio,
 	.release_folio	= iomap_release_folio,
 	.invalidate_folio = iomap_invalidate_folio,
@@ -2312,6 +2313,7 @@ const struct address_space_operations ntfs_aops = {
 const struct address_space_operations ntfs_aops_cmpr = {
 	.read_folio	= ntfs_read_folio,
 	.dirty_folio	= iomap_dirty_folio,
+	.accounted_dirty_pages = iomap_accounted_dirty_pages,
 	.release_folio	= iomap_release_folio,
 	.invalidate_folio = iomap_invalidate_folio,
 };

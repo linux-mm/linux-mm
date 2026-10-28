@@ -5,6 +5,8 @@
  */
 #include <linux/iomap.h>
 #include <linux/buffer_head.h>
+#include <linux/backing-dev.h>
+#include <linux/task_io_accounting_ops.h>
 #include <linux/writeback.h>
 #include <linux/swap.h>
 #include <linux/migrate.h>
@@ -23,6 +25,13 @@ struct iomap_folio_state {
 	spinlock_t		state_lock;
 	unsigned int		read_bytes_pending;
 	atomic_t		write_bytes_pending;
+
+	/*
+	 * Pages holding at least one dirty block, the unit the mm dirty counters
+	 * work in.  Maintained under @state_lock alongside the dirty bits below,
+	 * so it is what those counters were charged for.
+	 */
+	unsigned int		dirty_pages;
 
 	/*
 	 * Each block has two bits in this bitmap:
@@ -181,6 +190,89 @@ static unsigned iomap_find_dirty_range(struct folio *folio, u64 *range_start,
 }
 
 /*
+ * Count pages in [first_blk, last_blk] holding at least one dirty block.  Callers
+ * take this before and after flipping the bitmap for an exact delta, so each page
+ * is scanned over its full block span to land in the same page in both counts.
+ * state_lock must be held.
+ */
+static unsigned int ifs_count_dirty_pages(struct folio *folio,
+		struct iomap_folio_state *ifs, unsigned int first_blk,
+		unsigned int last_blk)
+{
+	struct inode *inode = folio->mapping->host;
+	unsigned int blks_per_folio = i_blocks_per_folio(inode, folio);
+	unsigned int blkbits = inode->i_blkbits;
+	size_t fsize = folio_size(folio);
+	size_t start = (size_t)first_blk << blkbits;
+	size_t end = min(((size_t)last_blk << blkbits) + (1UL << blkbits) - 1,
+			 fsize - 1);
+	unsigned long first_pg = start >> PAGE_SHIFT;
+	unsigned long last_pg = end >> PAGE_SHIFT;
+	unsigned int dirty_pages = 0;
+	unsigned long pg;
+
+	for (pg = first_pg; pg <= last_pg; pg++) {
+		size_t pg_start = pg << PAGE_SHIFT;
+		size_t pg_end = min(pg_start + PAGE_SIZE - 1, fsize - 1);
+		unsigned int b_lo = pg_start >> blkbits;
+		unsigned int b_hi = pg_end >> blkbits;
+		unsigned int b;
+
+		for (b = b_lo; b <= b_hi; b++) {
+			if (test_bit(b + blks_per_folio, ifs->state)) {
+				dirty_pages++;
+				break;
+			}
+		}
+	}
+	return dirty_pages;
+}
+
+/*
+ * Mirror folio_account_dirtied() in page-sized increments; @nr_pages is positive
+ * to charge and negative to discharge.
+ *
+ * The NR_DIRTIED/WB_DIRTIED/task_io totals are monotonic, so only @new_dirty data
+ * may charge them; writeback re-marks an already charged folio.
+ *
+ * Only the folio lock is held, not i_pages, hence the IRQ-safe stat helpers.
+ */
+static void iomap_account_dirty_pages(struct folio *folio, long nr_pages,
+		bool new_dirty)
+{
+	struct address_space *mapping = folio->mapping;
+	struct inode *inode = mapping->host;
+	struct wb_lock_cookie cookie = {};
+	struct bdi_writeback *wb;
+	bool dirtied = nr_pages > 0 && new_dirty;
+
+	if (!nr_pages || !mapping_can_writeback(mapping))
+		return;
+
+	lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, nr_pages);
+	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr_pages);
+	if (dirtied)
+		node_stat_mod_folio(folio, NR_DIRTIED, nr_pages);
+
+	/* Pin the wb against a concurrent inode_do_switch_wbs(). */
+	inode_attach_wb(inode, folio);
+	wb = unlocked_inode_to_wb_begin(inode, &cookie);
+	wb_stat_mod(wb, WB_RECLAIMABLE, nr_pages);
+	if (folio_test_dropbehind(folio))
+		wb_stat_mod(wb, WB_DONTCACHE_DIRTY, nr_pages);
+	if (dirtied)
+		wb_stat_mod(wb, WB_DIRTIED, nr_pages);
+	unlocked_inode_to_wb_end(inode, &cookie);
+
+	if (dirtied) {
+		task_io_account_write(nr_pages * PAGE_SIZE);
+	} else if (nr_pages < 0 && !folio_test_writeback(folio)) {
+		/* truncated or invalidated before reaching disk, so refund */
+		task_io_account_cancelled_write((-nr_pages) * PAGE_SIZE);
+	}
+}
+
+/*
  * Clear the per-block dirty bits for the range [@off, @off + @len) within a
  * folio.  The range is rounded inwards so that only blocks fully covered by
  * the range are cleared.  This is required for operations like folio
@@ -195,15 +287,22 @@ static void ifs_clear_range_dirty(struct folio *folio,
 	unsigned int first_blk = round_up(off, i_blocksize(inode)) >>
 				 inode->i_blkbits;
 	unsigned int last_blk = (off + len) >> inode->i_blkbits;
+	unsigned int before, after;
 	unsigned long flags;
 
 	if (first_blk >= last_blk)
 		return;
 
 	spin_lock_irqsave(&ifs->state_lock, flags);
+	before = ifs_count_dirty_pages(folio, ifs, first_blk, last_blk - 1);
 	bitmap_clear(ifs->state, first_blk + blks_per_folio,
 		     last_blk - first_blk);
+	after = ifs_count_dirty_pages(folio, ifs, first_blk, last_blk - 1);
+	ifs->dirty_pages -= before - after;
 	spin_unlock_irqrestore(&ifs->state_lock, flags);
+
+	/* Pages that lost their last dirty block, so before >= after. */
+	iomap_account_dirty_pages(folio, -(long)(before - after), false);
 }
 
 static void iomap_clear_range_dirty(struct folio *folio, size_t off, size_t len)
@@ -222,11 +321,13 @@ static void iomap_clear_range_dirty(struct folio *folio, size_t off, size_t len)
  * data loss when partial blocks are written.
  */
 static void ifs_set_range_dirty(struct folio *folio,
-		struct iomap_folio_state *ifs, size_t off, size_t len)
+		struct iomap_folio_state *ifs, size_t off, size_t len,
+		bool new_dirty)
 {
 	struct inode *inode = folio->mapping->host;
 	unsigned int blks_per_folio = i_blocks_per_folio(inode, folio);
 	unsigned int first_blk, last_blk;
+	unsigned int before, after;
 	unsigned long flags;
 
 	if (!len)
@@ -235,9 +336,15 @@ static void ifs_set_range_dirty(struct folio *folio,
 	first_blk = off >> inode->i_blkbits;
 	last_blk = (off + len - 1) >> inode->i_blkbits;
 	spin_lock_irqsave(&ifs->state_lock, flags);
+	before = ifs_count_dirty_pages(folio, ifs, first_blk, last_blk);
 	bitmap_set(ifs->state, first_blk + blks_per_folio,
 		   last_blk - first_blk + 1);
+	after = ifs_count_dirty_pages(folio, ifs, first_blk, last_blk);
+	ifs->dirty_pages += after - before;
 	spin_unlock_irqrestore(&ifs->state_lock, flags);
+
+	/* Pages that gained their first dirty block, so after >= before. */
+	iomap_account_dirty_pages(folio, (long)(after - before), new_dirty);
 }
 
 static void iomap_set_range_dirty(struct folio *folio, size_t off, size_t len)
@@ -245,7 +352,20 @@ static void iomap_set_range_dirty(struct folio *folio, size_t off, size_t len)
 	struct iomap_folio_state *ifs = folio->private;
 
 	if (ifs)
-		ifs_set_range_dirty(folio, ifs, off, len);
+		ifs_set_range_dirty(folio, ifs, off, len, true);
+}
+
+/*
+ * Set the dirty bits for blocks that were already dirty, and already counted,
+ * before this folio had per-block state: the reclaimable counters still move,
+ * but the dirtied totals must not be charged twice.
+ */
+static void iomap_redirty_range(struct folio *folio, size_t off, size_t len)
+{
+	struct iomap_folio_state *ifs = folio->private;
+
+	if (ifs)
+		ifs_set_range_dirty(folio, ifs, off, len, false);
 }
 
 static struct iomap_folio_state *ifs_alloc(struct inode *inode,
@@ -276,9 +396,13 @@ static struct iomap_folio_state *ifs_alloc(struct inode *inode,
 	spin_lock_init(&ifs->state_lock);
 	if (folio_test_uptodate(folio))
 		bitmap_set(ifs->state, 0, nr_blocks);
-	if (folio_test_dirty(folio))
+	if (folio_test_dirty(folio)) {
 		bitmap_set(ifs->state, nr_blocks, nr_blocks);
+		ifs->dirty_pages = folio_nr_pages(folio);
+	}
 	folio_attach_private(folio, ifs);
+	/* The mm dirty counters are now charged per dirty page for this file. */
+	mapping_set_dirty_per_block(inode->i_mapping);
 
 	return ifs;
 }
@@ -839,6 +963,11 @@ void iomap_invalidate_folio(struct folio *folio, size_t offset, size_t len)
 	 */
 	if (offset == 0 && len == folio_size(folio)) {
 		WARN_ON_ONCE(folio_test_writeback(folio));
+		/*
+		 * Discharge while the bitmap is still attached; ifs_free() below
+		 * drops the state that records how many pages were charged.
+		 */
+		iomap_clear_range_dirty(folio, 0, folio_size(folio));
 		folio_cancel_dirty(folio);
 		ifs_free(folio);
 	} else {
@@ -854,9 +983,30 @@ bool iomap_dirty_folio(struct address_space *mapping, struct folio *folio)
 
 	ifs_alloc(inode, folio, 0);
 	iomap_set_range_dirty(folio, 0, len);
-	return filemap_dirty_folio(mapping, folio);
+	return __filemap_dirty_folio(mapping, folio, folio->private);
 }
 EXPORT_SYMBOL_GPL(iomap_dirty_folio);
+
+/**
+ * iomap_accounted_dirty_pages - pages of @folio charged to the dirty counters
+ * @folio: folio to query
+ *
+ * For callers that discharge what iomap charged.  The caller must hold the folio
+ * lock, and @folio must have per-block state attached.
+ *
+ * Return: pages of @folio holding at least one dirty block, zero once they have
+ * been cleared, so a later discharge does not double count.
+ */
+long iomap_accounted_dirty_pages(struct folio *folio)
+{
+	struct iomap_folio_state *ifs = folio->private;
+
+	if (WARN_ON_ONCE(!ifs))
+		return 0;
+
+	return ifs->dirty_pages;
+}
+EXPORT_SYMBOL_GPL(iomap_accounted_dirty_pages);
 
 static void
 iomap_write_failed(struct inode *inode, loff_t pos, unsigned len)
@@ -1137,7 +1287,7 @@ static bool __iomap_write_end(struct inode *inode, loff_t pos, size_t len,
 		return false;
 	iomap_set_range_uptodate(folio, offset_in_folio(folio, pos), len);
 	iomap_set_range_dirty(folio, offset_in_folio(folio, pos), copied);
-	filemap_dirty_folio(inode->i_mapping, folio);
+	__filemap_dirty_folio(inode->i_mapping, folio, folio->private);
 	return true;
 }
 
@@ -2001,8 +2151,13 @@ int iomap_writeback_folio(struct iomap_writepage_ctx *wpc, struct folio *folio)
 
 	if (i_blocks_per_folio(inode, folio) > 1) {
 		if (!ifs) {
+			/*
+			 * Dirtied before it had per-block state, so charged
+			 * per-folio.  Re-mark the blocks for the walk below,
+			 * paired with the clear at the end of this function.
+			 */
 			ifs = ifs_alloc(inode, folio, 0);
-			iomap_set_range_dirty(folio, 0, end_pos - pos);
+			iomap_redirty_range(folio, 0, end_pos - pos);
 		}
 
 		iomap_writeback_init(inode, folio);

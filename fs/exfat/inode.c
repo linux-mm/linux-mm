@@ -302,6 +302,7 @@ static const struct address_space_operations exfat_aops = {
 	.readahead		= exfat_readahead,
 	.writepages		= exfat_writepages,
 	.dirty_folio		= iomap_dirty_folio,
+	.accounted_dirty_pages	= iomap_accounted_dirty_pages,
 	.bmap			= exfat_aop_bmap,
 	.migrate_folio		= filemap_migrate_folio,
 	.is_partially_uptodate	= iomap_is_partially_uptodate,
