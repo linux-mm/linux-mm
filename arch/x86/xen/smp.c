@@ -11,7 +11,6 @@
 #include "xen-ops.h"
 
 static DEFINE_PER_CPU(struct xen_common_irq, xen_resched_irq) = { .irq = -1 };
-static DEFINE_PER_CPU(struct xen_common_irq, xen_callfunc_irq) = { .irq = -1 };
 static DEFINE_PER_CPU(struct xen_common_irq, xen_callfuncsingle_irq) = { .irq = -1 };
 static DEFINE_PER_CPU(struct xen_common_irq, xen_debug_irq) = { .irq = -1 };
 
@@ -36,12 +35,6 @@ void xen_smp_intr_free(unsigned int cpu)
 	if (per_cpu(xen_resched_irq, cpu).irq >= 0) {
 		unbind_from_irqhandler(per_cpu(xen_resched_irq, cpu).irq, NULL);
 		per_cpu(xen_resched_irq, cpu).irq = -1;
-	}
-	kfree(per_cpu(xen_callfunc_irq, cpu).name);
-	per_cpu(xen_callfunc_irq, cpu).name = NULL;
-	if (per_cpu(xen_callfunc_irq, cpu).irq >= 0) {
-		unbind_from_irqhandler(per_cpu(xen_callfunc_irq, cpu).irq, NULL);
-		per_cpu(xen_callfunc_irq, cpu).irq = -1;
 	}
 	kfree(per_cpu(xen_debug_irq, cpu).name);
 	per_cpu(xen_debug_irq, cpu).name = NULL;
@@ -80,16 +73,6 @@ int xen_smp_intr_init(unsigned int cpu)
 	callfunc_name = kasprintf(GFP_KERNEL, "callfunc%d", cpu);
 	if (!callfunc_name)
 		goto fail_mem;
-	per_cpu(xen_callfunc_irq, cpu).name = callfunc_name;
-	rc = bind_ipi_to_irqhandler(XEN_CALL_FUNCTION_VECTOR,
-				    cpu,
-				    xen_call_function_interrupt,
-				    IRQF_PERCPU|IRQF_NOBALANCING,
-				    callfunc_name,
-				    NULL);
-	if (rc < 0)
-		goto fail;
-	per_cpu(xen_callfunc_irq, cpu).irq = rc;
 
 	if (!xen_fifo_events) {
 		debug_name = kasprintf(GFP_KERNEL, "debug%d", cpu);
@@ -154,7 +137,7 @@ void xen_smp_send_call_function_ipi(const struct cpumask *mask)
 {
 	int cpu;
 
-	__xen_send_IPI_mask(mask, XEN_CALL_FUNCTION_VECTOR);
+	__xen_send_IPI_mask(mask, XEN_CALL_FUNCTION_SINGLE_VECTOR);
 
 	/* Make sure other vcpus get a chance to run if they need to. */
 	for_each_cpu(cpu, mask) {
@@ -178,9 +161,6 @@ static inline int xen_map_vector(int vector)
 	switch (vector) {
 	case RESCHEDULE_VECTOR:
 		xen_vector = XEN_RESCHEDULE_VECTOR;
-		break;
-	case CALL_FUNCTION_VECTOR:
-		xen_vector = XEN_CALL_FUNCTION_VECTOR;
 		break;
 	case CALL_FUNCTION_SINGLE_VECTOR:
 		xen_vector = XEN_CALL_FUNCTION_SINGLE_VECTOR;
