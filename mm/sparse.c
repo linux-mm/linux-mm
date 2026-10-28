@@ -277,10 +277,8 @@ static void __init sparse_metadata_init(void)
  */
 void __init sparse_init(void)
 {
-	if (compound_info_has_mask()) {
-		VM_WARN_ON_ONCE(!IS_ALIGNED((unsigned long) pfn_to_page(0),
-				    MAX_FOLIO_VMEMMAP_ALIGN));
-	}
+	VM_WARN_ON(compound_info_has_mask() && !IS_ALIGNED(
+		   (unsigned long)pfn_to_page(0), MAX_FOLIO_VMEMMAP_ALIGN));
 
 	sparse_metadata_init();
 	sparse_init_subsection_map();
