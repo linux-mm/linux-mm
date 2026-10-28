@@ -504,12 +504,18 @@ static int __must_check zswap_pool_tryget(struct zswap_pool *pool)
 }
 
 /* The caller must already have a reference. */
-static void zswap_pool_get(struct zswap_pool *pool)
+static void __maybe_unused zswap_pool_get(struct zswap_pool *pool)
 {
 	percpu_ref_get(&pool->ref);
 }
 
-static void zswap_pool_put(struct zswap_pool *pool)
+/* The caller must already have a reference. */
+static inline void zswap_pool_get_many(struct zswap_pool *pool, u8 nr)
+{
+	percpu_ref_get_many(&pool->ref, nr);
+}
+
+static inline void zswap_pool_put(struct zswap_pool *pool)
 {
 	percpu_ref_put(&pool->ref);
 }
@@ -1668,25 +1674,13 @@ resched:
 **********************************/
 
 /*
- * Store multiple pages in @folio, starting from the page at index @start up to
- * the page at index @end-1.
+ * Functions called by zswap_store(), that operate on batches of pages.
  */
-static bool zswap_store_pages(struct zswap_store_context *zc,
-			      long start,
-			      long end,
-			      struct zswap_pool *pool,
-			      struct obj_cgroup *objcg)
+static inline void zswap_init_entries(struct zswap_store_context *zc,
+				      struct zswap_pool *pool,
+				      struct obj_cgroup *objcg)
 {
-	u8 i, store_fail_idx = 0;
-	bool ret;
-
-	zc->nr_pages = end - start;
-	zc->folio_start = start;
-
-	VM_WARN_ON_ONCE(zc->nr_pages <= 0 || zc->nr_pages > ZSWAP_MAX_BATCH_SIZE);
-
-	if (unlikely(!zswap_entries_cache_alloc_batch(zc, GFP_KERNEL)))
-		return false;
+	u8 i;
 
 	/*
 	 * We co-locate entry initialization as much as possible here to
@@ -1694,9 +1688,9 @@ static bool zswap_store_pages(struct zswap_store_context *zc,
 	 */
 	for (i = 0; i < zc->nr_pages; ++i) {
 		/*
-		 * Set pool_idx before the xa_store() below publishes the entry, or a
-		 * concurrent reader could resolve a stale pool_idx left by slab reuse
-		 * to an unrelated live pool.
+		 * Set pool_idx before the xa_store() in zswap_tree_stores()
+		 * publishes the entry, or a concurrent reader could resolve a
+		 * stale pool_idx left by slab reuse to an unrelated live pool.
 		 */
 		zc->entries[i]->pool_idx = pool->idx;
 		zc->entries[i]->swpentry = folio_swap_entry(zc->folio,
@@ -1706,6 +1700,114 @@ static bool zswap_store_pages(struct zswap_store_context *zc,
 		zc->entries[i]->nid = zc->nid;
 		INIT_LIST_HEAD(&zc->entries[i]->lru);
 	}
+}
+
+static bool zswap_tree_stores(struct zswap_store_context *zc)
+{
+	struct zswap_entry *old;
+	u8 i, store_fail_idx = 0;
+
+	for (i = 0; i < zc->nr_pages; ++i) {
+		old = xa_store(swap_zswap_tree(zc->entries[i]->swpentry),
+			       swp_offset(zc->entries[i]->swpentry),
+			       zc->entries[i], GFP_KERNEL);
+		if (unlikely(xa_is_err(old))) {
+			int err = xa_err(old);
+
+			WARN_ONCE(err != -ENOMEM, "unexpected xarray error: %d\n", err);
+			zswap_reject_alloc_fail++;
+			/*
+			 * Entries up to this point have been stored in the
+			 * xarray. Local cleanup in 'tree_store_failed' needs to
+			 * erase entries up until now.
+			 */
+			store_fail_idx = i;
+			goto tree_store_failed;
+		}
+
+		/*
+		 * We may have had an existing entry that became stale when
+		 * the folio was redirtied and now the new version is being
+		 * swapped out. Get rid of the old.
+		 */
+		if (unlikely(old))
+			zswap_entry_free(old);
+	}
+
+	return true;
+
+tree_store_failed:
+	for (i = 0; i < store_fail_idx; ++i)
+		xa_erase(swap_zswap_tree(zc->entries[i]->swpentry),
+			 swp_offset(zc->entries[i]->swpentry));
+	return false;
+}
+
+static inline void zswap_account_stores(struct zswap_store_context *zc,
+					struct zswap_pool *pool,
+					struct obj_cgroup *objcg)
+{
+	size_t total_batch_comp_length = 0;
+	u8 i;
+
+	for (i = 0; i < zc->nr_pages; ++i) {
+		if (unlikely(zc->entries[i]->length == PAGE_SIZE))
+			atomic_long_inc(&zswap_stored_incompressible_pages);
+
+		total_batch_comp_length += zc->entries[i]->length;
+
+		/*
+		 * We finish by adding the entry to the LRU while it's already
+		 * in xarray. This is safe because:
+		 *
+		 * 1. Concurrent stores and invalidations are excluded by folio lock.
+		 *
+		 * 2. Writeback is excluded by the entry not being on the LRU yet.
+		 *    The publishing order matters to prevent writeback from seeing
+		 *    an incoherent entry.
+		 */
+		if (likely(zc->entries[i]->length))
+			zswap_lru_add(zc->entries[i]);
+	}
+
+	/*
+	 * The entry is successfully compressed and stored in the tree,
+	 * and further failures will be cleaned up in zswap_store().
+	 * For the batch, grab refs to the pool and objcg, charge zswap memory,
+	 * and increment zswap_stored_pages by @zc->nr_pages. The opposite
+	 * actions will be performed by zswap_entry_free() when the entry is
+	 * removed from the tree.
+	 */
+	zswap_pool_get_many(pool, zc->nr_pages);
+	if (objcg) {
+		obj_cgroup_get_many(objcg, zc->nr_pages);
+		obj_cgroup_charge_zswap(objcg, total_batch_comp_length);
+	}
+	atomic_long_add(zc->nr_pages, &zswap_stored_pages);
+}
+
+/*
+ * Store multiple pages in @folio, starting from the page at index @start up to
+ * the page at index @end-1.
+ */
+static bool zswap_store_pages(struct zswap_store_context *zc,
+			      long start,
+			      long end,
+			      struct zswap_pool *pool,
+			      struct obj_cgroup *objcg)
+{
+	bool ret;
+	u8 i;
+
+	zc->nr_pages = end - start;
+	zc->folio_start = start;
+
+	VM_WARN_ON_ONCE(zc->nr_pages <= 0 || zc->nr_pages > ZSWAP_MAX_BATCH_SIZE);
+
+	if (unlikely(!zswap_entries_cache_alloc_batch(zc, GFP_KERNEL)))
+		return false;
+
+	zswap_init_entries(zc, pool, objcg);
 
 	/*
 	 * Locking the comp_ctx mutex once per store batch results in better
@@ -1721,77 +1823,21 @@ static bool zswap_store_pages(struct zswap_store_context *zc,
 	if (unlikely(!ret))
 		goto compress_failed;
 
-	for (i = 0; i < zc->nr_pages; ++i) {
-		struct zswap_entry *old, *entry = zc->entries[i];
+	ret = zswap_tree_stores(zc);
 
-		old = xa_store(swap_zswap_tree(entry->swpentry),
-			       swp_offset(entry->swpentry),
-			       entry, GFP_KERNEL);
-		if (unlikely(xa_is_err(old))) {
-			int err = xa_err(old);
+	if (unlikely(!ret))
+		goto store_pages_failed;
 
-			WARN_ONCE(err != -ENOMEM, "unexpected xarray error: %d\n", err);
-			zswap_reject_alloc_fail++;
-			/*
-			 * Entries up to this point have been stored in the
-			 * xarray. zswap_store() will erase them from the xarray
-			 * and call zswap_entry_free(). Local cleanup in
-			 * 'store_pages_failed' only needs to happen for
-			 * entries from [@i to @nr_pages).
-			 */
-			store_fail_idx = i;
-			goto store_pages_failed;
-		}
-
-		/*
-		 * We may have had an existing entry that became stale when
-		 * the folio was redirtied and now the new version is being
-		 * swapped out. Get rid of the old.
-		 */
-		if (unlikely(old))
-			zswap_entry_free(old);
-
-		/*
-		 * The entry is successfully compressed and stored in the tree,
-		 * and further failures will be cleaned up in zswap_store().
-		 * Grab refs to the pool and objcg, charge zswap memory, and
-		 * increment zswap_stored_pages. The opposite actions will be
-		 * performed by zswap_entry_free() when the entry is removed
-		 * from the tree.
-		 */
-		zswap_pool_get(pool);
-		if (objcg) {
-			obj_cgroup_get(objcg);
-			obj_cgroup_charge_zswap(objcg, entry->length);
-		}
-		atomic_long_inc(&zswap_stored_pages);
-		if (unlikely(entry->length == PAGE_SIZE))
-			atomic_long_inc(&zswap_stored_incompressible_pages);
-
-		/*
-		 * We finish by adding the entry to the LRU while it's already
-		 * in xarray. This is safe because:
-		 *
-		 * 1. Concurrent stores and invalidations are excluded by folio lock.
-		 *
-		 * 2. Writeback is excluded by the entry not being on the LRU yet.
-		 *    The publishing order matters to prevent writeback from seeing
-		 *    an incoherent entry.
-		 */
-		if (likely(entry->length))
-			zswap_lru_add(entry);
-	}
+	zswap_account_stores(zc, pool, objcg);
 
 	return true;
 
 store_pages_failed:
-	for (i = store_fail_idx; i < zc->nr_pages; ++i)
+	for (i = 0; i < zc->nr_pages; ++i)
 		zs_free(pool->zs_pool, zc->entries[i]->handle);
 
 compress_failed:
-	zswap_entries_cache_free_batch(&zc->entries[store_fail_idx],
-				       zc->nr_pages - store_fail_idx);
-
+	zswap_entries_cache_free_batch(zc->entries, zc->nr_pages);
 	return false;
 }
 
