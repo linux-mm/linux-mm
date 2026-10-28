@@ -124,7 +124,6 @@ static int __huge_pmd_unshare(struct mmu_gather *tlb,
 		bool check_locks);
 static void hugetlb_unshare_pmds(struct vm_area_struct *vma,
 		unsigned long start, unsigned long end, bool take_locks);
-static struct resv_map *vma_resv_map(struct vm_area_struct *vma);
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
@@ -1135,7 +1134,7 @@ static inline struct resv_map *inode_resv_map(struct inode *inode)
 	return HUGETLBFS_I(inode)->resv_map;
 }
 
-static struct resv_map *vma_resv_map(struct vm_area_struct *vma)
+struct resv_map *vma_resv_map(struct vm_area_struct *vma)
 {
 	VM_BUG_ON_VMA(!is_vm_hugetlb_page(vma), vma);
 	if (vma->vm_flags & VM_MAYSHARE) {
