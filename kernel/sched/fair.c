@@ -12125,6 +12125,219 @@ static bool update_llc_busiest(struct lb_env *env,
 	 */
 	return sgs->nr_pref_dst_llc > busiest->nr_pref_dst_llc;
 }
+
+/*
+ * Get preferred LLCs for which the destination precedes the source in
+ * that LLC's intra-node affinity order. For preferred LLCs outside the
+ * source/destination node, include them only when src_llc > dst_llc,
+ * following ascending LLC ID order within that node.
+ */
+static int get_affi_llcs(int src_llc, int dst_llc,
+			 int *affi_llcs, int llc_max)
+{
+	int j = 0, src_rank, dst_rank, cur_node, node, llc;
+
+	if (src_llc == dst_llc)
+		return 0;
+
+	cur_node = llc_to_node(src_llc);
+	if (cur_node != llc_to_node(dst_llc))
+		return 0;
+
+	for_each_node(node) {
+		for_each_llc_of_node(llc, node) {
+			if (llc >= llc_max)
+				continue;
+			if (node == cur_node) {
+				src_rank = affi_llc_rank_of(llc, src_llc, cur_node);
+				dst_rank = affi_llc_rank_of(llc, dst_llc, cur_node);
+				if (src_rank < 0 || dst_rank < 0)
+					continue;
+				if (src_rank > dst_rank)
+					affi_llcs[j++] = llc;
+			} else {
+				if (src_llc > dst_llc)
+					affi_llcs[j++] = llc;
+			}
+		}
+	}
+
+	return j;
+}
+
+static int get_affi_numas(int src_node, int dst_node, int *affi_nodes, int *affi, int max)
+{
+	int j = 0, src_dist, dst_dist, node;
+
+	for_each_node(node) {
+		if (j >= max)
+			break;
+		src_dist = node_distance(src_node, node);
+		dst_dist = node_distance(dst_node, node);
+		if (src_dist < 0 || dst_dist < 0)
+			continue;
+		if (src_dist == dst_dist) {
+			src_dist = affi_node_rank_of(node, src_node);
+			dst_dist = affi_node_rank_of(node, dst_node);
+			if (src_dist > dst_dist) {
+				affi[j] = 1;
+				affi_nodes[j++] = node;
+			}
+			continue;
+		}
+
+		if (src_dist > dst_dist) {
+			affi[j] = clamp(src_dist - dst_dist, 0, 1024);
+			affi_nodes[j++] = node;
+		}
+	}
+
+	return j;
+}
+
+static int calc_affinity_numa_score(struct sched_domain *sd, int src_cpu, int dst_cpu,
+			int *affi_node, int *affi, int *last_node, int *num, int llc_max)
+{
+	int llc, src_node, dst_node, tmp_node, score = 0, numa_count, node_max;
+
+	src_node = cpu_to_node(src_cpu);
+	dst_node = cpu_to_node(dst_cpu);
+	node_max = min_t(int, nr_node_ids, llc_max);
+	/*
+	 * The destination stays fixed during this source-rq scan. Reuse the
+	 * eligible node list and weights for consecutive source CPUs in the
+	 * same node; each rq's task counts are applied below.
+	 */
+	if (src_node != *last_node) {
+		*last_node = src_node;
+		*num = get_affi_numas(src_node, dst_node, affi_node,
+				      affi, node_max);
+	}
+
+	for (int i = 0; i < *num; i++) {
+		if ((unsigned int)affi_node[i] < nr_node_ids) {
+			tmp_node = affi_node[i];
+			numa_count = 0;
+			for_each_llc_of_node(llc, tmp_node) {
+				if (llc >= sd->llc_max)
+					continue;
+				numa_count += sd->llc_counts[llc];
+			}
+			score += numa_count * affi[i];
+		}
+	}
+
+	return score;
+}
+
+static int calc_affinity_llc_score(struct sched_domain *sd, struct sched_domain *sd_rq,
+			int src_cpu, int dst_cpu, int *affi_llc,
+			int *last_llc, int *num, int llc_max)
+{
+	int src_llc, dst_llc, score = 0;
+
+	if (sd->flags & (SD_NUMA | SD_SHARE_LLC))
+		return 0;
+
+	src_llc = llc_id(src_cpu);
+	dst_llc = llc_id(dst_cpu);
+
+	/*
+	 * The destination stays fixed during this source-rq scan. Reuse the
+	 * eligible LLC list for consecutive source CPUs in the same LLC;
+	 * each rq's task counts are applied below.
+	 */
+	if (src_llc != *last_llc) {
+		*last_llc = src_llc;
+		*num = get_affi_llcs(src_llc, dst_llc, affi_llc, llc_max);
+	}
+
+	for (int i = 0; i < *num; i++) {
+		if ((unsigned int)affi_llc[i] < llc_max)
+			score += sd_rq->llc_counts[affi_llc[i]];
+	}
+
+	return score;
+}
+
+/*
+ * Scratch arrays used while scoring rqs during load balancing. They live on
+ * the bottom sched_domain of the CPU running the balance, so they share the
+ * sched_domain lifetime and need neither a separate allocation nor any RCU
+ * handling of their own. Load balancing runs with preemption disabled, so
+ * this_rq() stays stable for a whole pass, and two CPUs balancing at the same
+ * time each get their own arrays.
+ */
+static void __maybe_unused lb_affi_scratch(int **ids, int **weights, int *llc_max)
+{
+	struct sched_domain *sd = rcu_dereference_all(this_rq()->sd);
+
+	*ids = sd ? sd->affi_ids : NULL;
+	*weights = sd ? sd->affi_weights : NULL;
+	*llc_max = sd ? sd->llc_max : 0;
+}
+
+/*
+ * To locate a source sched group/rq during load balancing, we require
+ * a metric to evaluate the migration benefit of each rq. For cache-aware
+ * scheduling, the primary optimization target is affinity improvement.
+ *
+ * This implementation quantifies affinity gains for candidate group/rq by
+ * computing an affinity score for each rq.
+ *
+ * The score is calculated for a given source and destination. Domains
+ * with SD_NUMA use NUMA-node granularity. Non-NUMA domains spanning
+ * multiple LLCs within one node use LLC granularity. This includes a
+ * package domain on a single-node system with multiple LLCs, as well as
+ * a NODE domain on a multi-node system.
+ *
+ * A task's cache preferred node is the node containing its preferred LLC.
+ * At NUMA level, score the cache preferred nodes for which moving from
+ * source to destination improves affinity. If the raw distances differ,
+ * use the positive distance difference as the weight. If they tie, use
+ * the cache preferred node's fixed affinity order to decide whether the
+ * move is eligible, with a unit weight:
+ *
+ *   Di = node_distance(src_node, NUMAi)
+ *        - node_distance(dst_node, NUMAi)
+ *   Ai = clamp(Di, 0, 1024)                 if Di > 0
+ *      = 1                                  if Di == 0 and dst ranks
+ *                                           before src for NUMAi
+ *      = 0                                  otherwise
+ *   Rt_i = sum_j(rq->sd->llc_counts[j]), LLCj belongs to NUMAi
+ *   Wi = Rt_i * Ai
+ *   p  = sum_i(Wi)
+ *
+ * At LLC level, the source and destination LLCs are in the same node.
+ * For each preferred LLC in that node, add the source rq's task count if the
+ * destination precedes the source in its fixed LLC affinity order.
+ * For preferred LLCs outside that node, include their task counts only
+ * when src_llc > dst_llc, following ascending LLC ID order within the
+ * source/destination node. Each eligible task contributes a unit weight.
+ *
+ * @last_node and @num cache the affinity vector while candidate runqueues
+ * are scanned for one load-balance destination. The destination CPU must
+ * remain unchanged for the lifetime of the cache. The caller must
+ * initialize *@last_node to -1 and *@num to 0.
+ */
+static int __maybe_unused
+calc_affinity_score(struct sched_domain *sd, struct rq *rq, int src_cpu,
+		    int dst_cpu, int *affi_nodes, int *affi, int *last_node,
+		    int *num, int llc_max)
+{
+	struct sched_domain *sd_rq = rcu_dereference_all(rq->sd);
+
+	if (!affi_nodes || !affi || !last_node ||
+			!num || !sd || !sd_rq || !llc_max)
+		return 0;
+
+	if (sd->flags & SD_NUMA)
+		return calc_affinity_numa_score(sd_rq, src_cpu, dst_cpu, affi_nodes,
+						affi, last_node, num, llc_max);
+
+	return calc_affinity_llc_score(sd, sd_rq, src_cpu, dst_cpu, affi_nodes,
+				       last_node, num, llc_max);
+}
 #else
 static inline void record_sg_llc_stats(struct lb_env *env, struct sg_lb_stats *sgs,
 				       struct sched_group *group)
