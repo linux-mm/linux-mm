@@ -4180,6 +4180,43 @@ sched_cache_numa_key_cmp(struct sched_cache_numa_key a,
 	return 0;
 }
 
+struct llc_node_iter {
+	const int *llc;
+	int nr;
+	int index;
+};
+
+/* Walk the LLC IDs of a node in ascending order under one RCU snapshot. */
+extern struct llc_node_iter llc_node_iter_begin(int node);
+extern int llc_node_iter_next(struct llc_node_iter *iter);
+
+#define for_each_llc_of_node(llc, node)					\
+	scoped_guard(rcu)						\
+		for (struct llc_node_iter __ln_iter =			\
+			     llc_node_iter_begin(node);			\
+		     ((llc) = llc_node_iter_next(&__ln_iter)) >= 0;)
+
+struct llc_node_span_iter {
+	const int *llc;
+	const void *span;
+	int nr;
+	int index;
+};
+
+/* Hold RCU continuously from begin() through the final next() call. */
+extern struct llc_node_span_iter llc_node_span_begin(int node);
+extern const struct cpumask *llc_node_span_next(struct llc_node_span_iter *iter);
+
+/*
+ * Visit @node's LLC spans in ascending LLC ID order. Empty spans are skipped.
+ * The body must not sleep.
+ */
+#define for_each_llc_node_span(node, span)					\
+	scoped_guard(rcu)							\
+		for (struct llc_node_span_iter __ls_iter =			\
+			     llc_node_span_begin(node);			\
+		     ((span) = llc_node_span_next(&__ls_iter)) != NULL;)
+
 struct affi_node_order_iter {
 	const int *order;
 	int root;
