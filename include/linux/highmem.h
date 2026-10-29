@@ -473,13 +473,25 @@ static inline int copy_mc_highpage(struct page *to, struct page *from)
 static inline int copy_mc_user_highpage(struct page *to, struct page *from,
 					unsigned long vaddr, struct vm_area_struct *vma)
 {
+	/* Don't touch data that is already marked poisoned. */
+	if (is_page_hwpoison(from))
+		return PAGE_SIZE;
 	copy_user_highpage(to, from, vaddr, vma);
+	/* The flag can also land while the copy runs. */
+	if (is_page_hwpoison(from))
+		return PAGE_SIZE;
 	return 0;
 }
 
 static inline int copy_mc_highpage(struct page *to, struct page *from)
 {
+	/* Don't touch data that is already marked poisoned. */
+	if (is_page_hwpoison(from))
+		return PAGE_SIZE;
 	copy_highpage(to, from);
+	/* The flag can also land while the copy runs. */
+	if (is_page_hwpoison(from))
+		return PAGE_SIZE;
 	return 0;
 }
 #endif
