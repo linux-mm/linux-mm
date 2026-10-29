@@ -13714,6 +13714,57 @@ imbalanced_active_balance(struct lb_env *env)
 	return 0;
 }
 
+#ifdef CONFIG_SCHED_CACHE
+/*
+ * Cache-aware aggregation can trigger active balance via migrate_llc_task
+ * without waiting for nr_balance_failed. Spreading load via migrate_task
+ * normally waits for nr_balance_failed to exceed cache_nice_tries + 2.
+ * This can leave one LLC above the aggregation threshold while another
+ * LLC has room.
+ *
+ * Allow that spread when the source is above the aggregation threshold,
+ * the destination has room for one CPU's load, and the source leads by
+ * at least two CPUs' load. The gap prevents one migration from reversing
+ * their utilization ordering and immediately inviting a migration back.
+ * The task migration checks still decide whether the task may move.
+ */
+static inline bool llc_spread_active_balance(struct lb_env *env)
+{
+	unsigned long src_util, src_cap, dst_util, dst_cap;
+
+	if (!sched_cache_enabled())
+		return false;
+
+	if (env->migration_type != migrate_task)
+		return false;
+
+	if (cpus_share_cache(env->src_cpu, env->dst_cpu))
+		return false;
+
+	if (!get_llc_stats(env->src_cpu, &src_util, &src_cap) ||
+	    !get_llc_stats(env->dst_cpu, &dst_util, &dst_cap))
+		return false;
+
+	if (fits_llc_capacity(src_util, src_cap, true))
+		return false;
+
+	/*
+	 * Reserve room for one CPU's load at the destination. A two-CPU gap
+	 * keeps one migration from reversing the utilization ordering and
+	 * causing the task to ping-pong between LLCs.
+	 */
+	if (!fits_llc_capacity(dst_util + SCHED_CAPACITY_SCALE, dst_cap, true))
+		return false;
+
+	return util_greater(src_util, dst_util);
+}
+#else
+static inline bool llc_spread_active_balance(struct lb_env *env)
+{
+	return false;
+}
+#endif
+
 static int need_active_balance(struct lb_env *env)
 {
 	struct sched_domain *sd = env->sd;
@@ -13725,6 +13776,9 @@ static int need_active_balance(struct lb_env *env)
 		return 1;
 
 	if (imbalanced_active_balance(env))
+		return 1;
+
+	if (llc_spread_active_balance(env))
 		return 1;
 
 	/*
