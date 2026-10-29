@@ -1101,6 +1101,38 @@ void __init sched_cache_init_node_order(void)
 	sched_cache_numa_distance_update_end(true);
 }
 
+struct affi_node_order_iter affi_node_order_begin(int cpu)
+{
+	struct affi_node_order_topology *topo;
+	struct affi_node_order_iter iter = { };
+
+	RCU_LOCKDEP_WARN(!rcu_read_lock_any_held(), "node order read without RCU");
+	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_possible(cpu))
+		return iter;
+
+	iter.root = cpu_to_node(cpu);
+	if (iter.root < 0 || iter.root >= nr_node_ids || !node_possible(iter.root))
+		return iter;
+
+	iter.nr_nodes = 1;
+	topo = rcu_dereference_all(affi_node_order);
+	if (topo && iter.root < topo->size) {
+		iter.nr_nodes = topo->nr_nodes;
+		iter.order = topo->order + (size_t)iter.root * iter.nr_nodes;
+	}
+	return iter;
+}
+
+int affi_node_order_next(struct affi_node_order_iter *iter)
+{
+	int idx = iter->index;
+
+	if (idx >= iter->nr_nodes)
+		return -1;
+	iter->index++;
+	return iter->order ? iter->order[idx] : iter->root;
+}
+
 /*
  * Return @node's zero-based rank in @prefer_node's affinity order, with
  * @prefer_node itself ranked first. Both arguments are node IDs, not CPUs.

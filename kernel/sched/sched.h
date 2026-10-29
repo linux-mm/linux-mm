@@ -4179,6 +4179,30 @@ sched_cache_numa_key_cmp(struct sched_cache_numa_key a,
 	return 0;
 }
 
+struct affi_node_order_iter {
+	const int *order;
+	int root;
+	int nr_nodes;
+	int index;
+};
+
+/* Hold RCU continuously from begin() through the last next() call. */
+extern struct affi_node_order_iter affi_node_order_begin(int cpu);
+extern int affi_node_order_next(struct affi_node_order_iter *iter);
+
+/*
+ * Walk possible nodes, local first, then by raw NUMA distance and triangular
+ * tie rank. Pin one immutable row under RCU for the entire walk. The body
+ * must not sleep; break and return release the scoped lock. If the cached
+ * order is unavailable, visit only the local node.
+ */
+#define for_each_affi_node(cpu, node)					\
+	scoped_guard(rcu)						\
+		for (struct affi_node_order_iter __sn_iter =		\
+			     affi_node_order_begin((cpu));		\
+		     ({ int __sn_node = affi_node_order_next(&__sn_iter); \
+			__sn_node >= 0 && ((node) = __sn_node, true); });)
+
 /* Node IDs in, zero-based rank out; -1 if unavailable or invalid. */
 extern int affi_node_rank_of(int prefer_node, int node);
 
