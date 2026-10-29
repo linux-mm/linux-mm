@@ -3733,7 +3733,7 @@ static void __split_folio_to_order(struct folio *folio, int old_order,
 		 * PG_anon_exclusive (-> PG_mappedtodisk) for these here.
 		 */
 		new_folio->flags.f &= ~PAGE_FLAGS_CHECK_AT_PREP;
-		new_folio->flags.f |= (folio->flags.f &
+		new_folio->flags.f |= (READ_ONCE(folio->flags.f) &
 				((1L << PG_referenced) |
 				 (1L << PG_swapbacked) |
 				 (1L << PG_swapcache) |
