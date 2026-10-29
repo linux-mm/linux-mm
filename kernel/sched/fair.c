@@ -13498,8 +13498,18 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 #ifdef CONFIG_SCHED_CACHE
 	int last_node = -1, node_num = 0, llc_max;
 	int *cache_data, *affi;
+	unsigned long llc_util, llc_cap;
+	struct sched_domain *llc_sd, *sd_self;
+	struct rq *llc_busiest = NULL;
+	unsigned long llc_busiest_util = 0;
+	struct cpumask *llcs_cpumask = NULL;
 
 	lb_affi_scratch(&cache_data, &affi, &llc_max);
+	sd_self = rcu_dereference_all(this_rq()->sd);
+	if (sd_self)
+		llcs_cpumask = sd_self->llc_stats_mask;
+	if (llcs_cpumask)
+		cpumask_clear(llcs_cpumask);
 #endif
 
 	for_each_cpu_and(i, sched_group_span(group), env->cpus) {
@@ -13628,6 +13638,34 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 				busiest_nr = nr_running;
 				busiest = rq;
 			}
+#ifdef CONFIG_SCHED_CACHE
+			/*
+			 * When every eligible rq has at most one runnable task,
+			 * task-count comparisons select the first non-empty rq,
+			 * favoring lower-numbered CPUs regardless of LLC load.
+			 * This can leave LLC load uneven even when individual
+			 * runqueues have the same number of runnable tasks.
+			 *
+			 * Track an rq in the LLC with the highest utilization
+			 * during the same scan. Use it only if no eligible rq
+			 * has more than one runnable task, preserving task-count
+			 * priority while helping resolve LLC imbalance.
+			 */
+			if (busiest_nr < 2 &&
+				!(env->sd->flags & SD_SHARE_LLC) &&
+				nr_running == 1 && sched_cache_enabled() &&
+				llcs_cpumask && !cpumask_test_cpu(i, llcs_cpumask) &&
+				get_llc_stats(i, &llc_util, &llc_cap)) {
+				if (!llc_busiest || llc_util > llc_busiest_util) {
+					llc_busiest_util = llc_util;
+					llc_busiest = rq;
+				}
+				llc_sd = rcu_dereference_all(per_cpu(sd_llc, i));
+				if (llc_sd)
+					cpumask_or(llcs_cpumask, llcs_cpumask,
+						   sched_domain_span(llc_sd));
+			}
+#endif
 			break;
 
 		case migrate_misfit:
@@ -13669,6 +13707,11 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 
 		}
 	}
+
+#ifdef CONFIG_SCHED_CACHE
+	if (busiest_nr == 1 && llc_busiest)
+		return llc_busiest;
+#endif
 
 	return busiest;
 }
