@@ -831,7 +831,7 @@ bool kho_bootmem_overlap(phys_addr_t phys, size_t size)
  */
 static void __init kho_reserve_bootmem(void)
 {
-	int nid, i = 0, max_nr_bootmem;
+	int nid, i, j, max_nr_bootmem;
 	phys_addr_t addr, size;
 
 	if (!kho_enable)
@@ -849,6 +849,15 @@ static void __init kho_reserve_bootmem(void)
 	}
 
 	/*
+	 * Save the per-node sizes before allocating bootmem areas. Without
+	 * CONFIG_NUMA, new lowmem and global allocations would otherwise be
+	 * counted as node 0 kernel reservations and scaled again.
+	 */
+	j = 2;
+	for_each_node_state(nid, N_MEMORY)
+		kho_bootmem[j++].size = bootmem_size_node(nid);
+
+	/*
 	 * reserve bootmem area in low memory for lowmem allocations in the
 	 * next kernel
 	 */
@@ -860,6 +869,7 @@ static void __init kho_reserve_bootmem(void)
 		goto err_free_bootmem_desc;
 	}
 
+	i = 0;
 	kho_bootmem[i].addr = addr;
 	kho_bootmem[i].size = size;
 	i++;
@@ -879,9 +889,12 @@ static void __init kho_reserve_bootmem(void)
 	/*
 	 * Loop over nodes that have both memory and are online. Skip
 	 * memoryless nodes, as we can not allocate bootmem areas there.
+	 * Skipping zero-sized areas leaves i behind j, so writes to
+	 * kho_bootmem[i] cannot overwrite unread sizes.
 	 */
+	j = i;
 	for_each_node_state(nid, N_MEMORY) {
-		size = bootmem_size_node(nid);
+		size = kho_bootmem[j++].size;
 		if (!size)
 			continue;
 
