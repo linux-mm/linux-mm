@@ -10470,6 +10470,10 @@ struct lb_env {
 	enum fbq_type		fbq_type;
 	enum migration_type	migration_type;
 	struct list_head	tasks;
+#ifdef CONFIG_SCHED_CACHE
+	/* Aggregation tolerance sampled once per balance pass. */
+	unsigned int		tol;
+#endif
 };
 
 /*
@@ -10779,7 +10783,7 @@ static bool get_node_stats(int node, unsigned long *util_out,
 	return true;
 }
 
-static enum llc_mig __maybe_unused can_migrate_llcs(int src_cpu, int dst_cpu,
+static enum llc_mig can_migrate_llcs(int src_cpu, int dst_cpu,
 				     struct task_struct *p, bool to_pref)
 {
 	unsigned long src_util, src_pre, src_cap, dst_util, dst_cap, dst_pre;
@@ -11630,7 +11634,7 @@ struct sg_lb_stats {
 	unsigned int nr_preferred_running;
 #endif
 #ifdef CONFIG_SCHED_CACHE
-	unsigned int nr_pref_dst_llc;
+	unsigned int affinity_score;	/* Affinity gain toward the destination */
 #endif
 };
 
@@ -12088,8 +12092,8 @@ static void record_sg_llc_stats(struct lb_env *env,
 }
 
 /*
- * Do LLC balance on sched group that contains LLC, and have tasks preferring
- * to run on LLC in idle dst_cpu.
+ * Consider cache-aware balancing for a group whose tasks would gain
+ * affinity by moving to the destination.
  */
 static inline bool llc_balance(struct lb_env *env, struct sg_lb_stats *sgs,
 			       struct sched_group *group)
@@ -12108,9 +12112,9 @@ static inline bool llc_balance(struct lb_env *env, struct sg_lb_stats *sgs,
 	if (env->sd->nr_balance_failed >= env->sd->cache_nice_tries + 1)
 		return false;
 
-	if (sgs->nr_pref_dst_llc &&
-	    can_migrate_llc(cpumask_first(sched_group_span(group)),
-			    env->dst_cpu, 0, true) == mig_llc)
+	if (sgs->affinity_score &&
+	    can_migrate_llcs(cpumask_first(sched_group_span(group)),
+			     env->dst_cpu, NULL, true) == mig_llc)
 		return true;
 
 	return false;
@@ -12120,10 +12124,8 @@ static bool update_llc_busiest(struct lb_env *env,
 			       struct sg_lb_stats *busiest,
 			       struct sg_lb_stats *sgs)
 {
-	/*
-	 * There are more tasks that want to run on dst_cpu's LLC.
-	 */
-	return sgs->nr_pref_dst_llc > busiest->nr_pref_dst_llc;
+	/* Prefer the group with the greater affinity gain toward dst_cpu. */
+	return sgs->affinity_score > busiest->affinity_score;
 }
 
 /*
@@ -12268,7 +12270,7 @@ static int calc_affinity_llc_score(struct sched_domain *sd, struct sched_domain 
  * this_rq() stays stable for a whole pass, and two CPUs balancing at the same
  * time each get their own arrays.
  */
-static void __maybe_unused lb_affi_scratch(int **ids, int **weights, int *llc_max)
+static void lb_affi_scratch(int **ids, int **weights, int *llc_max)
 {
 	struct sched_domain *sd = rcu_dereference_all(this_rq()->sd);
 
@@ -12320,7 +12322,7 @@ static void __maybe_unused lb_affi_scratch(int **ids, int **weights, int *llc_ma
  * remain unchanged for the lifetime of the cache. The caller must
  * initialize *@last_node to -1 and *@num to 0.
  */
-static int __maybe_unused
+static int
 calc_affinity_score(struct sched_domain *sd, struct rq *rq, int src_cpu,
 		    int dst_cpu, int *affi_nodes, int *affi, int *last_node,
 		    int *num, int llc_max)
@@ -12374,6 +12376,12 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 {
 	int i, nr_running, local_group, sd_flags = env->sd->flags;
 	bool balancing_at_rd = !env->sd->parent;
+#ifdef CONFIG_SCHED_CACHE
+	int last_node = -1, node_num = 0, llc_max;
+	int *cache_data, *affi;
+
+	lb_affi_scratch(&cache_data, &affi, &llc_max);
+#endif
 
 	memset(sgs, 0, sizeof(*sgs));
 
@@ -12402,8 +12410,22 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 			dst_llc = llc_id(env->dst_cpu);
 			if (llc_id(i) != dst_llc) {
 				sd_tmp = rcu_dereference_all(rq->sd);
-				if (sd_tmp && (unsigned int)dst_llc < sd_tmp->llc_max)
-					sgs->nr_pref_dst_llc += sd_tmp->llc_counts[dst_llc];
+				if (sd_tmp && (unsigned int)dst_llc < sd_tmp->llc_max) {
+					/*
+					 * At tolerance 1, aggregation is limited to
+					 * workloads that fit in one LLC. Only count
+					 * tasks preferring dst_llc, rather than scoring
+					 * intermediate moves along the affinity order.
+					 * Migration checks still enforce LLC headroom.
+					 */
+					if (env->tol > 1)
+						sgs->affinity_score +=
+						calc_affinity_score(env->sd, rq, i, env->dst_cpu,
+								    cache_data, affi, &last_node,
+								    &node_num, llc_max);
+					else
+						sgs->affinity_score += sd_tmp->llc_counts[dst_llc];
+				}
 			}
 		}
 #endif
@@ -13514,11 +13536,18 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 {
 	struct rq *busiest = NULL, *rq;
 	unsigned long busiest_util = 0, busiest_load = 0, busiest_capacity = 1;
-	unsigned int __maybe_unused busiest_pref_llc = 0;
+	unsigned int __maybe_unused busiest_affinity_score = 0;
 	struct sched_domain __maybe_unused *sd_tmp;
 	unsigned int busiest_nr = 0;
 	int __maybe_unused dst_llc;
 	int i;
+
+#ifdef CONFIG_SCHED_CACHE
+	int last_node = -1, node_num = 0, llc_max;
+	int *cache_data, *affi;
+
+	lb_affi_scratch(&cache_data, &affi, &llc_max);
+#endif
 
 	for_each_cpu_and(i, sched_group_span(group), env->cpus) {
 		unsigned long capacity, load, util;
@@ -13666,11 +13695,19 @@ static struct rq *sched_balance_find_src_rq(struct lb_env *env,
 			dst_llc = llc_id(env->dst_cpu);
 
 			if (sd_tmp && (unsigned)dst_llc < sd_tmp->llc_max) {
-				unsigned int this_pref_llc =
-					sd_tmp->llc_counts[dst_llc];
+				unsigned int affinity_score;
 
-				if (busiest_pref_llc < this_pref_llc) {
-					busiest_pref_llc = this_pref_llc;
+				/* Use the same scoring policy as group selection. */
+				if (env->tol > 1)
+					affinity_score = calc_affinity_score(env->sd, rq,
+							    i, env->dst_cpu, cache_data,
+							    affi, &last_node,
+							    &node_num, llc_max);
+				else
+					affinity_score = sd_tmp->llc_counts[dst_llc];
+
+				if (busiest_affinity_score < affinity_score) {
+					busiest_affinity_score = affinity_score;
 					busiest = rq;
 				}
 			}
@@ -13888,6 +13925,9 @@ static int sched_balance_rq(int this_cpu, struct rq *this_rq,
 		.cpus		= cpus,
 		.fbq_type	= all,
 		.tasks		= LIST_HEAD_INIT(env.tasks),
+#ifdef CONFIG_SCHED_CACHE
+		.tol		= READ_ONCE(llc_aggr_tolerance),
+#endif
 	};
 	bool need_unlock = false;
 
