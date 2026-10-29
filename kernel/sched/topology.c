@@ -643,6 +643,9 @@ static void destroy_sched_domain(struct sched_domain *sd)
 #ifdef CONFIG_SCHED_CACHE
 	/* only the bottom sd has llc_counts array */
 	kfree(sd->llc_counts);
+	kfree(sd->affi_ids);
+	kfree(sd->affi_weights);
+	kfree(sd->llc_stats_mask);
 #endif
 	kfree(sd);
 }
@@ -846,10 +849,16 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 			sd->llc_counts = tmp->llc_counts;
 			sd->llc_max = tmp->llc_max;
 			sd->llc_bytes = tmp->llc_bytes;
+			sd->affi_ids = tmp->affi_ids;
+			sd->affi_weights = tmp->affi_weights;
+			sd->llc_stats_mask = tmp->llc_stats_mask;
 			/* make sure destroy_sched_domain() does not free it */
 			tmp->llc_counts = NULL;
 			tmp->llc_max = 0;
 			tmp->llc_bytes = 0;
+			tmp->affi_ids = NULL;
+			tmp->affi_weights = NULL;
+			tmp->llc_stats_mask = NULL;
 #endif
 			/*
 			 * sched groups hold the flags of the child sched
@@ -1307,6 +1316,8 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 {
 	struct sched_domain *sd, *top_llc, *parent;
 	unsigned int *p;
+	int *p_ids, *p_w;
+	struct cpumask *stats_mask;
 	int i;
 
 	for_each_cpu(i, cpu_map) {
@@ -1316,8 +1327,20 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 
 		p = kcalloc_node(max_lid + 1, sizeof(unsigned int),
 				 GFP_KERNEL, cpu_to_node(i));
-		if (!p)
+		/* Scratch for the load balance affinity score. */
+		p_ids = kcalloc_node(max_lid + 1, sizeof(int),
+				     GFP_KERNEL, cpu_to_node(i));
+		p_w = kcalloc_node(max_lid + 1, sizeof(int),
+				   GFP_KERNEL, cpu_to_node(i));
+		stats_mask = kmalloc_node(cpumask_size(), GFP_KERNEL,
+					 cpu_to_node(i));
+		if (!p || !p_ids || !p_w || !stats_mask) {
+			kfree(p);
+			kfree(p_ids);
+			kfree(p_w);
+			kfree(stats_mask);
 			goto err;
+		}
 
 		top_llc = sd;
 		/*
@@ -1333,9 +1356,15 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 			sd->llc_max = max_lid + 1;
 			sd->llc_counts = p;
 			sd->llc_bytes = get_effective_llc_bytes(i, top_llc);
+			sd->affi_ids = p_ids;
+			sd->affi_weights = p_w;
+			sd->llc_stats_mask = stats_mask;
 		} else {
 			/* avoid memory leak */
 			kfree(p);
+			kfree(p_ids);
+			kfree(p_w);
+			kfree(stats_mask);
 		}
 	}
 
@@ -1345,9 +1374,15 @@ err:
 		sd = *per_cpu_ptr(d->sd, i);
 		if (sd) {
 			kfree(sd->llc_counts);
+			kfree(sd->affi_ids);
+			kfree(sd->affi_weights);
+			kfree(sd->llc_stats_mask);
 			sd->llc_counts = NULL;
 			sd->llc_max = 0;
 			sd->llc_bytes = 0;
+			sd->affi_ids = NULL;
+			sd->affi_weights = NULL;
+			sd->llc_stats_mask = NULL;
 		}
 	}
 
