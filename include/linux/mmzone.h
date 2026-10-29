@@ -2167,13 +2167,16 @@ static inline int preinited_vmemmap_section(const struct mem_section *section)
 		(section->section_mem_map & SECTION_IS_VMEMMAP_PREINIT));
 }
 
-void sparse_vmemmap_init_nid_early(int nid);
+void sparse_vmemmap_init_nid_early(int nid, unsigned long pnum_begin,
+				   unsigned long pnum_end);
 #else
 static inline int preinited_vmemmap_section(const struct mem_section *section)
 {
 	return 0;
 }
-static inline void sparse_vmemmap_init_nid_early(int nid)
+static inline void sparse_vmemmap_init_nid_early(int nid,
+						 unsigned long pnum_begin,
+						 unsigned long pnum_end)
 {
 }
 #endif
@@ -2379,7 +2382,7 @@ static inline unsigned long next_present_section_nr(unsigned long section_nr)
 #endif
 
 #else
-#define sparse_vmemmap_init_nid_early(_nid) do {} while (0)
+#define sparse_vmemmap_init_nid_early(_nid, _begin, _end) do {} while (0)
 #define pfn_in_present_section pfn_valid
 #endif /* CONFIG_SPARSEMEM */
 

@@ -288,7 +288,7 @@ static void __init sparse_init_nid(int nid, unsigned long pnum_begin,
 	if (sparse_usage_init(nid, map_count))
 		panic("Failed to allocate usemap for node %d\n", nid);
 
-	sparse_vmemmap_init_nid_early(nid);
+	sparse_vmemmap_init_nid_early(nid, pnum_begin, pnum_end);
 
 	for_each_present_section_nr(pnum_begin, pnum) {
 		struct mem_section *ms;
