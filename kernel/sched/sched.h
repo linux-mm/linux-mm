@@ -4147,6 +4147,7 @@ static inline bool sched_cache_enabled(void)
 
 extern void sched_cache_active_set(void);
 extern int llc_to_node(int llc);
+extern int affi_llc_rank_of(int prefer_llc, int llc, int node);
 
 /*
  * Lexicographic node affinity key. Keep the raw NUMA distance as the first

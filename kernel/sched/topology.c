@@ -696,6 +696,13 @@ DEFINE_STATIC_KEY_FALSE(sched_cluster_active);
  */
 struct llc_node_map {
 	int nr_llc;
+	int nr_node;
+	int *rank;		/* [nr_llc]: ascending LLC ID rank within its node */
+	int *offset;		/* [nr_llc]: triangular offsets, grouped by node */
+	int *inverse;		/* [nr_llc]: position of each offset */
+	int *node_count;	/* [nr_node]: number of LLCs in each node */
+	int *node_offset;	/* [nr_node]: start of each node's offset slice */
+	/* One allocation contains node[] and all the arrays above. */
 	int node[];
 };
 
@@ -901,22 +908,56 @@ int llc_to_node(int llc)
 	return node;
 }
 
+/* Build one triangular permutation and its inverse for each node's LLCs. */
+static void build_llc_offsets(struct llc_node_map *map)
+{
+	int node;
+
+	for (node = 0; node < map->nr_node; node++) {
+		unsigned int mod = 1, pos = 0, i, index = 0;
+		int nr = map->node_count[node];
+		int base = map->node_offset[node];
+
+		if (!nr)
+			continue;
+		while (mod < nr)
+			mod <<= 1;
+		for (i = 0; i < mod; i++) {
+			if (pos < nr) {
+				map->offset[base + index] = pos;
+				map->inverse[base + pos] = index++;
+			}
+			pos = (pos + i + 1) & (mod - 1);
+		}
+	}
+}
+
 static void rebuild_llc_node_map(int size)
 {
 	struct llc_node_map *new_map, *old_map;
+	size_t entries;
 	int cpu, llc, node;
 
 	lockdep_assert_held(&sched_domains_mutex);
 	if (size <= 0)
 		goto fail;
 
-	new_map = kzalloc(struct_size(new_map, node, size), GFP_KERNEL);
+	entries = size_add(size_mul(size, 4), size_mul(nr_node_ids, 2));
+	new_map = kzalloc(struct_size(new_map, node, entries), GFP_KERNEL);
 	if (!new_map)
 		goto fail;
 
 	new_map->nr_llc = size;
-	for (llc = 0; llc < size; llc++)
+	new_map->nr_node = nr_node_ids;
+	new_map->rank = new_map->node + size;
+	new_map->offset = new_map->rank + size;
+	new_map->inverse = new_map->offset + size;
+	new_map->node_count = new_map->inverse + size;
+	new_map->node_offset = new_map->node_count + nr_node_ids;
+	for (llc = 0; llc < size; llc++) {
 		new_map->node[llc] = NUMA_NO_NODE;
+		new_map->rank[llc] = -1;
+	}
 
 	/*
 	 * for_each_possible_cpu() revisits the same LLC non-consecutively
@@ -929,9 +970,21 @@ static void rebuild_llc_node_map(int size)
 		if (llc < 0 || llc >= size || new_map->node[llc] >= 0)
 			continue;
 		node = cpu_to_node(cpu);
-		if (node >= 0 && node < nr_node_ids && node_possible(node))
-			new_map->node[llc] = node;
+		if (node < 0 || node >= new_map->nr_node || !node_possible(node))
+			continue;
+		new_map->node[llc] = node;
 	}
+
+	/* Rank LLCs by ascending ID, independently of CPU enumeration order. */
+	for (llc = 0; llc < size; llc++) {
+		node = new_map->node[llc];
+		if (node >= 0)
+			new_map->rank[llc] = new_map->node_count[node]++;
+	}
+	for (node = 1; node < new_map->nr_node; node++)
+		new_map->node_offset[node] = new_map->node_offset[node - 1] +
+					     new_map->node_count[node - 1];
+	build_llc_offsets(new_map);
 
 publish:
 	old_map = rcu_dereference_protected(llc_to_node_map,
@@ -1152,6 +1205,41 @@ int affi_node_rank_of(int prefer_node, int node)
 		return -1;
 
 	return topo->rank[(size_t)prefer_node * topo->size + node];
+}
+
+/*
+ * Return @llc's position in @prefer_llc's intra-node affinity order.
+ * The preferred LLC is first; the other positions follow the triangular
+ * offset permutation of the node-local LLC ranks.
+ *
+ * Mapping, ranks and counts come from the same RCU snapshot. Return -1
+ * if the topology is unavailable or either LLC does not belong to @node.
+ */
+int affi_llc_rank_of(int prefer_llc, int llc, int node)
+{
+	struct llc_node_map *map;
+	int delta, nr, base;
+
+	if (prefer_llc < 0 || llc < 0 || node < 0)
+		return -1;
+
+	guard(rcu)();
+	map = rcu_dereference(llc_to_node_map);
+	if (!map || prefer_llc >= map->nr_llc || llc >= map->nr_llc ||
+	    node >= map->nr_node || map->node[prefer_llc] != node ||
+	    map->node[llc] != node)
+		return -1;
+
+	nr = map->node_count[node];
+	if (!nr || map->rank[prefer_llc] < 0 || map->rank[llc] < 0 ||
+	    map->rank[prefer_llc] >= nr || map->rank[llc] >= nr)
+		return -1;
+
+	delta = map->rank[llc] - map->rank[prefer_llc];
+	if (delta < 0)
+		delta += nr;
+	base = map->node_offset[node];
+	return map->inverse[base + delta];
 }
 
 /*
