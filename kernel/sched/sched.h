@@ -4146,6 +4146,103 @@ static inline bool sched_cache_enabled(void)
 }
 
 extern void sched_cache_active_set(void);
+extern int llc_to_node(int llc);
+extern int affi_llc_rank_of(int prefer_llc, int llc, int node);
+
+/*
+ * Lexicographic node affinity key. Keep the raw NUMA distance as the first
+ * component: it identifies the distance level without changing its order.
+ * tie_rank is used for tie-break if level equals.
+ */
+struct sched_cache_numa_key {
+	int level;
+	int tie_rank;
+};
+
+/* Both nodes must be valid */
+static inline struct sched_cache_numa_key
+sched_cache_numa_key(int node0, int node1, int tie_rank)
+{
+	return (struct sched_cache_numa_key) {
+		.level = node_distance(node0, node1),
+		.tie_rank = tie_rank,
+	};
+}
+
+static inline int
+sched_cache_numa_key_cmp(struct sched_cache_numa_key a,
+			 struct sched_cache_numa_key b)
+{
+	if (a.level != b.level)
+		return a.level < b.level ? -1 : 1;
+	if (a.tie_rank != b.tie_rank)
+		return a.tie_rank < b.tie_rank ? -1 : 1;
+	return 0;
+}
+
+struct llc_node_iter {
+	const int *llc;
+	int nr;
+	int index;
+};
+
+/* Walk the LLC IDs of a node in ascending order under one RCU snapshot. */
+extern struct llc_node_iter llc_node_iter_begin(int node);
+extern int llc_node_iter_next(struct llc_node_iter *iter);
+
+#define for_each_llc_of_node(llc, node)					\
+	scoped_guard(rcu)						\
+		for (struct llc_node_iter __ln_iter =			\
+			     llc_node_iter_begin(node);			\
+		     ((llc) = llc_node_iter_next(&__ln_iter)) >= 0;)
+
+struct llc_node_span_iter {
+	const int *llc;
+	const void *span;
+	int nr;
+	int index;
+};
+
+/* Hold RCU continuously from begin() through the final next() call. */
+extern struct llc_node_span_iter llc_node_span_begin(int node);
+extern const struct cpumask *llc_node_span_next(struct llc_node_span_iter *iter);
+
+/*
+ * Visit @node's LLC spans in ascending LLC ID order. Empty spans are skipped.
+ * The body must not sleep.
+ */
+#define for_each_llc_node_span(node, span)					\
+	scoped_guard(rcu)							\
+		for (struct llc_node_span_iter __ls_iter =			\
+			     llc_node_span_begin(node);			\
+		     ((span) = llc_node_span_next(&__ls_iter)) != NULL;)
+
+struct affi_node_order_iter {
+	const int *order;
+	int root;
+	int nr_nodes;
+	int index;
+};
+
+/* Hold RCU continuously from begin() through the last next() call. */
+extern struct affi_node_order_iter affi_node_order_begin(int cpu);
+extern int affi_node_order_next(struct affi_node_order_iter *iter);
+
+/*
+ * Walk possible nodes, local first, then by raw NUMA distance and triangular
+ * tie rank. Pin one immutable row under RCU for the entire walk. The body
+ * must not sleep; break and return release the scoped lock. If the cached
+ * order is unavailable, visit only the local node.
+ */
+#define for_each_affi_node(cpu, node)					\
+	scoped_guard(rcu)						\
+		for (struct affi_node_order_iter __sn_iter =		\
+			     affi_node_order_begin((cpu));		\
+		     ({ int __sn_node = affi_node_order_next(&__sn_iter); \
+			__sn_node >= 0 && ((node) = __sn_node, true); });)
+
+/* Node IDs in, zero-based rank out; -1 if unavailable or invalid. */
+extern int affi_node_rank_of(int prefer_node, int node);
 
 #endif
 

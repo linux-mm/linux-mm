@@ -6,6 +6,7 @@
 #include <linux/sched/isolation.h>
 #include <linux/sched/clock.h>
 #include <linux/bsearch.h>
+#include <linux/sort.h>
 #include "sched.h"
 
 DEFINE_MUTEX(sched_domains_mutex);
@@ -642,6 +643,9 @@ static void destroy_sched_domain(struct sched_domain *sd)
 #ifdef CONFIG_SCHED_CACHE
 	/* only the bottom sd has llc_counts array */
 	kfree(sd->llc_counts);
+	kfree(sd->affi_ids);
+	kfree(sd->affi_weights);
+	kfree(sd->llc_stats_mask);
 #endif
 	kfree(sd);
 }
@@ -684,6 +688,51 @@ DEFINE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
 
 DEFINE_STATIC_KEY_FALSE(sched_asym_cpucapacity);
 DEFINE_STATIC_KEY_FALSE(sched_cluster_active);
+
+#ifdef CONFIG_SCHED_CACHE
+/*
+ * LLC id to NUMA node map. The number of entries lives inside the
+ * RCU-protected allocation so that a reader bound-checks against the
+ * length of the very map it dereferenced. max_lid is updated by
+ * __sched_domains_alloc_llc_id() well before rebuild_llc_node_map()
+ * installs the matching map, so it must not be used as the bound.
+ */
+struct llc_node_map {
+	int nr_llc;
+	int nr_node;
+	int *rank;		/* [nr_llc]: ascending LLC ID rank within its node */
+	int *node_llc;		/* [nr_llc]: IDs grouped by node, in rank order */
+	int *offset;		/* [nr_llc]: triangular offsets, grouped by node */
+	int *inverse;		/* [nr_llc]: position of each offset */
+	int *node_count;	/* [nr_node]: number of LLCs in each node */
+	int *node_offset;	/* [nr_node]: start of each node's LLC/offset slice */
+	void *span;		/* cpumask_size() bytes per LLC ID */
+	/* One allocation contains node[] and all the arrays above. */
+	int node[];
+};
+
+/* The span array holds cpumask_size() bytes per LLC; never index it with []. */
+static inline struct cpumask *llc_span_at(const void *span, int llc)
+{
+	return (void *)span + (size_t)llc * cpumask_size();
+}
+
+static struct llc_node_map __rcu *llc_to_node_map;
+static void rebuild_llc_node_map(int size);
+
+struct affi_node_order_topology {
+	struct rcu_head rcu;
+	int size;
+	int nr_nodes;
+	int *rank;
+	int order[];
+};
+
+static struct affi_node_order_topology __rcu *affi_node_order;
+static DEFINE_MUTEX(affi_node_order_mutex);
+static bool affi_node_order_ready;
+
+#endif
 
 static void update_top_cache_domain(int cpu)
 {
@@ -800,10 +849,16 @@ cpu_attach_domain(struct sched_domain *sd, struct root_domain *rd, int cpu)
 			sd->llc_counts = tmp->llc_counts;
 			sd->llc_max = tmp->llc_max;
 			sd->llc_bytes = tmp->llc_bytes;
+			sd->affi_ids = tmp->affi_ids;
+			sd->affi_weights = tmp->affi_weights;
+			sd->llc_stats_mask = tmp->llc_stats_mask;
 			/* make sure destroy_sched_domain() does not free it */
 			tmp->llc_counts = NULL;
 			tmp->llc_max = 0;
 			tmp->llc_bytes = 0;
+			tmp->affi_ids = NULL;
+			tmp->affi_weights = NULL;
+			tmp->llc_stats_mask = NULL;
 #endif
 			/*
 			 * sched groups hold the flags of the child sched
@@ -856,6 +911,374 @@ DEFINE_STATIC_KEY_FALSE(sched_cache_active);
 /* user wants cache aware scheduling [0 or 1] */
 int sysctl_sched_cache_user = 1;
 
+int llc_to_node(int llc)
+{
+	struct llc_node_map *map;
+	int node = -1;
+
+	rcu_read_lock();
+	map = rcu_dereference(llc_to_node_map);
+	if (map && llc >= 0 && llc < map->nr_llc)
+		node = map->node[llc];
+	rcu_read_unlock();
+
+	return node;
+}
+
+/* Build one triangular permutation and its inverse for each node's LLCs. */
+static void build_llc_offsets(struct llc_node_map *map)
+{
+	int node;
+
+	for (node = 0; node < map->nr_node; node++) {
+		unsigned int mod = 1, pos = 0, i, index = 0;
+		int nr = map->node_count[node];
+		int base = map->node_offset[node];
+
+		if (!nr)
+			continue;
+		while (mod < nr)
+			mod <<= 1;
+		for (i = 0; i < mod; i++) {
+			if (pos < nr) {
+				map->offset[base + index] = pos;
+				map->inverse[base + pos] = index++;
+			}
+			pos = (pos + i + 1) & (mod - 1);
+		}
+	}
+}
+
+static void rebuild_llc_node_map(int size)
+{
+	struct llc_node_map *new_map, *old_map;
+	size_t entries, span_off;
+	int cpu, llc, node;
+
+	lockdep_assert_held(&sched_domains_mutex);
+	if (size <= 0)
+		goto fail;
+
+	entries = size_add(size_mul(size, 5), size_mul(nr_node_ids, 2));
+	span_off = struct_size(new_map, node, entries);
+	if (span_off == SIZE_MAX)
+		goto fail;
+	span_off = ALIGN(span_off, sizeof(unsigned long));
+	/* The spans grow with nr_llc * nr_cpu_ids; avoid high-order kmalloc. */
+	new_map = kvzalloc(size_add(span_off, size_mul(size, cpumask_size())),
+			   GFP_KERNEL);
+	if (!new_map)
+		goto fail;
+
+	new_map->nr_llc = size;
+	new_map->nr_node = nr_node_ids;
+	new_map->rank = new_map->node + size;
+	new_map->node_llc = new_map->rank + size;
+	new_map->offset = new_map->node_llc + size;
+	new_map->inverse = new_map->offset + size;
+	new_map->node_count = new_map->inverse + size;
+	new_map->node_offset = new_map->node_count + nr_node_ids;
+	new_map->span = (void *)new_map + span_off;
+	for (llc = 0; llc < size; llc++) {
+		new_map->node[llc] = NUMA_NO_NODE;
+		new_map->rank[llc] = -1;
+	}
+
+	/*
+	 * for_each_possible_cpu() revisits the same LLC non-consecutively
+	 * under SMT (each node's LLCs are walked once per thread), so
+	 * assign the node once by checking populated node entries, not by
+	 * comparing against the immediately preceding CPU's llc.
+	 */
+	for_each_possible_cpu(cpu) {
+		llc = per_cpu(sd_llc_id, cpu);
+		if (llc < 0 || llc >= size)
+			continue;
+		if (new_map->node[llc] < 0) {
+			node = cpu_to_node(cpu);
+			if (node < 0 || node >= new_map->nr_node ||
+			    !node_possible(node))
+				continue;
+			new_map->node[llc] = node;
+		}
+		/* CPUs detached from load-balanced domains keep their LLC IDs. */
+		if (cpu_rq(cpu)->rd != &def_root_domain)
+			cpumask_set_cpu(cpu, llc_span_at(new_map->span, llc));
+	}
+
+	/* Rank LLCs by ascending ID, independently of CPU enumeration order. */
+	for (llc = 0; llc < size; llc++) {
+		node = new_map->node[llc];
+		if (node >= 0)
+			new_map->rank[llc] = new_map->node_count[node]++;
+	}
+	for (node = 1; node < new_map->nr_node; node++)
+		new_map->node_offset[node] = new_map->node_offset[node - 1] +
+					     new_map->node_count[node - 1];
+	for (llc = 0; llc < size; llc++) {
+		node = new_map->node[llc];
+		if (node >= 0)
+			new_map->node_llc[new_map->node_offset[node] +
+					  new_map->rank[llc]] = llc;
+	}
+	build_llc_offsets(new_map);
+
+publish:
+	old_map = rcu_dereference_protected(llc_to_node_map,
+					    lockdep_is_held(&sched_domains_mutex));
+	rcu_assign_pointer(llc_to_node_map, new_map);
+	kfree_rcu_mightsleep(old_map);
+	return;
+
+fail:
+	new_map = NULL;
+	goto publish;
+}
+
+struct affi_node_candidate {
+	struct sched_cache_numa_key key;
+	int node;
+};
+
+static int affi_node_candidate_cmp(const void *a, const void *b)
+{
+	const struct affi_node_candidate *ca = a, *cb = b;
+
+	return sched_cache_numa_key_cmp(ca->key, cb->key);
+}
+
+/*
+ * Build a root-relative tie-breaking order for equal-distance NUMA nodes.
+ * Sorting ties by node ID would make different roots consistently prefer
+ * low-ID nodes. Instead, use a permutation of cyclic offsets, shifted by
+ * each root's ordinal among possible nodes.
+ *
+ * Let N = nr_nodes and M be the smallest power of two >= N. Generate:
+ *
+ *   T(i) = i * (i + 1) / 2, i = 0, ..., M - 1
+ *   offset = T(i) % M
+ *
+ * These M residues form a permutation of [0, M). Keep only offsets < N,
+ * preserving their order, to obtain a permutation of [0, N). Using M
+ * rather than N avoids repeated or missing offsets when N is not a
+ * power of two.
+ *
+ * Store the inverse permutation: inverse[offset] is the position of
+ * that offset in the order. For root ordinal p and candidate ordinal q,
+ * the caller uses inverse[(q - p + N) % N] as the tie-breaking rank.
+ * Ordinals are consecutive and exclude holes in the node ID space.
+ *
+ * For N = 4, offsets are [0, 1, 3, 2], giving:
+ *
+ *   root 0: 0, 1, 3, 2
+ *   root 1: 1, 2, 0, 3
+ *   root 2: 2, 3, 1, 0
+ *   root 3: 3, 0, 2, 1
+ *
+ * Each ordinal occupies each position once across these shifted orders.
+ * Raw NUMA distance remains the primary sort key; this rank only breaks
+ * ties. Thus the final distance-sorted rows need not retain that balance.
+ */
+static void build_numa_tie_ranks(int *inverse, unsigned int nr_nodes)
+{
+	unsigned int mod = 1, pos = 0, i, rank = 0;
+
+	while (mod < nr_nodes)
+		mod <<= 1;
+	for (i = 0; i < mod; i++) {
+		if (pos < nr_nodes)
+			inverse[pos] = rank++;
+		pos = (pos + i + 1) & (mod - 1);
+	}
+}
+
+/* Possible nodes include CPU-less nodes and exclude node ID holes. */
+static void rebuild_node_order(void)
+{
+	struct affi_node_order_topology *topo = NULL, *old;
+	struct affi_node_candidate *cand;
+	int *tie_rank;
+	int size = nr_node_ids, nr_nodes = num_possible_nodes();
+	int root, node, i, k, root_ord = 0, node_ord, delta;
+	size_t order_entries = size_mul(size, nr_nodes);
+	size_t rank_entries = size_mul(size, size);
+	size_t entries = size_add(order_entries, rank_entries);
+
+	lockdep_assert_held(&affi_node_order_mutex);
+	if (!nr_nodes)
+		goto publish;
+
+	cand = kmalloc_array(nr_nodes, sizeof(*cand), GFP_KERNEL);
+	if (!cand)
+		goto publish;
+	tie_rank = kmalloc_array(nr_nodes, sizeof(*tie_rank), GFP_KERNEL);
+	if (!tie_rank) {
+		kfree(cand);
+		goto publish;
+	}
+	topo = kvzalloc(struct_size(topo, order, entries), GFP_KERNEL);
+	if (!topo) {
+		kfree(tie_rank);
+		kfree(cand);
+		goto publish;
+	}
+	build_numa_tie_ranks(tie_rank, nr_nodes);
+	topo->size = size;
+	topo->nr_nodes = nr_nodes;
+	/* Store both directions in one allocation and publish them together. */
+	topo->rank = topo->order + order_entries;
+	memset(topo->rank, -1, rank_entries * sizeof(*topo->rank));
+	for_each_node(root) {
+		int *row = topo->order + (size_t)root * nr_nodes;
+		int *rank = topo->rank + (size_t)root * size;
+
+		k = 0;
+		node_ord = 0;
+		for_each_node(node) {
+			/* Ordinals, rather than IDs, keep holes out of the cycle. */
+			delta = node_ord++ - root_ord;
+			if (delta < 0)
+				delta += nr_nodes;
+			if (node == root)
+				continue;
+			cand[k].node = node;
+			cand[k++].key = sched_cache_numa_key(root, node,
+							 tie_rank[delta]);
+		}
+		sort(cand, k, sizeof(*cand), affi_node_candidate_cmp, NULL);
+		/* Keep the local node first regardless of firmware distances. */
+		row[0] = root;
+		rank[root] = 0;
+		for (i = 0; i < k; i++) {
+			row[i + 1] = cand[i].node;
+			rank[row[i + 1]] = i + 1;
+		}
+		root_ord++;
+	}
+	kfree(tie_rank);
+	kfree(cand);
+
+publish:
+	/* On failure, new readers fall back to the local node, not stale rows. */
+	old = rcu_replace_pointer(affi_node_order, topo,
+				  lockdep_is_held(&affi_node_order_mutex));
+	kvfree_rcu(old, rcu);
+}
+
+/*
+ * Serialize runtime distance writes with construction of the cached rows.
+ * Architectures must hold this sleepable pair across their raw update.
+ * Readers continue to use an immutable old row until publication completes.
+ */
+void sched_cache_numa_distance_update_begin(void)
+{
+	mutex_lock(&affi_node_order_mutex);
+}
+
+void sched_cache_numa_distance_update_end(bool changed)
+{
+	lockdep_assert_held(&affi_node_order_mutex);
+	if (changed && affi_node_order_ready)
+		rebuild_node_order();
+	mutex_unlock(&affi_node_order_mutex);
+}
+
+void __init sched_cache_init_node_order(void)
+{
+	sched_cache_numa_distance_update_begin();
+	/* Include firmware updates made before scheduler initialization. */
+	affi_node_order_ready = true;
+	sched_cache_numa_distance_update_end(true);
+}
+
+struct affi_node_order_iter affi_node_order_begin(int cpu)
+{
+	struct affi_node_order_topology *topo;
+	struct affi_node_order_iter iter = { };
+
+	RCU_LOCKDEP_WARN(!rcu_read_lock_any_held(), "node order read without RCU");
+	if (cpu < 0 || cpu >= nr_cpu_ids || !cpu_possible(cpu))
+		return iter;
+
+	iter.root = cpu_to_node(cpu);
+	if (iter.root < 0 || iter.root >= nr_node_ids || !node_possible(iter.root))
+		return iter;
+
+	iter.nr_nodes = 1;
+	topo = rcu_dereference_all(affi_node_order);
+	if (topo && iter.root < topo->size) {
+		iter.nr_nodes = topo->nr_nodes;
+		iter.order = topo->order + (size_t)iter.root * iter.nr_nodes;
+	}
+	return iter;
+}
+
+int affi_node_order_next(struct affi_node_order_iter *iter)
+{
+	int idx = iter->index;
+
+	if (idx >= iter->nr_nodes)
+		return -1;
+	iter->index++;
+	return iter->order ? iter->order[idx] : iter->root;
+}
+
+/*
+ * Return @node's zero-based rank in @prefer_node's affinity order, with
+ * @prefer_node itself ranked first. Both arguments are node IDs, not CPUs.
+ * Return -1 for an unknown node or an unavailable ordering. Each query
+ * uses one RCU snapshot; separate queries may observe different versions.
+ */
+int affi_node_rank_of(int prefer_node, int node)
+{
+	struct affi_node_order_topology *topo;
+
+	if (prefer_node < 0 || node < 0)
+		return -1;
+
+	guard(rcu)();
+	topo = rcu_dereference(affi_node_order);
+	if (!topo || prefer_node >= topo->size || node >= topo->size)
+		return -1;
+
+	return topo->rank[(size_t)prefer_node * topo->size + node];
+}
+
+/*
+ * Return @llc's position in @prefer_llc's intra-node affinity order.
+ * The preferred LLC is first; the other positions follow the triangular
+ * offset permutation of the node-local LLC ranks.
+ *
+ * Mapping, ranks and counts come from the same RCU snapshot. Return -1
+ * if the topology is unavailable or either LLC does not belong to @node.
+ */
+int affi_llc_rank_of(int prefer_llc, int llc, int node)
+{
+	struct llc_node_map *map;
+	int delta, nr, base;
+
+	if (prefer_llc < 0 || llc < 0 || node < 0)
+		return -1;
+
+	guard(rcu)();
+	map = rcu_dereference(llc_to_node_map);
+	if (!map || prefer_llc >= map->nr_llc || llc >= map->nr_llc ||
+	    node >= map->nr_node || map->node[prefer_llc] != node ||
+	    map->node[llc] != node)
+		return -1;
+
+	nr = map->node_count[node];
+	if (!nr || map->rank[prefer_llc] < 0 || map->rank[llc] < 0 ||
+	    map->rank[prefer_llc] >= nr || map->rank[llc] >= nr)
+		return -1;
+
+	delta = map->rank[llc] - map->rank[prefer_llc];
+	if (delta < 0)
+		delta += nr;
+	base = map->node_offset[node];
+	return map->inverse[base + delta];
+}
+
 /*
  * Get the effective LLC size in bytes that @cpu's bottom sched_domain
  * can use. A CPU within a cpuset partition can only use a proportion
@@ -893,6 +1316,8 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 {
 	struct sched_domain *sd, *top_llc, *parent;
 	unsigned int *p;
+	int *p_ids, *p_w;
+	struct cpumask *stats_mask;
 	int i;
 
 	for_each_cpu(i, cpu_map) {
@@ -902,8 +1327,20 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 
 		p = kcalloc_node(max_lid + 1, sizeof(unsigned int),
 				 GFP_KERNEL, cpu_to_node(i));
-		if (!p)
+		/* Scratch for the load balance affinity score. */
+		p_ids = kcalloc_node(max_lid + 1, sizeof(int),
+				     GFP_KERNEL, cpu_to_node(i));
+		p_w = kcalloc_node(max_lid + 1, sizeof(int),
+				   GFP_KERNEL, cpu_to_node(i));
+		stats_mask = kmalloc_node(cpumask_size(), GFP_KERNEL,
+					 cpu_to_node(i));
+		if (!p || !p_ids || !p_w || !stats_mask) {
+			kfree(p);
+			kfree(p_ids);
+			kfree(p_w);
+			kfree(stats_mask);
 			goto err;
+		}
 
 		top_llc = sd;
 		/*
@@ -919,9 +1356,15 @@ static bool alloc_sd_llc(const struct cpumask *cpu_map,
 			sd->llc_max = max_lid + 1;
 			sd->llc_counts = p;
 			sd->llc_bytes = get_effective_llc_bytes(i, top_llc);
+			sd->affi_ids = p_ids;
+			sd->affi_weights = p_w;
+			sd->llc_stats_mask = stats_mask;
 		} else {
 			/* avoid memory leak */
 			kfree(p);
+			kfree(p_ids);
+			kfree(p_w);
+			kfree(stats_mask);
 		}
 	}
 
@@ -931,9 +1374,15 @@ err:
 		sd = *per_cpu_ptr(d->sd, i);
 		if (sd) {
 			kfree(sd->llc_counts);
+			kfree(sd->affi_ids);
+			kfree(sd->affi_weights);
+			kfree(sd->llc_stats_mask);
 			sd->llc_counts = NULL;
 			sd->llc_max = 0;
 			sd->llc_bytes = 0;
+			sd->affi_ids = NULL;
+			sd->affi_weights = NULL;
+			sd->llc_stats_mask = NULL;
 		}
 	}
 
@@ -2074,6 +2523,69 @@ const struct cpumask *tl_mc_mask(struct sched_domain_topology_level *tl, int cpu
 
 #define llc_mask(cpu) arch_llc_mask(cpu)
 
+#ifdef CONFIG_SCHED_CACHE
+/* The iterator's LLC slice remains valid throughout the caller's RCU scope. */
+struct llc_node_iter llc_node_iter_begin(int node)
+{
+	struct llc_node_iter iter = {};
+	struct llc_node_map *map;
+
+	RCU_LOCKDEP_WARN(!rcu_read_lock_any_held(), "LLC walk without RCU");
+	map = rcu_dereference_all(llc_to_node_map);
+	if (!map || node < 0 || node >= map->nr_node)
+		return iter;
+
+	iter.nr = map->node_count[node];
+	iter.llc = map->node_llc + map->node_offset[node];
+	return iter;
+}
+
+int llc_node_iter_next(struct llc_node_iter *iter)
+{
+	if (iter->index >= iter->nr)
+		return -1;
+
+	return iter->llc[iter->index++];
+}
+
+/* The iterator's arrays remain valid throughout the caller's RCU scope. */
+struct llc_node_span_iter llc_node_span_begin(int node)
+{
+	struct llc_node_span_iter iter = {};
+	struct llc_node_map *map;
+	int base;
+
+	RCU_LOCKDEP_WARN(!rcu_read_lock_any_held(), "LLC span read without RCU");
+	map = rcu_dereference_all(llc_to_node_map);
+	if (!map || node < 0 || node >= map->nr_node)
+		return iter;
+
+	base = map->node_offset[node];
+	iter.nr = map->node_count[node];
+	iter.llc = map->node_llc + base;
+	iter.span = map->span;
+
+	return iter;
+}
+
+const struct cpumask *llc_node_span_next(struct llc_node_span_iter *iter)
+{
+	const struct cpumask *span;
+	int llc;
+
+	while (iter->index < iter->nr) {
+		llc = iter->llc[iter->index++];
+		span = llc_span_at(iter->span, llc);
+		if (cpumask_empty(span))
+			continue;
+
+		return span;
+	}
+
+	return NULL;
+}
+#endif /* CONFIG_SCHED_CACHE */
+
 const struct cpumask *tl_pkg_mask(struct sched_domain_topology_level *tl, int cpu)
 {
 	return cpu_node_mask(cpu);
@@ -3036,7 +3548,8 @@ static int __sched_domains_alloc_llc_id(void)
 	return lid;
 }
 
-static void __sched_domains_free_llc_id(int cpu)
+/* Return true if @cpu held an LLC ID, whether or not the ID is released. */
+static bool __sched_domains_free_llc_id(int cpu)
 {
 	int i, lid, max;
 
@@ -3044,14 +3557,14 @@ static void __sched_domains_free_llc_id(int cpu)
 
 	lid = per_cpu(sd_llc_id, cpu);
 	if (lid == -1 || lid >= nr_cpu_ids)
-		return;
+		return false;
 
 	per_cpu(sd_llc_id, cpu) = -1;
 
 	for_each_cpu(i, llc_mask(cpu)) {
 		/* An online CPU owns the llc_id. */
 		if (per_cpu(sd_llc_id, i) == lid)
-			return;
+			return true;
 	}
 
 	__cpumask_clear_cpu(lid, sched_domains_llc_id_allocmask);
@@ -3060,12 +3573,19 @@ static void __sched_domains_free_llc_id(int cpu)
 	/* shrink max lid to save memory */
 	if (max < max_lid)
 		max_lid = max;
+	return true;
 }
 
 void sched_domains_free_llc_id(int cpu)
 {
 	sched_domains_mutex_lock();
+#ifdef CONFIG_SCHED_CACHE
+	/* Drop @cpu from the LLC span even if another CPU still holds the ID. */
+	if (__sched_domains_free_llc_id(cpu))
+		rebuild_llc_node_map(max_lid + 1);
+#else
 	__sched_domains_free_llc_id(cpu);
+#endif
 	sched_domains_mutex_unlock();
 }
 
@@ -3207,6 +3727,11 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
 	}
 	rcu_read_unlock();
 
+#ifdef CONFIG_SCHED_CACHE
+	/* LLC spans depend on the root domains just attached. */
+	rebuild_llc_node_map(max_lid + 1);
+#endif
+
 	if (has_asym)
 		static_branch_inc_cpuslocked(&sched_asym_cpucapacity);
 
@@ -3322,6 +3847,11 @@ static void detach_destroy_domains(const struct cpumask *cpu_map)
 	for_each_cpu(i, cpu_map)
 		cpu_attach_domain(NULL, &def_root_domain, i);
 	rcu_read_unlock();
+
+#ifdef CONFIG_SCHED_CACHE
+	/* Detaching CPUs must also remove them from the published LLC spans. */
+	rebuild_llc_node_map(max_lid + 1);
+#endif
 }
 
 /* handle null as "default" */

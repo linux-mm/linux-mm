@@ -177,6 +177,17 @@ static inline int cpu_to_mem(int cpu)
 
 #endif	/* [!]CONFIG_HAVE_MEMORYLESS_NODES */
 
+#ifdef CONFIG_SCHED_CACHE
+void sched_cache_init_node_order(void);
+/* Sleepable pair bracketing runtime changes to raw node_distance() data. */
+void sched_cache_numa_distance_update_begin(void);
+void sched_cache_numa_distance_update_end(bool changed);
+#else
+static inline void sched_cache_init_node_order(void) { }
+static inline void sched_cache_numa_distance_update_begin(void) { }
+static inline void sched_cache_numa_distance_update_end(bool changed) { }
+#endif
+
 #if defined(topology_die_id) && defined(topology_die_cpumask)
 #define TOPOLOGY_DIE_SYSFS
 #endif
