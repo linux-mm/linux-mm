@@ -4148,6 +4148,40 @@ static inline bool sched_cache_enabled(void)
 extern void sched_cache_active_set(void);
 extern int llc_to_node(int llc);
 
+/*
+ * Lexicographic node affinity key. Keep the raw NUMA distance as the first
+ * component: it identifies the distance level without changing its order.
+ * tie_rank is used for tie-break if level equals.
+ */
+struct sched_cache_numa_key {
+	int level;
+	int tie_rank;
+};
+
+/* Both nodes must be valid */
+static inline struct sched_cache_numa_key
+sched_cache_numa_key(int node0, int node1, int tie_rank)
+{
+	return (struct sched_cache_numa_key) {
+		.level = node_distance(node0, node1),
+		.tie_rank = tie_rank,
+	};
+}
+
+static inline int
+sched_cache_numa_key_cmp(struct sched_cache_numa_key a,
+			 struct sched_cache_numa_key b)
+{
+	if (a.level != b.level)
+		return a.level < b.level ? -1 : 1;
+	if (a.tie_rank != b.tie_rank)
+		return a.tie_rank < b.tie_rank ? -1 : 1;
+	return 0;
+}
+
+/* Node IDs in, zero-based rank out; -1 if unavailable or invalid. */
+extern int affi_node_rank_of(int prefer_node, int node);
+
 #endif
 
 void sched_domains_free_llc_id(int cpu);

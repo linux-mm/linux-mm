@@ -6,6 +6,7 @@
 #include <linux/sched/isolation.h>
 #include <linux/sched/clock.h>
 #include <linux/bsearch.h>
+#include <linux/sort.h>
 #include "sched.h"
 
 DEFINE_MUTEX(sched_domains_mutex);
@@ -701,6 +702,18 @@ struct llc_node_map {
 static struct llc_node_map __rcu *llc_to_node_map;
 static void rebuild_llc_node_map(int size);
 
+struct affi_node_order_topology {
+	struct rcu_head rcu;
+	int size;
+	int nr_nodes;
+	int *rank;
+	int order[];
+};
+
+static struct affi_node_order_topology __rcu *affi_node_order;
+static DEFINE_MUTEX(affi_node_order_mutex);
+static bool affi_node_order_ready;
+
 #endif
 
 static void update_top_cache_domain(int cpu)
@@ -930,6 +943,183 @@ publish:
 fail:
 	new_map = NULL;
 	goto publish;
+}
+
+struct affi_node_candidate {
+	struct sched_cache_numa_key key;
+	int node;
+};
+
+static int affi_node_candidate_cmp(const void *a, const void *b)
+{
+	const struct affi_node_candidate *ca = a, *cb = b;
+
+	return sched_cache_numa_key_cmp(ca->key, cb->key);
+}
+
+/*
+ * Build a root-relative tie-breaking order for equal-distance NUMA nodes.
+ * Sorting ties by node ID would make different roots consistently prefer
+ * low-ID nodes. Instead, use a permutation of cyclic offsets, shifted by
+ * each root's ordinal among possible nodes.
+ *
+ * Let N = nr_nodes and M be the smallest power of two >= N. Generate:
+ *
+ *   T(i) = i * (i + 1) / 2, i = 0, ..., M - 1
+ *   offset = T(i) % M
+ *
+ * These M residues form a permutation of [0, M). Keep only offsets < N,
+ * preserving their order, to obtain a permutation of [0, N). Using M
+ * rather than N avoids repeated or missing offsets when N is not a
+ * power of two.
+ *
+ * Store the inverse permutation: inverse[offset] is the position of
+ * that offset in the order. For root ordinal p and candidate ordinal q,
+ * the caller uses inverse[(q - p + N) % N] as the tie-breaking rank.
+ * Ordinals are consecutive and exclude holes in the node ID space.
+ *
+ * For N = 4, offsets are [0, 1, 3, 2], giving:
+ *
+ *   root 0: 0, 1, 3, 2
+ *   root 1: 1, 2, 0, 3
+ *   root 2: 2, 3, 1, 0
+ *   root 3: 3, 0, 2, 1
+ *
+ * Each ordinal occupies each position once across these shifted orders.
+ * Raw NUMA distance remains the primary sort key; this rank only breaks
+ * ties. Thus the final distance-sorted rows need not retain that balance.
+ */
+static void build_numa_tie_ranks(int *inverse, unsigned int nr_nodes)
+{
+	unsigned int mod = 1, pos = 0, i, rank = 0;
+
+	while (mod < nr_nodes)
+		mod <<= 1;
+	for (i = 0; i < mod; i++) {
+		if (pos < nr_nodes)
+			inverse[pos] = rank++;
+		pos = (pos + i + 1) & (mod - 1);
+	}
+}
+
+/* Possible nodes include CPU-less nodes and exclude node ID holes. */
+static void rebuild_node_order(void)
+{
+	struct affi_node_order_topology *topo = NULL, *old;
+	struct affi_node_candidate *cand;
+	int *tie_rank;
+	int size = nr_node_ids, nr_nodes = num_possible_nodes();
+	int root, node, i, k, root_ord = 0, node_ord, delta;
+	size_t order_entries = size_mul(size, nr_nodes);
+	size_t rank_entries = size_mul(size, size);
+	size_t entries = size_add(order_entries, rank_entries);
+
+	lockdep_assert_held(&affi_node_order_mutex);
+	if (!nr_nodes)
+		goto publish;
+
+	cand = kmalloc_array(nr_nodes, sizeof(*cand), GFP_KERNEL);
+	if (!cand)
+		goto publish;
+	tie_rank = kmalloc_array(nr_nodes, sizeof(*tie_rank), GFP_KERNEL);
+	if (!tie_rank) {
+		kfree(cand);
+		goto publish;
+	}
+	topo = kvzalloc(struct_size(topo, order, entries), GFP_KERNEL);
+	if (!topo) {
+		kfree(tie_rank);
+		kfree(cand);
+		goto publish;
+	}
+	build_numa_tie_ranks(tie_rank, nr_nodes);
+	topo->size = size;
+	topo->nr_nodes = nr_nodes;
+	/* Store both directions in one allocation and publish them together. */
+	topo->rank = topo->order + order_entries;
+	memset(topo->rank, -1, rank_entries * sizeof(*topo->rank));
+	for_each_node(root) {
+		int *row = topo->order + (size_t)root * nr_nodes;
+		int *rank = topo->rank + (size_t)root * size;
+
+		k = 0;
+		node_ord = 0;
+		for_each_node(node) {
+			/* Ordinals, rather than IDs, keep holes out of the cycle. */
+			delta = node_ord++ - root_ord;
+			if (delta < 0)
+				delta += nr_nodes;
+			if (node == root)
+				continue;
+			cand[k].node = node;
+			cand[k++].key = sched_cache_numa_key(root, node,
+							 tie_rank[delta]);
+		}
+		sort(cand, k, sizeof(*cand), affi_node_candidate_cmp, NULL);
+		/* Keep the local node first regardless of firmware distances. */
+		row[0] = root;
+		rank[root] = 0;
+		for (i = 0; i < k; i++) {
+			row[i + 1] = cand[i].node;
+			rank[row[i + 1]] = i + 1;
+		}
+		root_ord++;
+	}
+	kfree(tie_rank);
+	kfree(cand);
+
+publish:
+	/* On failure, new readers fall back to the local node, not stale rows. */
+	old = rcu_replace_pointer(affi_node_order, topo,
+				  lockdep_is_held(&affi_node_order_mutex));
+	kvfree_rcu(old, rcu);
+}
+
+/*
+ * Serialize runtime distance writes with construction of the cached rows.
+ * Architectures must hold this sleepable pair across their raw update.
+ * Readers continue to use an immutable old row until publication completes.
+ */
+void sched_cache_numa_distance_update_begin(void)
+{
+	mutex_lock(&affi_node_order_mutex);
+}
+
+void sched_cache_numa_distance_update_end(bool changed)
+{
+	lockdep_assert_held(&affi_node_order_mutex);
+	if (changed && affi_node_order_ready)
+		rebuild_node_order();
+	mutex_unlock(&affi_node_order_mutex);
+}
+
+void __init sched_cache_init_node_order(void)
+{
+	sched_cache_numa_distance_update_begin();
+	/* Include firmware updates made before scheduler initialization. */
+	affi_node_order_ready = true;
+	sched_cache_numa_distance_update_end(true);
+}
+
+/*
+ * Return @node's zero-based rank in @prefer_node's affinity order, with
+ * @prefer_node itself ranked first. Both arguments are node IDs, not CPUs.
+ * Return -1 for an unknown node or an unavailable ordering. Each query
+ * uses one RCU snapshot; separate queries may observe different versions.
+ */
+int affi_node_rank_of(int prefer_node, int node)
+{
+	struct affi_node_order_topology *topo;
+
+	if (prefer_node < 0 || node < 0)
+		return -1;
+
+	guard(rcu)();
+	topo = rcu_dereference(affi_node_order);
+	if (!topo || prefer_node >= topo->size || node >= topo->size)
+		return -1;
+
+	return topo->rank[(size_t)prefer_node * topo->size + node];
 }
 
 /*

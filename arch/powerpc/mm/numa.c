@@ -25,6 +25,7 @@
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#include <linux/topology.h>
 #include <asm/cputhreads.h>
 #include <asm/sparsemem.h>
 #include <asm/smp.h>
@@ -350,7 +351,10 @@ void update_numa_distance(struct device_node *node)
 		if (!associativity)
 			return;
 
+		/* Keep cached node orders consistent with raw distance updates. */
+		sched_cache_numa_distance_update_begin();
 		initialize_form1_numa_distance(associativity);
+		sched_cache_numa_distance_update_end(true);
 		return;
 	}
 
