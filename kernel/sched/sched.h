@@ -4146,6 +4146,7 @@ static inline bool sched_cache_enabled(void)
 }
 
 extern void sched_cache_active_set(void);
+extern int llc_to_node(int llc);
 
 #endif
 

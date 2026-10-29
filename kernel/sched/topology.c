@@ -685,6 +685,24 @@ DEFINE_PER_CPU(struct sched_domain __rcu *, sd_asym_cpucapacity);
 DEFINE_STATIC_KEY_FALSE(sched_asym_cpucapacity);
 DEFINE_STATIC_KEY_FALSE(sched_cluster_active);
 
+#ifdef CONFIG_SCHED_CACHE
+/*
+ * LLC id to NUMA node map. The number of entries lives inside the
+ * RCU-protected allocation so that a reader bound-checks against the
+ * length of the very map it dereferenced. max_lid is updated by
+ * __sched_domains_alloc_llc_id() well before rebuild_llc_node_map()
+ * installs the matching map, so it must not be used as the bound.
+ */
+struct llc_node_map {
+	int nr_llc;
+	int node[];
+};
+
+static struct llc_node_map __rcu *llc_to_node_map;
+static void rebuild_llc_node_map(int size);
+
+#endif
+
 static void update_top_cache_domain(int cpu)
 {
 	struct sched_domain_shared *sds = NULL;
@@ -855,6 +873,64 @@ DEFINE_STATIC_KEY_FALSE(sched_cache_present);
 DEFINE_STATIC_KEY_FALSE(sched_cache_active);
 /* user wants cache aware scheduling [0 or 1] */
 int sysctl_sched_cache_user = 1;
+
+int llc_to_node(int llc)
+{
+	struct llc_node_map *map;
+	int node = -1;
+
+	rcu_read_lock();
+	map = rcu_dereference(llc_to_node_map);
+	if (map && llc >= 0 && llc < map->nr_llc)
+		node = map->node[llc];
+	rcu_read_unlock();
+
+	return node;
+}
+
+static void rebuild_llc_node_map(int size)
+{
+	struct llc_node_map *new_map, *old_map;
+	int cpu, llc, node;
+
+	lockdep_assert_held(&sched_domains_mutex);
+	if (size <= 0)
+		goto fail;
+
+	new_map = kzalloc(struct_size(new_map, node, size), GFP_KERNEL);
+	if (!new_map)
+		goto fail;
+
+	new_map->nr_llc = size;
+	for (llc = 0; llc < size; llc++)
+		new_map->node[llc] = NUMA_NO_NODE;
+
+	/*
+	 * for_each_possible_cpu() revisits the same LLC non-consecutively
+	 * under SMT (each node's LLCs are walked once per thread), so
+	 * dedup by populated node entries, not by comparing against the
+	 * immediately preceding CPU's llc.
+	 */
+	for_each_possible_cpu(cpu) {
+		llc = per_cpu(sd_llc_id, cpu);
+		if (llc < 0 || llc >= size || new_map->node[llc] >= 0)
+			continue;
+		node = cpu_to_node(cpu);
+		if (node >= 0 && node < nr_node_ids && node_possible(node))
+			new_map->node[llc] = node;
+	}
+
+publish:
+	old_map = rcu_dereference_protected(llc_to_node_map,
+					    lockdep_is_held(&sched_domains_mutex));
+	rcu_assign_pointer(llc_to_node_map, new_map);
+	kfree_rcu_mightsleep(old_map);
+	return;
+
+fail:
+	new_map = NULL;
+	goto publish;
+}
 
 /*
  * Get the effective LLC size in bytes that @cpu's bottom sched_domain
@@ -3036,7 +3112,8 @@ static int __sched_domains_alloc_llc_id(void)
 	return lid;
 }
 
-static void __sched_domains_free_llc_id(int cpu)
+/* Return true only when the last CPU releases the LLC ID. */
+static bool __sched_domains_free_llc_id(int cpu)
 {
 	int i, lid, max;
 
@@ -3044,14 +3121,14 @@ static void __sched_domains_free_llc_id(int cpu)
 
 	lid = per_cpu(sd_llc_id, cpu);
 	if (lid == -1 || lid >= nr_cpu_ids)
-		return;
+		return false;
 
 	per_cpu(sd_llc_id, cpu) = -1;
 
 	for_each_cpu(i, llc_mask(cpu)) {
 		/* An online CPU owns the llc_id. */
 		if (per_cpu(sd_llc_id, i) == lid)
-			return;
+			return false;
 	}
 
 	__cpumask_clear_cpu(lid, sched_domains_llc_id_allocmask);
@@ -3060,12 +3137,18 @@ static void __sched_domains_free_llc_id(int cpu)
 	/* shrink max lid to save memory */
 	if (max < max_lid)
 		max_lid = max;
+	return true;
 }
 
 void sched_domains_free_llc_id(int cpu)
 {
 	sched_domains_mutex_lock();
+#ifdef CONFIG_SCHED_CACHE
+	if (__sched_domains_free_llc_id(cpu))
+		rebuild_llc_node_map(max_lid + 1);
+#else
 	__sched_domains_free_llc_id(cpu);
+#endif
 	sched_domains_mutex_unlock();
 }
 
@@ -3135,6 +3218,10 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
 		}
 	}
 
+#ifdef CONFIG_SCHED_CACHE
+	/* The map depends on assigned LLC IDs, not on sd_llc allocations. */
+	rebuild_llc_node_map(max_lid + 1);
+#endif
 	if (WARN_ON(!topology_span_sane(cpu_map)))
 		goto error;
 
