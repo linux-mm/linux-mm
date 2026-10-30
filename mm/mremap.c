@@ -1246,9 +1246,20 @@ static void unmap_source_vma(struct vma_remap_struct *vrm)
 	vrm->vma = NULL; /* Invalidated. */
 	vrm->vmi_needs_invalidate = true;
 	if (err) {
-		/* OOM: unable to split vma, just get accounts right */
-		if (accountable_move)
+		/*
+		 * OOM: unable to split vma, just get accounts right. Both the
+		 * old and the new range remain mapped, so charge the range a
+		 * second time, and reinstate the flag on all that is left of
+		 * the VMA so the charge is returned when it gets unmapped.
+		 */
+		if (accountable_move) {
 			vm_acct_memory(len >> PAGE_SHIFT);
+			vma_iter_set(&vmi, vm_start);
+			for_each_vma_range(vmi, vma, vm_end) {
+				vma_start_write(vma);
+				vma_set_flags(vma, VMA_ACCOUNT_BIT);
+			}
+		}
 		return;
 	}
 
