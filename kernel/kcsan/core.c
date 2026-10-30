@@ -828,6 +828,25 @@ void __init kcsan_init(void)
 	}
 }
 
+void kcsan_task_init(struct task_struct *task)
+{
+	/*
+	 * Drop per-task KCSAN state copied verbatim from the parent by
+	 * arch_dup_task_struct(). A stale reorder_access would otherwise be
+	 * replayed by the child in an unrelated call chain, causing
+	 * false-positive reports and a "Cannot find frame ..." warning in
+	 * replace_stack_entry().
+	 */
+	memset(&task->kcsan_ctx, 0, sizeof(task->kcsan_ctx));
+	task->kcsan_ctx.scoped_accesses = (struct list_head){ LIST_POISON1, NULL };
+#ifdef CONFIG_KCSAN_WEAK_MEMORY
+	task->kcsan_stack_depth = 0;
+#endif
+#ifdef CONFIG_TRACE_IRQFLAGS
+	memset(&task->kcsan_save_irqtrace, 0, sizeof(task->kcsan_save_irqtrace));
+#endif
+}
+
 /* === Exported interface =================================================== */
 
 void kcsan_disable_current(void)
