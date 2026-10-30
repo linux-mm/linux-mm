@@ -125,7 +125,7 @@ bad_bmap:
 	goto out;
 }
 
-static bool is_folio_zero_filled(struct folio *folio)
+bool is_folio_zero_filled(struct folio *folio)
 {
 	unsigned int pos, last_pos;
 	unsigned long *data;
@@ -195,6 +195,19 @@ static void swap_zeromap_folio_clear(struct folio *folio)
 		entry.val++;
 	}
 	swap_cluster_unlock(ci);
+}
+
+/*
+ * True when swap_writeout() would only activate the dirty folios of @memcg:
+ * zswap refuses them and they may not go to the device. Zero-filled folios
+ * are the exception, see swap_writeout().
+ */
+bool swap_writeout_blocked(struct mem_cgroup *memcg)
+{
+	/* The device takes the folio, also when zswap is off */
+	if (mem_cgroup_zswap_writeback_enabled(memcg))
+		return false;
+	return zswap_store_blocked(memcg);
 }
 
 /*

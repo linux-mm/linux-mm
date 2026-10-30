@@ -567,6 +567,17 @@ static bool zswap_check_limits(void)
 	return zswap_pool_reached_full;
 }
 
+/* True when zswap_store() would refuse every folio of @memcg right now */
+bool zswap_store_blocked(struct mem_cgroup *memcg)
+{
+	if (zswap_check_limits()) {
+		/* A refused store would kick the shrinker, do the same */
+		queue_work(shrink_wq, &zswap_shrink_work);
+		return true;
+	}
+	return !mem_cgroup_may_zswap(memcg);
+}
+
 /*********************************
 * param callbacks
 **********************************/

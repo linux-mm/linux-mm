@@ -259,6 +259,8 @@ void swap_read_submit(struct swap_io_ctx *ctx);
 void swap_write_submit(struct swap_io_ctx *ctx);
 int swap_writeout(struct swap_io_ctx *ctx, struct folio *folio);
 void __swap_writeout(struct swap_io_ctx *ctx, struct folio *folio);
+bool swap_writeout_blocked(struct mem_cgroup *memcg);
+bool is_folio_zero_filled(struct folio *folio);
 
 /* linux/mm/swap_state.c */
 extern struct address_space swap_space __read_mostly;
@@ -426,6 +428,16 @@ static inline void swap_update_readahead(struct folio *folio,
 static inline int swap_writeout(struct swap_io_ctx *ctx, struct folio *folio)
 {
 	return 0;
+}
+
+static inline bool swap_writeout_blocked(struct mem_cgroup *memcg)
+{
+	return false;
+}
+
+static inline bool is_folio_zero_filled(struct folio *folio)
+{
+	return false;
 }
 
 static inline int swap_retry_table_alloc(swp_entry_t entry, gfp_t gfp)
