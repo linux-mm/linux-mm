@@ -1171,7 +1171,9 @@ out_free_interp:
 							 PTR_ERR((void*)load_bias) : -EINVAL;
 						goto out_free_dentry;
 					}
-					vm_munmap(load_bias, total_size);
+					retval = vm_munmap(load_bias, total_size);
+					if (retval)
+						goto out_free_dentry;
 					/* Adjust alignment as requested. */
 					if (alignment)
 						load_bias &= ~(alignment - 1);
