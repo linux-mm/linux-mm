@@ -1007,6 +1007,7 @@ static void collapse_compound_extreme(struct collapse_context *c, struct mem_ops
 static void collapse_fork(struct collapse_context *c, struct mem_ops *ops)
 {
 	int wstatus;
+	pid_t pid;
 	void *p;
 
 	p = ops->setup_area(1);
@@ -1019,7 +1020,8 @@ static void collapse_fork(struct collapse_context *c, struct mem_ops *ops)
 		fail("Fail");
 
 	ksft_print_msg("Share small page over fork()...");
-	if (!fork()) {
+	pid = fork();
+	if (pid == 0) {
 		/* Do not touch settings on child exit */
 		if (ops->check_huge(p, hpage_pmd_size, 0, hpage_pmd_size))
 			success("OK");
@@ -1034,9 +1036,20 @@ static void collapse_fork(struct collapse_context *c, struct mem_ops *ops)
 		ops->cleanup_area(p, hpage_pmd_size);
 		_exit(exit_status);
 	}
+	if (pid < 0) {
+		fail("fork() failed");
+		goto out;
+	}
 
-	wait(&wstatus);
-	exit_status = WEXITSTATUS(wstatus);
+	while (waitpid(pid, &wstatus, 0) == -1) {
+		if (errno == EINTR)
+			continue;
+
+		fail("waitpid() failed");
+		goto out;
+	}
+
+	exit_status = WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : KSFT_FAIL;
 	if (exit_status == KSFT_FAIL)
 		goto out;
 
@@ -1054,11 +1067,13 @@ out:
 static void collapse_fork_compound(struct collapse_context *c, struct mem_ops *ops)
 {
 	int wstatus;
+	pid_t pid;
 	void *p;
 
 	p = alloc_hpage(ops);
 	ksft_print_msg("Share huge page over fork()...");
-	if (!fork()) {
+	pid = fork();
+	if (pid == 0) {
 		/* Do not touch settings on child exit */
 		if (ops->check_huge(p, hpage_pmd_size, 1, hpage_pmd_size))
 			success("OK");
@@ -1084,9 +1099,20 @@ static void collapse_fork_compound(struct collapse_context *c, struct mem_ops *o
 		ops->cleanup_area(p, hpage_pmd_size);
 		_exit(exit_status);
 	}
+	if (pid < 0) {
+		fail("fork() failed");
+		goto out;
+	}
 
-	wait(&wstatus);
-	exit_status = WEXITSTATUS(wstatus);
+	while (waitpid(pid, &wstatus, 0) == -1) {
+		if (errno == EINTR)
+			continue;
+
+		fail("waitpid() failed");
+		goto out;
+	}
+
+	exit_status = WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : KSFT_FAIL;
 	if (exit_status == KSFT_FAIL)
 		goto out;
 
@@ -1105,11 +1131,13 @@ static void collapse_max_ptes_shared(struct collapse_context *c, struct mem_ops 
 {
 	int max_ptes_shared = thp_read_num("khugepaged/max_ptes_shared");
 	int wstatus;
+	pid_t pid;
 	void *p;
 
 	p = alloc_hpage(ops);
 	ksft_print_msg("Share huge page over fork()...");
-	if (!fork()) {
+	pid = fork();
+	if (pid == 0) {
 		/* Do not touch settings on child exit */
 		if (ops->check_huge(p, hpage_pmd_size, 1, hpage_pmd_size))
 			success("OK");
@@ -1145,9 +1173,20 @@ static void collapse_max_ptes_shared(struct collapse_context *c, struct mem_ops 
 		ops->cleanup_area(p, hpage_pmd_size);
 		_exit(exit_status);
 	}
+	if (pid < 0) {
+		fail("fork() failed");
+		goto out;
+	}
 
-	wait(&wstatus);
-	exit_status = WEXITSTATUS(wstatus);
+	while (waitpid(pid, &wstatus, 0) == -1) {
+		if (errno == EINTR)
+			continue;
+
+		fail("waitpid() failed");
+		goto out;
+	}
+
+	exit_status = WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : KSFT_FAIL;
 	if (exit_status == KSFT_FAIL)
 		goto out;
 
