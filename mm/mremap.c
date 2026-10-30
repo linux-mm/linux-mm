@@ -1112,11 +1112,20 @@ static bool split_source_stays(struct vma_remap_struct *vrm)
 
 static bool needs_pre_split(struct vma_remap_struct *vrm)
 {
+	/* This duplicates a shared mapping: no range to split off or unmap. */
+	if (!vrm->old_len)
+		return false;
+
 	/*
-	 * fixup_hugetlb_reservations() takes the reservations away from the
-	 * source VMA.  The parts of it that do not move have to keep theirs.
+	 * The source range is unmapped once its page tables have moved.  If a
+	 * split fails at that point there is nothing left to go back to, so
+	 * split while the failure can still be reported.
+	 *
+	 * hugetlb relies on this too: fixup_hugetlb_reservations() takes the
+	 * reservations away from the source VMA, and the parts of it that do
+	 * not move have to keep theirs.
 	 */
-	if (vma_is_hugetlb(vrm->vma))
+	if (!(vrm->flags & MREMAP_DONTUNMAP))
 		return true;
 
 	return split_source_stays(vrm);
@@ -1175,10 +1184,10 @@ static unsigned long prep_move_vma(struct vma_remap_struct *vrm)
 	if (err)
 		return err;
 
-	/* Perform any split ahead of time if the source VMA has to be distinct. */
 	if (needs_pre_split(vrm)) {
 		VMA_ITERATOR(vmi, vma->vm_mm, old_addr);
 
+		/* This leaves vma as the VMA that spans the range to move. */
 		if (split_before)
 			err = split_vma(&vmi, vma, old_addr, 1);
 		if (!err && split_after)
@@ -1247,10 +1256,12 @@ static void unmap_source_vma(struct vma_remap_struct *vrm)
 	vrm->vmi_needs_invalidate = true;
 	if (err) {
 		/*
-		 * OOM: unable to split vma, just get accounts right. Both the
-		 * old and the new range remain mapped, so charge the range a
-		 * second time, and reinstate the flag on all that is left of
-		 * the VMA so the charge is returned when it gets unmapped.
+		 * The unmap failed, just get accounts right. Both the old and
+		 * the new range remain mapped, so charge the range a second
+		 * time, and reinstate the flag on all that is left of the VMA
+		 * so the charge is returned when it gets unmapped.
+		 *
+		 * An old_len of 0 ends up here as well. It has nothing to unmap.
 		 */
 		if (accountable_move) {
 			vm_acct_memory(len >> PAGE_SHIFT);
