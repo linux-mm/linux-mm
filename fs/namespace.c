@@ -500,6 +500,26 @@ int mnt_want_write(struct vfsmount *m)
 EXPORT_SYMBOL_GPL(mnt_want_write);
 
 /**
+ * mnt_want_write_trylock - get write access to a mount without waiting
+ * @m: the mount on which to take a write
+ *
+ * Like mnt_want_write(), but returns -EAGAIN instead of waiting when the
+ * filesystem is frozen.  When the write operation is finished,
+ * mnt_drop_write() must be called.
+ */
+int mnt_want_write_trylock(struct vfsmount *m)
+{
+	int ret;
+
+	if (!sb_start_write_trylock(m->mnt_sb))
+		return -EAGAIN;
+	ret = mnt_get_write_access(m);
+	if (ret)
+		sb_end_write(m->mnt_sb);
+	return ret;
+}
+
+/**
  * mnt_get_write_access_file - get write access to a file's mount
  * @file: the file who's mount on which to take a write
  *

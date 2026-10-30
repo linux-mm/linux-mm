@@ -64,7 +64,7 @@ int filename_symlinkat(struct filename *from, int newdfd, struct filename *to);
 int filename_linkat(int olddfd, struct filename *old, int newdfd,
 			struct filename *new, int flags);
 int filename_utimensat(int dfd, struct filename *name,
-		       struct timespec64 *times, int flags);
+		       struct timespec64 *times, int flags, bool nowait);
 int vfs_tmpfile(struct mnt_idmap *idmap,
 		const struct path *parentpath,
 		struct file *file, umode_t mode);
@@ -86,6 +86,7 @@ extern int sb_prepare_remount_readonly(struct super_block *);
 extern void __init mnt_init(void);
 
 int mnt_get_write_access_file(struct file *file);
+int mnt_want_write_trylock(struct vfsmount *m);
 void mnt_put_write_access_file(struct file *file);
 
 extern void dissolve_on_fput(struct vfsmount *);

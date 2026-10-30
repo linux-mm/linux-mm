@@ -18,7 +18,9 @@ static bool nsec_valid(long nsec)
 	return nsec >= 0 && nsec <= 999999999;
 }
 
-int vfs_utimes(const struct path *path, struct timespec64 *times)
+/* With @nowait, returns -EAGAIN instead of sleeping */
+static int __vfs_utimes(const struct path *path, struct timespec64 *times,
+			bool nowait)
 {
 	int error;
 	struct iattr newattrs;
@@ -34,9 +36,17 @@ int vfs_utimes(const struct path *path, struct timespec64 *times)
 			times = NULL;
 	}
 
-	error = mnt_want_write(path->mnt);
-	if (error)
-		goto out;
+	if (nowait) {
+		if (!(inode->i_sb->s_type->fs_flags & FS_SETATTR_TIMES_NOWAIT))
+			return -EAGAIN;
+		error = mnt_want_write_trylock(path->mnt);
+		if (error)
+			goto out;
+	} else {
+		error = mnt_want_write(path->mnt);
+		if (error)
+			goto out;
+	}
 
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (times) {
@@ -63,24 +73,40 @@ int vfs_utimes(const struct path *path, struct timespec64 *times)
 		newattrs.ia_valid |= ATTR_TOUCH;
 	}
 retry_deleg:
-	inode_lock(inode);
+	if (!nowait) {
+		inode_lock(inode);
+	} else if (!inode_trylock(inode)) {
+		error = -EAGAIN;
+		goto drop;
+	}
 	error = notify_change(mnt_idmap(path->mnt), path->dentry, &newattrs,
 			      &delegated_inode);
 	inode_unlock(inode);
 	if (is_delegated(&delegated_inode)) {
+		if (nowait) {
+			iput(delegated_inode.di_inode);
+			delegated_inode.di_inode = NULL;
+			error = -EAGAIN;
+			goto drop;
+		}
 		error = break_deleg_wait(&delegated_inode);
 		if (!error)
 			goto retry_deleg;
 	}
-
+drop:
 	mnt_drop_write(path->mnt);
 out:
 	return error;
 }
+
+int vfs_utimes(const struct path *path, struct timespec64 *times)
+{
+	return __vfs_utimes(path, times, false);
+}
 EXPORT_SYMBOL_GPL(vfs_utimes);
 
 int filename_utimensat(int dfd, struct filename *name,
-		       struct timespec64 *times, int flags)
+		       struct timespec64 *times, int flags, bool nowait)
 {
 	struct path path;
 	int lookup_flags = 0, error;
@@ -90,13 +116,17 @@ int filename_utimensat(int dfd, struct filename *name,
 
 	if (!(flags & AT_SYMLINK_NOFOLLOW))
 		lookup_flags |= LOOKUP_FOLLOW;
+	if (nowait)
+		lookup_flags |= LOOKUP_CACHED;
 
 retry:
 	error = filename_lookup(dfd, name, lookup_flags, &path, NULL);
 	if (error)
 		return error;
-	error = vfs_utimes(&path, times);
+	error = __vfs_utimes(&path, times, nowait);
 	path_put(&path);
+	if (nowait && error == -ESTALE)
+		return -EAGAIN;
 	if (retry_estale(error, lookup_flags)) {
 		lookup_flags |= LOOKUP_REVAL;
 		goto retry;
@@ -108,7 +138,7 @@ static int do_utimes_path(int dfd, const char __user *filename,
 		struct timespec64 *times, int flags)
 {
 	CLASS(filename_uflags, name)(filename, flags);
-	return filename_utimensat(dfd, name, times, flags);
+	return filename_utimensat(dfd, name, times, flags, false);
 }
 
 static int do_utimes_fd(int fd, struct timespec64 *times, int flags)

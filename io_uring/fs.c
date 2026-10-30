@@ -356,38 +356,44 @@ int io_utimensat_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 		if (ut->dfd == AT_FDCWD)
 			return -EFAULT;
 		ut->flags |= IO_UTIMENSAT_NO_PATH;
-		goto out;
+		return 0;
 	}
 	err = delayed_getname_uflags(&ut->filename, fname, ut->flags);
 	if (unlikely(err))
 		return err;
 	req->flags |= REQ_F_NEED_CLEANUP;
-out:
-	req->flags |= REQ_F_FORCE_ASYNC;
 	return 0;
 }
 
-static int __io_utimensat(struct io_utimensat *ut, struct filename *name)
+static int __io_utimensat(struct io_utimensat *ut, struct filename *name,
+			  bool force_nonblock)
 {
 	int flags = ut->flags & (AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
-	return filename_utimensat(ut->dfd, name, ut->times, flags);
+	return filename_utimensat(ut->dfd, name, ut->times, flags,
+				  force_nonblock);
 }
 
 int io_utimensat(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_utimensat *ut = io_kiocb_to_cmd(req, struct io_utimensat);
+	bool force_nonblock = issue_flags & IO_URING_F_NONBLOCK;
 	int ret = 0;
-
-	WARN_ON_ONCE((issue_flags & IO_URING_F_NONBLOCK) &&
-		     !(ut->flags & IO_UTIMENSAT_NOOP));
 
 	if (ut->flags & IO_UTIMENSAT_NO_PATH) {
 		CLASS(filename_kernel, name)("");
-		ret = __io_utimensat(ut, name);
+		ret = __io_utimensat(ut, name, force_nonblock);
+		if (ret == -EAGAIN && force_nonblock)
+			return -EAGAIN;
 	} else if (!(ut->flags & IO_UTIMENSAT_NOOP)) {
 		CLASS(filename_complete_delayed, name)(&ut->filename);
-		ret = __io_utimensat(ut, name);
+		ret = __io_utimensat(ut, name, force_nonblock);
+		if (ret == -EAGAIN && force_nonblock) {
+			ret = putname_to_delayed(&ut->filename,
+						 no_free_ptr(name));
+			if (likely(!ret))
+				return -EAGAIN;
+		}
 	}
 
 	req->flags &= ~REQ_F_NEED_CLEANUP;
