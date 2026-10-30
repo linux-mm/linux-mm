@@ -2518,6 +2518,18 @@ static int unuse_pte(struct vm_area_struct *vma, pmd_t *pmd,
 	if (!folio_matches_swap_entry(folio, entry))
 		return 0;
 
+	/*
+	 * A large folio that is not anon yet was swapped in by a page fault
+	 * that did not map it (yet). It can only be mapped as a whole, by
+	 * do_swap_page(). Drop it from the swap cache and swap in small
+	 * folios instead.
+	 */
+	if (unlikely(folio_test_large(folio) && !folio_test_anon(folio))) {
+		if (!WARN_ON_ONCE(folio_test_dirty(folio)))
+			swap_cache_del_folio(folio);
+		return 0;
+	}
+
 	swapcache = folio;
 	folio = ksm_might_need_to_copy(folio, vma, addr);
 	if (unlikely(!folio))
