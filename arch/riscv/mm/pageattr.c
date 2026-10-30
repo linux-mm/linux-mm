@@ -197,7 +197,8 @@ static int __split_linear_mapping_p4d(pgd_t *pgdp,
 		    vaddr <= (vaddr & P4D_MASK) && end >= next)
 			continue;
 
-		if (p4d_leaf(p4dp_get(p4dp))) {
+		/* p4d_leaf() does not cover kernel-only leaf mappings. */
+		if (pgtable_l4_enabled && (p4d_val(p4dp_get(p4dp)) & _PAGE_LEAF)) {
 			struct page *pud_page;
 			unsigned long pfn = _p4d_pfn(p4dp_get(p4dp));
 			pgprot_t prot = __pgprot(p4d_val(p4dp_get(p4dp)) & ~_PAGE_PFN_MASK);
