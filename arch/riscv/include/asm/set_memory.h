@@ -11,6 +11,9 @@
  * Functions to change memory attributes.
  */
 #ifdef CONFIG_MMU
+#ifdef CONFIG_64BIT
+int set_memory_4k(unsigned long addr, int numpages);
+#endif
 int set_memory_ro(unsigned long addr, int numpages);
 int set_memory_rw(unsigned long addr, int numpages);
 int set_memory_x(unsigned long addr, int numpages);

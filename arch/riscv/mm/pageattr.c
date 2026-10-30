@@ -94,7 +94,8 @@ static const struct mm_walk_ops pageattr_ops = {
 
 #ifdef CONFIG_64BIT
 static int __split_linear_mapping_pmd(pud_t *pudp,
-				      unsigned long vaddr, unsigned long end)
+				      unsigned long vaddr, unsigned long end,
+				      bool force_pte)
 {
 	pmd_t *pmdp;
 	unsigned long next;
@@ -104,7 +105,7 @@ static int __split_linear_mapping_pmd(pud_t *pudp,
 	do {
 		next = pmd_addr_end(vaddr, end);
 
-		if (next - vaddr >= PMD_SIZE &&
+		if (!force_pte && next - vaddr >= PMD_SIZE &&
 		    vaddr <= (vaddr & PMD_MASK) && end >= next)
 			continue;
 
@@ -133,7 +134,8 @@ static int __split_linear_mapping_pmd(pud_t *pudp,
 }
 
 static int __split_linear_mapping_pud(p4d_t *p4dp,
-				      unsigned long vaddr, unsigned long end)
+				      unsigned long vaddr, unsigned long end,
+				      bool force_pte)
 {
 	pud_t *pudp;
 	unsigned long next;
@@ -144,7 +146,7 @@ static int __split_linear_mapping_pud(p4d_t *p4dp,
 	do {
 		next = pud_addr_end(vaddr, end);
 
-		if (next - vaddr >= PUD_SIZE &&
+		if (!force_pte && next - vaddr >= PUD_SIZE &&
 		    vaddr <= (vaddr & PUD_MASK) && end >= next)
 			continue;
 
@@ -169,7 +171,7 @@ static int __split_linear_mapping_pud(p4d_t *p4dp,
 			set_pud(pudp, pfn_pud(page_to_pfn(pmd_page), PAGE_TABLE));
 		}
 
-		ret = __split_linear_mapping_pmd(pudp, vaddr, next);
+		ret = __split_linear_mapping_pmd(pudp, vaddr, next, force_pte);
 		if (ret)
 			return ret;
 	} while (pudp++, vaddr = next, vaddr != end);
@@ -178,7 +180,8 @@ static int __split_linear_mapping_pud(p4d_t *p4dp,
 }
 
 static int __split_linear_mapping_p4d(pgd_t *pgdp,
-				      unsigned long vaddr, unsigned long end)
+				      unsigned long vaddr, unsigned long end,
+				      bool force_pte)
 {
 	p4d_t *p4dp;
 	unsigned long next;
@@ -190,10 +193,10 @@ static int __split_linear_mapping_p4d(pgd_t *pgdp,
 		next = p4d_addr_end(vaddr, end);
 
 		/*
-		 * If [vaddr; end] contains [vaddr & P4D_MASK; next], we don't
-		 * need to split, we'll change the protections on the whole P4D.
+		 * Unless PTE mappings are required, change the protections of a
+		 * fully covered P4D mapping without splitting it.
 		 */
-		if (next - vaddr >= P4D_SIZE &&
+		if (!force_pte && next - vaddr >= P4D_SIZE &&
 		    vaddr <= (vaddr & P4D_MASK) && end >= next)
 			continue;
 
@@ -228,7 +231,7 @@ static int __split_linear_mapping_p4d(pgd_t *pgdp,
 			set_p4d(p4dp, pfn_p4d(page_to_pfn(pud_page), PAGE_TABLE));
 		}
 
-		ret = __split_linear_mapping_pud(p4dp, vaddr, next);
+		ret = __split_linear_mapping_pud(p4dp, vaddr, next, force_pte);
 		if (ret)
 			return ret;
 	} while (p4dp++, vaddr = next, vaddr != end);
@@ -238,7 +241,7 @@ static int __split_linear_mapping_p4d(pgd_t *pgdp,
 
 static int __split_linear_mapping_pgd(pgd_t *pgdp,
 				      unsigned long vaddr,
-				      unsigned long end)
+				      unsigned long end, bool force_pte)
 {
 	unsigned long next;
 	int ret;
@@ -246,7 +249,7 @@ static int __split_linear_mapping_pgd(pgd_t *pgdp,
 	do {
 		next = pgd_addr_end(vaddr, end);
 		/* We never use PGD mappings for the linear mapping */
-		ret = __split_linear_mapping_p4d(pgdp, vaddr, next);
+		ret = __split_linear_mapping_p4d(pgdp, vaddr, next, force_pte);
 		if (ret)
 			return ret;
 	} while (pgdp++, vaddr = next, vaddr != end);
@@ -254,9 +257,30 @@ static int __split_linear_mapping_pgd(pgd_t *pgdp,
 	return 0;
 }
 
-static int split_linear_mapping(unsigned long start, unsigned long end)
+static int split_linear_mapping(unsigned long start, unsigned long end,
+				bool force_pte)
 {
-	return __split_linear_mapping_pgd(pgd_offset_k(start), start, end);
+	return __split_linear_mapping_pgd(pgd_offset_k(start), start, end, force_pte);
+}
+
+/* Split the direct map into base pages without changing its permissions. */
+int set_memory_4k(unsigned long addr, int numpages)
+{
+	unsigned long end = addr + PAGE_SIZE * numpages;
+	int ret;
+
+	if (!numpages)
+		return 0;
+	if (!is_linear_mapping(addr) || !is_linear_mapping(end - 1))
+		return -EINVAL;
+
+	mmap_write_lock(&init_mm);
+	ret = split_linear_mapping(addr, end, true);
+	mmap_write_unlock(&init_mm);
+
+	/* A failed allocation may still have split an upper-level mapping. */
+	flush_tlb_all();
+	return ret;
 }
 #endif	/* CONFIG_64BIT */
 
@@ -296,7 +320,7 @@ static int __set_memory(unsigned long addr, int numpages, pgprot_t set_mask,
 			lm_start = (unsigned long)page_address(area->pages[i]);
 			lm_end = lm_start + PAGE_SIZE;
 
-			ret = split_linear_mapping(lm_start, lm_end);
+			ret = split_linear_mapping(lm_start, lm_end, false);
 			if (ret)
 				goto unlock;
 
@@ -314,7 +338,7 @@ static int __set_memory(unsigned long addr, int numpages, pgprot_t set_mask,
 			lm_end = end;
 		}
 
-		ret = split_linear_mapping(lm_start, lm_end);
+		ret = split_linear_mapping(lm_start, lm_end, false);
 		if (ret)
 			goto unlock;
 

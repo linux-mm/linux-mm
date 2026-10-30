@@ -8,10 +8,12 @@
 #include <asm-generic/pgalloc.h>
 #include <asm/cacheflush.h>
 #include <asm/pgtable.h>
+#include <asm/set_memory.h>
 
 static inline bool arch_kfence_init_pool(void)
 {
-	return true;
+	return !set_memory_4k((unsigned long)__kfence_pool,
+			      KFENCE_POOL_SIZE / PAGE_SIZE);
 }
 
 static inline bool kfence_protect_page(unsigned long addr, bool protect)
