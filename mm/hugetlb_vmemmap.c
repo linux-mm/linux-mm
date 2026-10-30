@@ -759,9 +759,35 @@ static struct zone *pfn_to_zone(unsigned nid, unsigned long pfn)
 }
 
 /*
+ * sparse_init() initializes a node one run of contiguous, same-node present
+ * sections at a time, and only reserves usemap space for the sections in
+ * [pnum_begin, pnum_end). A node may be made up of several such runs (e.g.
+ * with interleaved NUMA layouts), and a gigantic page may straddle a node
+ * boundary. Only pre-HVO a page if all of its sections are present and
+ * within the run being initialized; the rest is left to the generic path.
+ */
+static bool __init bootmem_page_in_section_range(unsigned long pnum,
+		unsigned long ns, unsigned long pnum_begin,
+		unsigned long pnum_end)
+{
+	unsigned long i;
+
+	if (pnum < pnum_begin || pnum + ns > pnum_end)
+		return false;
+
+	for (i = 0; i < ns; i++) {
+		if (!present_section_nr(pnum + i))
+			return false;
+	}
+
+	return true;
+}
+
+/*
  * Initialize memmap section for a gigantic page, HVO-style.
  */
-void __init hugetlb_vmemmap_init_early(int nid)
+void __init hugetlb_vmemmap_init_early(int nid, unsigned long pnum_begin,
+		unsigned long pnum_end)
 {
 	unsigned long psize, paddr, section_size;
 	unsigned long ns, i, pnum, pfn, nr_pages;
@@ -784,6 +810,12 @@ void __init hugetlb_vmemmap_init_early(int nid)
 		psize = nr_pages << PAGE_SHIFT;
 		paddr = virt_to_phys(m);
 		pfn = PHYS_PFN(paddr);
+		pnum = pfn_to_section_nr(pfn);
+		ns = psize / section_size;
+
+		if (!bootmem_page_in_section_range(pnum, ns, pnum_begin, pnum_end))
+			continue;
+
 		map = pfn_to_page(pfn);
 		start = (unsigned long)map;
 		end = start + hugetlb_vmemmap_size(m->hstate);
@@ -793,9 +825,6 @@ void __init hugetlb_vmemmap_init_early(int nid)
 					 zone, HUGETLB_VMEMMAP_RESERVE_SIZE))
 			panic("Failed to allocate memmap for HugeTLB page\n");
 		memmap_boot_pages_add(DIV_ROUND_UP(HUGETLB_VMEMMAP_RESERVE_SIZE, PAGE_SIZE));
-
-		pnum = pfn_to_section_nr(pfn);
-		ns = psize / section_size;
 
 		for (i = 0; i < ns; i++) {
 			sparse_init_early_section(nid, map, pnum,
