@@ -4900,7 +4900,7 @@ int remap_vmalloc_range_partial(struct vm_area_struct *vma, unsigned long uaddr,
 	if (!area)
 		return -EINVAL;
 
-	if (!(area->flags & (VM_USERMAP | VM_DMA_COHERENT)))
+	if (!(area->flags & VM_USERMAP))
 		return -EINVAL;
 
 	if (check_add_overflow(size, off, &end_index) ||
@@ -4911,6 +4911,9 @@ int remap_vmalloc_range_partial(struct vm_area_struct *vma, unsigned long uaddr,
 	do {
 		struct page *page = vmalloc_to_page(kaddr);
 		int ret;
+
+		if (WARN_ON_ONCE(!page))
+			return -EINVAL;
 
 		ret = vm_insert_page(vma, uaddr, page);
 		if (ret)
