@@ -54,6 +54,9 @@ int hfs_write_begin(const struct kiocb *iocb, struct address_space *mapping,
 	loff_t total_capacity;
 	int ret;
 
+	if (unlikely(sb_emergency_ro(inode->i_sb)))
+		return -EROFS;
+
 	total_capacity = (loff_t)sbi->fs_ablocks * sbi->alloc_blksz;
 
 	if (pos >= total_capacity)
@@ -138,6 +141,10 @@ static ssize_t hfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	struct inode *inode = mapping->host;
 	size_t count = iov_iter_count(iter);
 	ssize_t ret;
+
+	if (iov_iter_rw(iter) == WRITE &&
+	    unlikely(sb_emergency_ro(inode->i_sb)))
+		return -EROFS;
 
 	ret = blockdev_direct_IO(iocb, inode, iter, hfs_get_block);
 
@@ -472,6 +479,17 @@ int hfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 	int res;
 
 	hfs_dbg("ino %llu\n", inode->i_ino);
+	if (unlikely(sb_emergency_ro(inode->i_sb))) {
+		/* Keep the headers in sync with the nodes writeback still writes. */
+		if (inode->i_ino == HFS_EXT_CNID)
+			hfs_btree_write(HFS_SB(inode->i_sb)->ext_tree);
+		else if (inode->i_ino == HFS_CAT_CNID)
+			hfs_btree_write(HFS_SB(inode->i_sb)->cat_tree);
+		else
+			return -EROFS;
+		return 0;
+	}
+
 	res = hfs_ext_write_extent(inode);
 	if (res)
 		return res;
