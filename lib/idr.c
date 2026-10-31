@@ -424,6 +424,7 @@ next:
 		xas_store(&xas, bitmap);
 		if (xas_error(&xas)) {
 			bitmap->bitmap[0] = 0;
+			alloc = bitmap;
 			goto out;
 		}
 	}
@@ -450,6 +451,10 @@ next:
 			__set_bit(bit, bitmap->bitmap);
 		}
 		xas_store(&xas, bitmap);
+		if (xas_error(&xas) && !xa_is_value(bitmap)) {
+			__clear_bit(bit, bitmap->bitmap);
+			alloc = bitmap;
+		}
 	}
 out:
 	xas_unlock_irqrestore(&xas, flags);
@@ -458,21 +463,26 @@ out:
 		bit = min % IDA_BITMAP_BITS;
 		goto retry;
 	}
+	if (xas_error(&xas)) {
+		kfree(alloc);
+		return xas_error(&xas);
+	}
 	if (bitmap != alloc)
 		kfree(alloc);
-	if (xas_error(&xas))
-		return xas_error(&xas);
 	return xas.xa_index * IDA_BITMAP_BITS + bit;
 alloc:
 	xas_unlock_irqrestore(&xas, flags);
 	alloc = kzalloc_obj(*bitmap, gfp);
-	if (!alloc)
+	if (!alloc) {
+		xas_destroy(&xas);
 		return -ENOMEM;
+	}
 	xas_set(&xas, min / IDA_BITMAP_BITS);
 	bit = min % IDA_BITMAP_BITS;
 	goto retry;
 nospc:
 	xas_unlock_irqrestore(&xas, flags);
+	xas_destroy(&xas);
 	kfree(alloc);
 	return -ENOSPC;
 }
