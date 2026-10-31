@@ -252,6 +252,8 @@ static int autofs_mount_wait(const struct path *path, bool rcu_walk)
 	if (ino->flags & AUTOFS_INF_PENDING) {
 		if (rcu_walk)
 			return -ECHILD;
+		if (unlikely(current->in_splice_pipe_callback))
+			return -EAGAIN;
 		pr_debug("waiting for mount name=%pd\n", path->dentry);
 		status = autofs_wait(sbi, path, NFY_MOUNT);
 		pr_debug("mount wait done status=%d\n", status);
@@ -263,10 +265,18 @@ static int autofs_mount_wait(const struct path *path, bool rcu_walk)
 	return status;
 }
 
+static bool autofs_expire_wait_blocked(int status)
+{
+	/* A marked caller is refused before a daemon can return a status. */
+	return status == -EAGAIN &&
+	       unlikely(current->in_splice_pipe_callback);
+}
+
 static int do_expire_wait(const struct path *path, bool rcu_walk)
 {
 	struct dentry *dentry = path->dentry;
 	struct dentry *expiring;
+	int status;
 
 	expiring = autofs_lookup_expiring(dentry, rcu_walk);
 	if (IS_ERR(expiring))
@@ -280,7 +290,11 @@ static int do_expire_wait(const struct path *path, bool rcu_walk)
 		 * be quite complete, but the directory has been removed
 		 * so it must have been successful, just wait for it.
 		 */
-		autofs_expire_wait(&this, 0);
+		status = autofs_expire_wait(&this, 0);
+		if (autofs_expire_wait_blocked(status)) {
+			dput(expiring);
+			return status;
+		}
 		autofs_del_expiring(expiring);
 		dput(expiring);
 	}
@@ -359,6 +373,8 @@ static struct vfsmount *autofs_d_automount(struct path *path)
 	 * the mount.
 	 */
 	status = do_expire_wait(path, 0);
+	if (autofs_expire_wait_blocked(status))
+		return ERR_PTR(-EAGAIN);
 	if (status && status != -EAGAIN)
 		return NULL;
 
@@ -405,6 +421,11 @@ static struct vfsmount *autofs_d_automount(struct path *path)
 				goto done;
 			}
 		}
+		/* Do not publish PENDING without issuing its mount request. */
+		if (unlikely(current->in_splice_pipe_callback)) {
+			spin_unlock(&sbi->fs_lock);
+			return ERR_PTR(-EAGAIN);
+		}
 		ino->flags |= AUTOFS_INF_PENDING;
 		spin_unlock(&sbi->fs_lock);
 		status = autofs_mount_wait(path, 0);
@@ -442,8 +463,11 @@ static int autofs_d_manage(const struct path *path, bool rcu_walk)
 	}
 
 	/* Wait for pending expires */
-	if (do_expire_wait(path, rcu_walk) == -ECHILD)
+	status = do_expire_wait(path, rcu_walk);
+	if (status == -ECHILD)
 		return -ECHILD;
+	if (autofs_expire_wait_blocked(status))
+		return -EAGAIN;
 
 	/*
 	 * This dentry may be under construction so wait on mount
