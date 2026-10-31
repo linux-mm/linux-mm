@@ -146,6 +146,11 @@ int __meminit vmemmap_populate(unsigned long start, unsigned long end,
 #if CONFIG_PGTABLE_LEVELS == 2
 	return vmemmap_populate_basepages(start, end, node, NULL);
 #else
+	unsigned long vmemmap_end = (unsigned long)pfn_to_page(max_pfn);
+
+	if (!altmap && (start & PMD_MASK) + PMD_SIZE > vmemmap_end)
+		return vmemmap_populate_basepages(start, end, node, NULL);
+
 	return vmemmap_populate_hugepages(start, end, node, NULL);
 #endif
 }
