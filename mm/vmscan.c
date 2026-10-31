@@ -4408,6 +4408,12 @@ static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
 	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)));
 
 	/*
+	 * OOM killing won't help high order allocations. Skip and let them fail.
+	 */
+	if (sc->order > PAGE_ALLOC_COSTLY_ORDER)
+		return;
+
+	/*
 	 * The main goal is to OOM kill if every generation from all memcgs is
 	 * younger than min_ttl. However, another possibility is all memcgs are
 	 * either too small or below min.
