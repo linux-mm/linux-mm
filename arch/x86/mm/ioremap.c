@@ -222,7 +222,7 @@ __ioremap_caller(resource_size_t phys_addr, unsigned long size,
 	 * Mappings have to be page-aligned
 	 */
 	offset = phys_addr & ~PAGE_MASK;
-	phys_addr &= PAGE_MASK;
+	phys_addr &= (signed long)PAGE_MASK;
 	size = PAGE_ALIGN(last_addr+1) - phys_addr;
 
 	/*
