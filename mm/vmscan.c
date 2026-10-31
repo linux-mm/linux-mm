@@ -1334,6 +1334,92 @@ static enum folio_pageout_result folio_try_pageout(struct folio *folio,
 	unreachable();
 }
 
+static void folio_batch_pageout(struct folio_batch *batch,
+		struct reclaim_folio_state *state, struct scan_control *sc,
+		struct reclaim_stat *stat, struct swap_io_ctx *ctx,
+		struct list_head *folio_list)
+{
+	unsigned int nr = folio_batch_count(batch);
+	unsigned int i;
+
+	/*
+	 * Reuse this private batch to collect the locked folios. Reinit
+	 * leaves the array intact; nr preserves the original input count.
+	 * Adding each accepted folio writes at or before the current read
+	 * index, so entries we have not read yet cannot be overwritten.
+	 */
+	folio_batch_reinit(batch);
+
+	/*
+	 * Revalidate after taking the lock: writeback may have started, or
+	 * a swap fault may have remapped the folio and allowed GUP to pin it.
+	 * Keeping an unmapped folio locked prevents swap faults from mapping
+	 * it again before the TLB flush and pageout. The lock alone does not
+	 * exclude GUP, so existing mappings and pins must both be checked.
+	 */
+	for (i = 0; i < nr; i++) {
+		struct folio *folio = batch->folios[i];
+
+		if (!folio_trylock(folio)) {
+			list_add(&folio->lru, &state->ret_folios);
+			continue;
+		}
+
+		VM_WARN_ON_FOLIO(folio_test_lru(folio), folio);
+
+		/* The folio may have changed while it was unlocked. */
+		if (folio_test_writeback(folio) || folio_mapped(folio) ||
+		    folio_maybe_dma_pinned(folio)) {
+			folio_unlock(folio);
+			list_add(&folio->lru, &state->ret_folios);
+			continue;
+		}
+
+		folio_batch_add(batch, folio);
+	}
+	nr = folio_batch_count(batch);
+
+	if (!nr)
+		return;
+
+	/*
+	 * Flush writable TLB entries before any folio in the batch is
+	 * submitted for I/O.
+	 */
+	try_to_unmap_flush_dirty();
+
+	for (i = 0; i < nr; i++) {
+		struct folio *folio = batch->folios[i];
+
+		switch (folio_try_pageout(folio, sc, ctx, folio_list)) {
+		case FOLIO_PAGEOUT_ACTIVATE:
+			goto activate_locked;
+		case FOLIO_PAGEOUT_KEEP_LOCKED:
+			goto keep_locked;
+		case FOLIO_PAGEOUT_KEEP_UNLOCKED:
+			goto keep;
+		case FOLIO_PAGEOUT_RECLAIM:
+			break;	/* folio is locked; try to free it below */
+		}
+
+		switch (folio_try_reclaim_free(folio, state, sc)) {
+		case FOLIO_RECLAIM_ACTIVATE:
+			goto activate_locked;
+		case FOLIO_RECLAIM_KEEP:
+			goto keep_locked;
+		case FOLIO_RECLAIM_DONE:
+			continue;
+		}
+activate_locked:
+		folio_activate_locked(folio, stat);
+keep_locked:
+		folio_unlock(folio);
+keep:
+		list_add(&folio->lru, &state->ret_folios);
+	}
+	folio_batch_reinit(batch);
+}
+
 static bool folio_try_unmap(struct folio *folio, struct reclaim_stat *stat,
 		unsigned int nr_pages)
 {
@@ -1375,6 +1461,7 @@ static unsigned int shrink_folio_list(struct list_head *folio_list,
 		struct mem_cgroup *memcg)
 {
 	struct reclaim_folio_state state = {};
+	struct folio_batch pageout_folios;
 	LIST_HEAD(demote_folios);
 	unsigned int nr_demoted = 0;
 	unsigned int pgactivate = 0;
@@ -1383,6 +1470,7 @@ static unsigned int shrink_folio_list(struct list_head *folio_list,
 
 	INIT_LIST_HEAD(&state.ret_folios);
 	folio_batch_init(&state.free_folios);
+	folio_batch_init(&pageout_folios);
 	memset(stat, 0, sizeof(*stat));
 	cond_resched();
 	do_demote_pass = can_demote(pgdat->node_id, sc, memcg);
@@ -1679,21 +1767,16 @@ retry:
 			if (!sc->may_writepage)
 				goto keep_locked;
 			/*
-			 * Folio is dirty. Flush the TLB if a writable entry
-			 * potentially exists to avoid CPU writes after I/O
-			 * starts and then write it out here.
+			 * Drop the lock so swap faults finding this folio
+			 * via swap cache lookup can make progress; the
+			 * recheck that this necessitates is documented in
+			 * folio_batch_pageout().
 			 */
-			try_to_unmap_flush_dirty();
-			switch (folio_try_pageout(folio, sc, &ctx, folio_list)) {
-			case FOLIO_PAGEOUT_ACTIVATE:
-				goto activate_locked;
-			case FOLIO_PAGEOUT_KEEP_LOCKED:
-				goto keep_locked;
-			case FOLIO_PAGEOUT_KEEP_UNLOCKED:
-				goto keep;
-			case FOLIO_PAGEOUT_RECLAIM:
-				break;	/* folio is locked; try to free it below */
-			}
+			folio_unlock(folio);
+			if (!folio_batch_add(&pageout_folios, folio))
+				folio_batch_pageout(&pageout_folios, &state,
+						    sc, stat, &ctx, folio_list);
+			continue;
 		}
 
 		switch (folio_try_reclaim_free(folio, &state, sc)) {
@@ -1720,6 +1803,10 @@ keep:
 		list_add(&folio->lru, &state.ret_folios);
 		VM_BUG_ON_FOLIO(folio_test_lru(folio) ||
 				folio_test_unevictable(folio), folio);
+	}
+	if (folio_batch_count(&pageout_folios)) {
+		folio_batch_pageout(&pageout_folios, &state, sc, stat,
+				    &ctx, folio_list);
 	}
 	/* 'folio_list' is always empty here */
 
