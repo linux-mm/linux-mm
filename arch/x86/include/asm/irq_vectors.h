@@ -44,10 +44,10 @@
 #define ISA_IRQ_VECTOR(irq)		(((FIRST_EXTERNAL_VECTOR + 16) & ~15) + irq)
 
 /*
- * Special IRQ vectors used by the SMP architecture, 0xf0-0xff
+ * Special IRQ vectors used by the SMP architecture, 0xec-0xff
  *
  *  some of the following vectors are 'rare', they are merged
- *  into a single vector (CALL_FUNCTION_VECTOR) to save vector space.
+ *  into a single vector to save vector space.
  *  TLB, reschedule and local APIC vectors are performance-critical.
  */
 
@@ -61,49 +61,48 @@
 
 #define ERROR_APIC_VECTOR		0xfe
 #define RESCHEDULE_VECTOR		0xfd
-#define CALL_FUNCTION_VECTOR		0xfc
-#define CALL_FUNCTION_SINGLE_VECTOR	0xfb
-#define THERMAL_APIC_VECTOR		0xfa
-#define THRESHOLD_APIC_VECTOR		0xf9
-#define REBOOT_VECTOR			0xf8
+#define CALL_FUNCTION_SINGLE_VECTOR	0xfc
+#define THERMAL_APIC_VECTOR		0xfb
+#define THRESHOLD_APIC_VECTOR		0xfa
+#define REBOOT_VECTOR			0xf9
 
 /*
  * Generic system vector for platform specific use
  */
-#define X86_PLATFORM_IPI_VECTOR		0xf7
+#define X86_PLATFORM_IPI_VECTOR		0xf8
 
 /*
  * IRQ work vector:
  */
-#define IRQ_WORK_VECTOR			0xf6
+#define IRQ_WORK_VECTOR			0xf7
 
 /* IRQ vector for PMIs when running a guest with a mediated PMU. */
-#define PERF_GUEST_MEDIATED_PMI_VECTOR	0xf5
+#define PERF_GUEST_MEDIATED_PMI_VECTOR	0xf6
 
-#define DEFERRED_ERROR_VECTOR		0xf4
+#define DEFERRED_ERROR_VECTOR		0xf5
 
 /* Vector on which hypervisor callbacks will be delivered */
-#define HYPERVISOR_CALLBACK_VECTOR	0xf3
+#define HYPERVISOR_CALLBACK_VECTOR	0xf4
 
 /* Vector for KVM to deliver posted interrupt IPI */
-#define POSTED_INTR_VECTOR		0xf2
-#define POSTED_INTR_WAKEUP_VECTOR	0xf1
-#define POSTED_INTR_NESTED_VECTOR	0xf0
+#define POSTED_INTR_VECTOR		0xf3
+#define POSTED_INTR_WAKEUP_VECTOR	0xf2
+#define POSTED_INTR_NESTED_VECTOR	0xf1
 
-#define MANAGED_IRQ_SHUTDOWN_VECTOR	0xef
+#define MANAGED_IRQ_SHUTDOWN_VECTOR	0xf0
 
 #if IS_ENABLED(CONFIG_HYPERV)
-#define HYPERV_REENLIGHTENMENT_VECTOR	0xee
-#define HYPERV_STIMER0_VECTOR		0xed
+#define HYPERV_REENLIGHTENMENT_VECTOR	0xef
+#define HYPERV_STIMER0_VECTOR		0xee
 #endif
 
-#define LOCAL_TIMER_VECTOR		0xec
+#define LOCAL_TIMER_VECTOR		0xed
 
 /*
  * Posted interrupt notification vector for all device MSIs delivered to
  * the host kernel.
  */
-#define POSTED_MSI_NOTIFICATION_VECTOR	0xeb
+#define POSTED_MSI_NOTIFICATION_VECTOR	0xec
 
 #define NR_VECTORS			 256
 
