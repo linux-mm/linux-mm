@@ -51,6 +51,42 @@
 #endif
 
 /*
+ * Return true, and warn, if the current task has no mm, in which case user
+ * memory must not be accessed.
+ *
+ * Accessing user memory without an mm (e.g. from a kernel thread that is not
+ * using kthread_use_mm(), or from a task that has already gone through
+ * exit_mm()) is always a bug: the user portion of the address space belongs to
+ * whatever mm happens to be lazily loaded, if any, so the access could
+ * silently hit another task's memory.
+ *
+ * Note that this only catches a missing mm. It cannot catch a valid mm that
+ * isn't the one the caller expects, e.g. when a file's release or ioctl
+ * handlers run in a different process than the one that created it. Code
+ * that keeps user addresses belonging to a specific mm must check
+ * current->mm against that mm itself (see e.g. KVM's kvm->mm checks).
+ */
+void __cold uaccess_warn_without_mm(void);
+
+static __always_inline bool uaccess_without_mm(void)
+{
+	if (likely(current->mm))
+		return false;
+	/* Warn out of line to keep inlined user copies small. */
+	uaccess_warn_without_mm();
+	return true;
+}
+
+/*
+ * Return true if a user copy must not be attempted, either because the
+ * current task has no mm, or because a failure is being injected.
+ */
+static __always_inline bool uaccess_should_fail(void)
+{
+	return uaccess_without_mm() || should_fail_usercopy();
+}
+
+/*
  * Architectures should provide two primitives (raw_copy_{to,from}_user())
  * and get rid of their private instances of copy_{to,from}_user() and
  * __copy_{to,from}_user{,_inatomic}().
@@ -100,6 +136,8 @@ __copy_from_user_inatomic(void *to, const void __user *from, unsigned long n)
 {
 	unsigned long res;
 
+	if (uaccess_without_mm())
+		return n;
 	instrument_copy_from_user_before(to, from, n);
 	check_object_size(to, n, false);
 	res = raw_copy_from_user(to, from, n);
@@ -114,7 +152,7 @@ __copy_from_user(void *to, const void __user *from, unsigned long n)
 
 	might_fault();
 	instrument_copy_from_user_before(to, from, n);
-	if (should_fail_usercopy())
+	if (uaccess_should_fail())
 		return n;
 	check_object_size(to, n, false);
 	res = raw_copy_from_user(to, from, n);
@@ -138,7 +176,7 @@ __copy_from_user(void *to, const void __user *from, unsigned long n)
 static __always_inline __must_check unsigned long
 __copy_to_user_inatomic(void __user *to, const void *from, unsigned long n)
 {
-	if (should_fail_usercopy())
+	if (uaccess_should_fail())
 		return n;
 	instrument_copy_to_user(to, from, n);
 	check_object_size(from, n, true);
@@ -149,7 +187,7 @@ static __always_inline __must_check unsigned long
 __copy_to_user(void __user *to, const void *from, unsigned long n)
 {
 	might_fault();
-	if (should_fail_usercopy())
+	if (uaccess_should_fail())
 		return n;
 	instrument_copy_to_user(to, from, n);
 	check_object_size(from, n, true);
@@ -167,7 +205,7 @@ _inline_copy_from_user(void *to, const void __user *from, unsigned long n)
 {
 	unsigned long res = n;
 	might_fault();
-	if (should_fail_usercopy())
+	if (uaccess_should_fail())
 		goto fail;
 	if (can_do_masked_user_access())
 		from = mask_user_address(from);
@@ -195,7 +233,7 @@ static inline __must_check unsigned long
 _inline_copy_to_user(void __user *to, const void *from, unsigned long n)
 {
 	might_fault();
-	if (should_fail_usercopy())
+	if (uaccess_should_fail())
 		return n;
 	if (access_ok(to, n)) {
 		instrument_copy_to_user(to, from, n);
@@ -749,6 +787,8 @@ static __always_inline void __scoped_user_rw_access_end(const void *p)
 ({									\
 	typeof(uptr) __retptr;						\
 									\
+	if (uaccess_without_mm())					\
+		goto elbl;						\
 	if (can_do_masked_user_access()) {				\
 		__retptr = masked_user_##mode##_access_begin(uptr);	\
 	} else {							\
