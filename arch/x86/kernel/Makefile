@@ -37,12 +37,12 @@ KMSAN_SANITIZE_nmi.o					:= n
 KCOV_INSTRUMENT_head$(BITS).o				:= n
 # These are called from save_stack_trace() on debug paths,
 # and produce large amounts of uninteresting coverage.
-KCOV_INSTRUMENT_stacktrace.o				:= n
-KCOV_INSTRUMENT_dumpstack.o				:= n
-KCOV_INSTRUMENT_dumpstack_$(BITS).o			:= n
-KCOV_INSTRUMENT_unwind_orc.o				:= n
-KCOV_INSTRUMENT_unwind_frame.o				:= n
-KCOV_INSTRUMENT_unwind_guess.o				:= n
+KCOV_INSTRUMENT_stacktrace.o				:= $(kcov-noisy)
+KCOV_INSTRUMENT_dumpstack.o				:= $(kcov-noisy)
+KCOV_INSTRUMENT_dumpstack_$(BITS).o			:= $(kcov-noisy)
+KCOV_INSTRUMENT_unwind_orc.o				:= $(kcov-noisy)
+KCOV_INSTRUMENT_unwind_frame.o				:= $(kcov-noisy)
+KCOV_INSTRUMENT_unwind_guess.o				:= $(kcov-noisy)
 
 # Disable KCOV to prevent crashes during kexec: load_segments() invalidates
 # the GS base, which KCOV relies on for per-CPU data.

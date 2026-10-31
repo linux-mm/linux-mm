@@ -107,4 +107,17 @@ static inline void kcov_remote_start_usb_softirq(u64 id) {}
 static inline void kcov_remote_stop_softirq(void) {}
 
 #endif /* CONFIG_KCOV */
+
+#ifdef CONFIG_EARLY_KCOV
+/*
+ * Coverage of init_task from right after early parameter parsing in
+ * start_kernel() until rest_init().
+ */
+void early_kcov_init(void);
+void early_kcov_stop(void);
+#else
+static inline void early_kcov_init(void) {}
+static inline void early_kcov_stop(void) {}
+#endif /* CONFIG_EARLY_KCOV */
+
 #endif /* _LINUX_KCOV_H */

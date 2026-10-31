@@ -1404,6 +1404,23 @@ Kernel parameters
 			is useful for tracking down temporary early mappings
 			which are not unmapped.
 
+	early_kcov_size=nn[KMG]
+			[KNL,EARLY] When CONFIG_EARLY_KCOV is enabled, set the
+			size of the buffer that records the code coverage
+			(KCOV_TRACE_PC) of the boot task from right after
+			early parameter parsing in start_kernel() (that is,
+			after setup_arch()) until rest_init(). The size is
+			rounded up to a page and must be less than 2^32
+			words and fit in the address space; larger values
+			are rejected and the default is kept. 0 disables
+			early boot coverage.
+			PCs that do not fit in the buffer are not recorded.
+			The coverage is read from /sys/kernel/debug/early_kcov,
+			see Documentation/dev-tools/kcov.rst. The unused part
+			of the buffer is freed at the end of boot, the rest
+			when the file is written to.
+			Default: CONFIG_EARLY_KCOV_SIZE_MB
+
 	earlycon=	[KNL,EARLY] Output early console device and options.
 
 			When used with no options, the early console is
