@@ -141,7 +141,7 @@ __early_ioremap(resource_size_t phys_addr, unsigned long size, pgprot_t prot)
 	 * Mappings have to be page-aligned
 	 */
 	offset = offset_in_page(phys_addr);
-	phys_addr &= PAGE_MASK;
+	phys_addr &= (signed long)PAGE_MASK;
 	size = PAGE_ALIGN(last_addr + 1) - phys_addr;
 
 	/*
