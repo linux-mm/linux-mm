@@ -12,6 +12,7 @@
 
 #include <linux/gfp.h>
 #include <linux/hash.h>
+#include <linux/irq_work.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/percpu.h>
@@ -126,6 +127,41 @@ static unsigned long quarantine_batch_size;
  */
 #define QUARANTINE_FRACTION 32
 
+/* Limit the number of reduce calls per run. */
+#define QUARANTINE_WORK_BATCHES 32
+
+static struct workqueue_struct *quarantine_reclaim_wq;
+static void quarantine_reclaim_workfn(struct work_struct *work);
+static DECLARE_WORK(quarantine_reclaim_work, quarantine_reclaim_workfn);
+
+static bool quarantine_over_limit(void)
+{
+	bool over;
+
+	over = READ_ONCE(quarantine_size) > READ_ONCE(quarantine_max_size);
+	return over;
+}
+
+static void quarantine_reclaim_irqfn(struct irq_work *work)
+{
+	struct workqueue_struct *wq;
+
+	/* pairs with smp_store_release in kasan_quarantine_reclaim_init() */
+	wq = smp_load_acquire(&quarantine_reclaim_wq);
+	if (wq)
+		queue_work(wq, &quarantine_reclaim_work);
+}
+static DEFINE_IRQ_WORK(quarantine_reclaim_irqwork, quarantine_reclaim_irqfn);
+
+static void quarantine_reclaim_kick(void)
+{
+	/* pairs with smp_store_release in kasan_quarantine_reclaim_init() */
+	if (!smp_load_acquire(&quarantine_reclaim_wq))
+		return;
+
+	irq_work_queue(&quarantine_reclaim_irqwork);
+}
+
 static struct kmem_cache *qlink_to_cache(struct qlist_node *qlink)
 {
 	return virt_to_slab(qlink)->slab_cache;
@@ -185,6 +221,7 @@ static void qlist_free_all(struct qlist_head *q, struct kmem_cache *cache)
 bool kasan_quarantine_put(struct kmem_cache *cache, void *object)
 {
 	unsigned long flags;
+	bool reclaim = false;
 	struct qlist_head *q;
 	struct qlist_head temp = QLIST_INIT;
 	struct kasan_free_meta *meta = kasan_get_free_meta(cache, object);
@@ -228,10 +265,15 @@ bool kasan_quarantine_put(struct kmem_cache *cache, void *object)
 			if (new_tail != quarantine_head)
 				quarantine_tail = new_tail;
 		}
+
+		reclaim = quarantine_size > quarantine_max_size;
 		raw_spin_unlock(&quarantine_lock);
 	}
 
 	local_irq_restore(flags);
+
+	if (reclaim)
+		quarantine_reclaim_kick();
 
 	return true;
 }
@@ -285,6 +327,24 @@ void kasan_quarantine_reduce(void)
 
 	qlist_free_all(&to_free, NULL);
 	srcu_read_unlock(&remove_cache_srcu, srcu_idx);
+}
+
+static void quarantine_reclaim_workfn(struct work_struct *work)
+{
+	unsigned int i;
+
+	for (i = 0; i < QUARANTINE_WORK_BATCHES; i++) {
+		if (!quarantine_over_limit())
+			return;
+
+		kasan_quarantine_reduce();
+		cond_resched();
+	}
+
+	if (quarantine_over_limit())
+		/* pairs with smp_store_release in kasan_quarantine_reclaim_init() */
+		queue_work(smp_load_acquire(&quarantine_reclaim_wq),
+			   &quarantine_reclaim_work);
 }
 
 static void qlist_move_cache(struct qlist_head *from,
@@ -422,3 +482,26 @@ static int __init kasan_cpu_quarantine_init(void)
 	return ret;
 }
 late_initcall(kasan_cpu_quarantine_init);
+
+static int __init kasan_quarantine_reclaim_init(void)
+{
+	struct workqueue_struct *wq;
+
+	wq = alloc_ordered_workqueue("kasan_quarantine", WQ_MEM_RECLAIM);
+	if (!wq) {
+		pr_err("failed to create quarantine reclaim workqueue\n");
+		return -ENOMEM;
+	}
+
+	/*
+	 * Publish the workqueue pointer with release semantics.
+	 * Pairs with smp_load_acquire() in quarantine_reclaim_irqfn(),
+	 * quarantine_reclaim_kick() and quarantine_reclaim_workfn().
+	 * Ensures the fully initialised workqueue is visible to all
+	 * CPUs before the pointer can be observed and dereferenced.
+	 */
+	smp_store_release(&quarantine_reclaim_wq, wq);
+	queue_work(wq, &quarantine_reclaim_work);
+	return 0;
+}
+late_initcall(kasan_quarantine_reclaim_init);
