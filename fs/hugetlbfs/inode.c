@@ -842,6 +842,10 @@ static int hugetlbfs_setattr(const struct mnt_idmap *idmap,
 
 	trace_hugetlbfs_setattr(inode, dentry, attr);
 
+	if ((info->seals & F_SEAL_EXEC) && (ia_valid & ATTR_MODE) &&
+	    ((inode->i_mode ^ attr->ia_mode) & 0111))
+		return -EPERM;
+
 	if (ia_valid & ATTR_SIZE) {
 		loff_t oldsize = inode->i_size;
 		loff_t newsize = attr->ia_size;
