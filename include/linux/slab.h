@@ -22,6 +22,17 @@
 #include <linux/percpu-refcount.h>
 #include <linux/cleanup.h>
 #include <linux/hash.h>
+#include <linux/ppm/gfp_types.h>
+
+/* A Structure enum with objects and codes
+  for PPM Tatic Memory 
+ */
+enum __PPM_OBJ_CDE_BITS {
+	_PPM_OBJECT_CACHE, /* A Simple Cache to store objects */
+	_PPM_OBTAIN_CODE, /* 0x04, -102 or 0 */
+    _PPM_FLAGS__ /* The Special Flags to PPM (Page-Plugger Under Memory) */
+};
+
 
 enum _slab_flag_bits {
 	_SLAB_CONSISTENCY_CHECKS,
