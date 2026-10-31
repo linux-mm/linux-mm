@@ -759,6 +759,14 @@ int migrate_huge_page_move_mapping(struct address_space *mapping,
 	if (unlikely(rc))
 		return rc;
 
+	/*
+	 * Recheck after the copy: an injector can set the flag while the
+	 * copy is in progress.  The mapping has not been transferred yet,
+	 * so failing here is the same unwinding as a copy failure.
+	 */
+	if (unlikely(folio_contain_hwpoisoned_page(src)))
+		return -EHWPOISON;
+
 	xas_lock_irq(&xas);
 	if (!folio_ref_freeze(src, expected_count)) {
 		xas_unlock_irq(&xas);
@@ -889,6 +897,14 @@ static int __migrate_folio(struct address_space *mapping, struct folio *dst,
 	rc = folio_mc_copy(dst, src);
 	if (unlikely(rc))
 		return rc;
+
+	/*
+	 * Recheck after the copy: an injector can set the flag while the
+	 * copy is in progress.  The mapping has not been transferred yet,
+	 * so failing here is the same unwinding as a copy failure.
+	 */
+	if (unlikely(folio_contain_hwpoisoned_page(src)))
+		return -EHWPOISON;
 
 	rc = __folio_migrate_mapping(mapping, dst, src, expected_count);
 	if (rc)
@@ -1231,6 +1247,15 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 	bool locked = false;
 	bool dst_locked = false;
 
+	if (unlikely(folio_contain_hwpoisoned_page(src))) {
+		/*
+		 * Fail permanently before allocating dst: the folio
+		 * goes back on the LRU for a later memory_failure().
+		 */
+		migrate_folio_undo_src(src, 0, NULL, false, ret);
+		return -EHWPOISON;
+	}
+
 	dst = get_new_folio(src, private);
 	if (!dst)
 		return -ENOMEM;
@@ -1385,6 +1410,15 @@ static int migrate_folio_move(free_folio_t put_new_folio, unsigned long private,
 	prev = dst->lru.prev;
 	list_del(&dst->lru);
 
+	if (unlikely(folio_contain_hwpoisoned_page(src))) {
+		/*
+		 * Recheck before the copy: a poison can land while the
+		 * batch is still unmapping the rest of its chunk.
+		 */
+		rc = -EHWPOISON;
+		goto out;
+	}
+
 	if (unlikely(page_has_movable_ops(&src->page))) {
 		rc = migrate_movable_ops_page(&dst->page, &src->page, mode);
 		if (rc)
@@ -1530,6 +1564,12 @@ static int unmap_and_move_hugetlb_folio(new_folio_t get_new_folio,
 		goto out_unlock;
 	}
 
+	if (unlikely(folio_contain_hwpoisoned_page(src))) {
+		/* Same reasoning as in migrate_folio_unmap(). */
+		rc = -EHWPOISON;
+		goto out_unlock;
+	}
+
 	if (folio_test_anon(src))
 		anon_vma = folio_get_anon_vma(src);
 
@@ -1555,8 +1595,13 @@ static int unmap_and_move_hugetlb_folio(new_folio_t get_new_folio,
 		was_mapped = 1;
 	}
 
-	if (!folio_mapped(src))
-		rc = move_to_new_folio(dst, src, mode);
+	if (!folio_mapped(src)) {
+		/* Same reasoning as in migrate_folio_move(). */
+		if (unlikely(folio_contain_hwpoisoned_page(src)))
+			rc = -EHWPOISON;
+		else
+			rc = move_to_new_folio(dst, src, mode);
+	}
 
 	if (was_mapped)
 		remove_migration_ptes(src, !rc ? dst : src, ttu);
