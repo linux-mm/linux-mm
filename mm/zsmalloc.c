@@ -43,6 +43,7 @@
 #include <linux/zsmalloc.h>
 #include <linux/fs.h>
 #include <linux/workqueue.h>
+#include <linux/llist.h>
 #include "zpdesc.h"
 
 #define ZSPAGE_MAGIC	0x58
@@ -267,6 +268,21 @@ struct link_free {
 static struct kmem_cache *handle_cachep;
 static struct kmem_cache *zspage_cachep;
 
+#define ZS_DEFER_BATCH	64
+
+struct zs_defer_batch {
+	struct llist_node node;
+	unsigned int count;
+	unsigned long handles[ZS_DEFER_BATCH];
+};
+
+struct zs_defer_percpu {
+	struct zs_defer_batch *active;
+	struct llist_head pending;
+	struct work_struct drain_work;
+	struct zs_pool *pool;
+};
+
 struct zs_pool {
 	const char *name;
 
@@ -282,12 +298,12 @@ struct zs_pool {
 #ifdef CONFIG_ZSMALLOC_STAT
 	struct dentry *stat_dentry;
 #endif
-#ifdef CONFIG_COMPACTION
 	struct work_struct free_work;
-#endif
 	/* protect zspage migration/compaction */
 	rwlock_t lock;
 	atomic_t compaction_in_progress;
+
+	struct zs_defer_percpu __percpu *defer;
 };
 
 static inline void zpdesc_inc_zone_page_state(struct zpdesc *zpdesc)
@@ -428,13 +444,11 @@ static bool ZsHugePage(struct zspage *zspage)
 	return zspage->huge;
 }
 
-#ifdef CONFIG_COMPACTION
 static void kick_deferred_free(struct zs_pool *pool);
 static void init_deferred_free(struct zs_pool *pool);
+#ifdef CONFIG_COMPACTION
 static void SetZsPageMovable(struct zs_pool *pool, struct zspage *zspage);
 #else
-static void kick_deferred_free(struct zs_pool *pool) {}
-static void init_deferred_free(struct zs_pool *pool) {}
 static void SetZsPageMovable(struct zs_pool *pool, struct zspage *zspage) {}
 #endif
 
@@ -683,7 +697,6 @@ static inline void zs_pool_stat_destroy(struct zs_pool *pool)
 {
 }
 #endif
-
 
 /*
  * For each size class, zspages are divided into different groups
@@ -1293,7 +1306,6 @@ static unsigned long obj_malloc(struct zs_pool *pool,
 	return obj;
 }
 
-
 /**
  * zs_malloc - Allocate block of given size from pool.
  * @pool: pool to allocate from
@@ -1371,7 +1383,6 @@ static void obj_free(int class_size, unsigned long obj)
 	unsigned int f_objidx;
 	void *vaddr;
 
-
 	obj_to_location(obj, &f_zpdesc, &f_objidx);
 	f_offset = offset_in_page(class_size * f_objidx);
 	zspage = get_zspage(f_zpdesc);
@@ -1447,16 +1458,13 @@ static inline void obj_class_get_and_lock(struct zs_pool *pool, unsigned long ha
 }
 #endif
 
-void zs_free(struct zs_pool *pool, unsigned long handle)
+static void __zs_free_one(struct zs_pool *pool, unsigned long handle)
 {
 	struct zspage *zspage;
 	unsigned long obj;
 	struct size_class *class;
 	int fullness;
 	struct zspage *zspage_to_free = NULL;
-
-	if (IS_ERR_OR_NULL((void *)handle))
-		return;
 
 	obj_class_get_and_lock(pool, handle, &obj, &zspage, &class);
 
@@ -1482,6 +1490,78 @@ void zs_free(struct zs_pool *pool, unsigned long handle)
 		atomic_long_sub(class->pages_per_zspage, &pool->pages_allocated);
 	}
 	cache_free_handle(handle);
+}
+
+static void zs_defer_drain(struct zs_defer_percpu *defer)
+{
+	struct zs_pool *pool = defer->pool;
+	struct zs_defer_batch *batch, *n;
+	struct llist_node *first;
+
+	first = llist_del_all(&defer->pending);
+	llist_for_each_entry_safe(batch, n, first, node) {
+		unsigned int i;
+
+		for (i = 0; i < batch->count; i++)
+			__zs_free_one(pool, batch->handles[i]);
+		kfree(batch);
+		cond_resched();
+	}
+}
+
+static void zs_defer_drain_work(struct work_struct *work)
+{
+	zs_defer_drain(container_of(work, struct zs_defer_percpu, drain_work));
+}
+
+static bool zs_defer_push(struct zs_pool *pool, unsigned long handle)
+{
+	struct zs_defer_batch *new_batch = NULL, *batch;
+	struct zs_defer_percpu *defer;
+	bool queue = false;
+
+	if (!pool->defer)
+		return false;
+
+	defer = get_cpu_ptr(pool->defer);
+	if (!defer->active) {
+		put_cpu_ptr(pool->defer);
+		new_batch = kmalloc_obj(*new_batch, GFP_NOWAIT | __GFP_NOWARN);
+		if (!new_batch)
+			return false;
+		new_batch->count = 0;
+
+		defer = get_cpu_ptr(pool->defer);
+		if (!defer->active) {
+			defer->active = new_batch;
+			new_batch = NULL;
+		}
+	}
+
+	batch = defer->active;
+	batch->handles[batch->count++] = handle;
+	if (batch->count == ZS_DEFER_BATCH) {
+		llist_add(&batch->node, &defer->pending);
+		defer->active = NULL;
+		queue = true;
+	}
+	put_cpu_ptr(pool->defer);
+
+	if (unlikely(new_batch))
+		kfree(new_batch);
+
+	if (queue)
+		queue_work(system_dfl_wq, &defer->drain_work);
+	return true;
+}
+
+void zs_free(struct zs_pool *pool, unsigned long handle)
+{
+	if (IS_ERR_OR_NULL((void *)handle))
+		return;
+
+	if (!zs_defer_push(pool, handle))
+		__zs_free_one(pool, handle);
 }
 EXPORT_SYMBOL_GPL(zs_free);
 
@@ -1671,7 +1751,6 @@ static int putback_zspage(struct size_class *class, struct zspage *zspage)
 	return fullness;
 }
 
-#ifdef CONFIG_COMPACTION
 /*
  * To prevent zspage destroy during migration, zspage freeing should
  * hold locks of all pages in the zspage.
@@ -1713,6 +1792,8 @@ static void lock_zspage(struct zspage *zspage)
 	}
 	zspage_read_unlock(zspage);
 }
+
+#ifdef CONFIG_COMPACTION
 
 static void replace_sub_page(struct size_class *class, struct zspage *zspage,
 				struct zpdesc *newzpdesc, struct zpdesc *oldzpdesc)
@@ -1866,6 +1947,18 @@ const struct movable_operations zsmalloc_mops = {
 	.putback_page = zs_page_putback,
 };
 
+static void SetZsPageMovable(struct zs_pool *pool, struct zspage *zspage)
+{
+	struct zpdesc *zpdesc = get_first_zpdesc(zspage);
+
+	do {
+		WARN_ON(!zpdesc_trylock(zpdesc));
+		__zpdesc_set_movable(zpdesc);
+		zpdesc_unlock(zpdesc);
+	} while ((zpdesc = get_next_zpdesc(zpdesc)) != NULL);
+}
+#endif /* CONFIG_COMPACTION */
+
 /*
  * Caller should hold page_lock of all pages in the zspage
  * In here, we cannot use zspage meta data.
@@ -1904,7 +1997,7 @@ static void async_free_zspage(struct work_struct *work)
 
 static void kick_deferred_free(struct zs_pool *pool)
 {
-	schedule_work(&pool->free_work);
+	queue_work(system_dfl_wq, &pool->free_work);
 }
 
 static void zs_flush_migration(struct zs_pool *pool)
@@ -1916,20 +2009,6 @@ static void init_deferred_free(struct zs_pool *pool)
 {
 	INIT_WORK(&pool->free_work, async_free_zspage);
 }
-
-static void SetZsPageMovable(struct zs_pool *pool, struct zspage *zspage)
-{
-	struct zpdesc *zpdesc = get_first_zpdesc(zspage);
-
-	do {
-		WARN_ON(!zpdesc_trylock(zpdesc));
-		__zpdesc_set_movable(zpdesc);
-		zpdesc_unlock(zpdesc);
-	} while ((zpdesc = get_next_zpdesc(zpdesc)) != NULL);
-}
-#else
-static inline void zs_flush_migration(struct zs_pool *pool) { }
-#endif
 
 /*
  *
@@ -2127,6 +2206,48 @@ static int calculate_zspage_chain_size(int class_size)
 	return chain_size;
 }
 
+static void zs_defer_destroy(struct zs_pool *pool)
+{
+	struct zs_defer_percpu __percpu *defer_pcp = pool->defer;
+	int cpu;
+
+	if (!defer_pcp)
+		return;
+
+	pool->defer = NULL;
+	for_each_possible_cpu(cpu) {
+		struct zs_defer_percpu *defer = per_cpu_ptr(defer_pcp, cpu);
+
+		cancel_work_sync(&defer->drain_work);
+		if (defer->active) {
+			llist_add(&defer->active->node, &defer->pending);
+			defer->active = NULL;
+		}
+		zs_defer_drain(defer);
+	}
+	free_percpu(defer_pcp);
+}
+
+static int zs_defer_init(struct zs_pool *pool)
+{
+	int cpu;
+
+	pool->defer = alloc_percpu(struct zs_defer_percpu);
+	if (!pool->defer)
+		return -ENOMEM;
+
+	for_each_possible_cpu(cpu) {
+		struct zs_defer_percpu *defer = per_cpu_ptr(pool->defer, cpu);
+
+		defer->active = NULL;
+		init_llist_head(&defer->pending);
+		defer->pool = pool;
+		INIT_WORK(&defer->drain_work, zs_defer_drain_work);
+	}
+
+	return 0;
+}
+
 /**
  * zs_create_pool - Creates an allocation pool to work from.
  * @name: pool name to be created
@@ -2150,6 +2271,10 @@ struct zs_pool *zs_create_pool(const char *name)
 	init_deferred_free(pool);
 	rwlock_init(&pool->lock);
 	atomic_set(&pool->compaction_in_progress, 0);
+
+	if (zs_defer_init(pool))
+		pr_info("deferred free unavailable for <%s>, freeing synchronously\n",
+			name);
 
 	pool->name = kstrdup(name, GFP_KERNEL);
 	if (!pool->name)
@@ -2253,6 +2378,7 @@ void zs_destroy_pool(struct zs_pool *pool)
 	int i;
 
 	zs_unregister_shrinker(pool);
+	zs_defer_destroy(pool);
 	zs_flush_migration(pool);
 	zs_pool_stat_destroy(pool);
 
