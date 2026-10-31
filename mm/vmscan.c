@@ -1169,6 +1169,7 @@ static unsigned int shrink_folio_list(struct list_head *folio_list,
 	unsigned int nr_reclaimed = 0, nr_demoted = 0;
 	unsigned int pgactivate = 0;
 	bool do_demote_pass;
+	int swap_blocked = -1;
 	struct swap_io_ctx ctx = {};
 
 	folio_batch_init(&free_folios);
@@ -1353,6 +1354,22 @@ retry:
 			list_add(&folio->lru, &demote_folios);
 			folio_unlock(folio);
 			continue;
+		}
+
+		/*
+		 * swap_writeout() would only activate this folio. Do that now,
+		 * before it costs a swap slot and an unmap. Zero-filled folios
+		 * are marked in the swap table without a store, an unmapped one
+		 * may only need its stale slot dropped and a large one may still
+		 * be split, let them go on.
+		 */
+		if (folio_test_anon(folio) && folio_test_swapbacked(folio) &&
+		    folio_mapped(folio) && !folio_test_large(folio) &&
+		    (!folio_test_swapcache(folio) || folio_test_dirty(folio))) {
+			if (swap_blocked < 0)
+				swap_blocked = swap_writeout_blocked(memcg);
+			if (swap_blocked && !is_folio_zero_filled(folio))
+				goto activate_locked;
 		}
 
 		/*
