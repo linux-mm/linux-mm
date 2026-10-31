@@ -1114,7 +1114,35 @@ static inline pte_t *vmemmap_pte_alloc(pmd_t *pmdp, int node,
 	return pte_offset_kernel(pmdp, address);
 }
 
+/*
+ * vmemmap is populated one memory section at a time. A section on PowerPC
+ * is 16MB, so backing its struct pages takes a 16K region of vmemmap.
+ * Without an altmap, radix__vmemmap_populate() satisfies such a request by
+ * mapping a whole PMD_SIZE leaf. One leaf holds the struct pages for
+ * PMD_SIZE / sizeof(struct page) PFNs (2GB of memory with 64K pages, 128MB
+ * with 4K pages) i.e. for many sections, including ones that aren't
+ * present yet.
+ * Return true if any part of [start, end) is already covered by such a leaf.
+ */
+static bool __meminit vmemmap_pmd_leaf_mapped(unsigned long start,
+					      unsigned long end)
+{
+	unsigned long addr;
 
+	for (addr = start; addr < end; addr = pmd_addr_end(addr, end)) {
+		p4d_t *p4d = p4d_offset(pgd_offset_k(addr), addr);
+		pud_t *pud;
+
+		if (p4d_none(READ_ONCE(*p4d)))
+			continue;
+		pud = pud_offset(p4d, addr);
+		if (pud_none(READ_ONCE(*pud)))
+			continue;
+		if (pmd_leaf(READ_ONCE(*pmd_offset(pud, addr))))
+			return true;
+	}
+	return false;
+}
 
 int __meminit radix__vmemmap_populate(unsigned long start, unsigned long end, int node,
 				      struct vmem_altmap *altmap)
@@ -1128,8 +1156,20 @@ int __meminit radix__vmemmap_populate(unsigned long start, unsigned long end, in
 	pte_t *pte;
 	unsigned long pfn = page_to_pfn((struct page *)start);
 
-	if (vmemmap_optimizable_order(pfn_to_section_compound_order(pfn)))
-		return vmemmap_populate_compound_pages(pfn, start, end, node, NULL);
+	if (vmemmap_optimizable_order(pfn_to_section_compound_order(pfn))) {
+		if (!vmemmap_pmd_leaf_mapped(start, end))
+			return vmemmap_populate_compound_pages(pfn, start, end, node, NULL);
+		/*
+		 * A leaf installed for a neighbouring range already backs this
+		 * section with real struct pages and it cannot be freed while
+		 * that range is present, so the shared tail layout would save
+		 * nothing. The core trusts the section's compound order to tell
+		 * which struct pages it must initialize. So, clear it so that
+		 * every struct page of this section is initialized, then reuse
+		 * the leaf like any other section does below.
+		 */
+		section_set_compound_order(__pfn_to_section(pfn), 0);
+	}
 	/*
 	 * If altmap is present, Make sure we align the start vmemmap addr
 	 * to PAGE_SIZE so that we calculate the correct start_pfn in
@@ -1260,11 +1300,14 @@ int __meminit vmemmap_populate_compound_pages(unsigned long start_pfn,
 		if (!pmd)
 			return -ENOMEM;
 
-		if (pmd_leaf(READ_ONCE(*pmd))) {
-			/* existing huge mapping. Skip the range */
-			next = pmd_addr_end(addr, end);
-			continue;
-		}
+		/*
+		 * The struct pages behind a leaf are not the head/shared tail
+		 * layout the core expects for this section and the tails
+		 * would be left uninitialized. radix__vmemmap_populate()
+		 * calls this only when it finds vmemmap optimizable order.
+		 */
+		if (WARN_ON_ONCE(pmd_leaf(READ_ONCE(*pmd))))
+			return -EOPNOTSUPP;
 		pte = vmemmap_pte_alloc(pmd, node, addr);
 		if (!pte)
 			return -ENOMEM;
