@@ -5749,7 +5749,7 @@ void __init maple_tree_init(void)
 
 	maple_node_cache = kmem_cache_create("maple_node",
 			sizeof(struct maple_node), &args,
-			SLAB_PANIC);
+			SLAB_PANIC | SLAB_MAY_ACCOUNT);
 }
 
 /**

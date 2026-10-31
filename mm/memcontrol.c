@@ -3686,6 +3686,12 @@ bool __memcg_slab_post_alloc_hook(struct kmem_cache *s, struct list_lru *lru,
 	if (unlikely(*p == NULL))
 		return true;
 
+	/* Do not allow __GFP_ACCOUNT without SLAB_MAY_ACCOUNT */
+	if (unlikely(!cache_needs_objcg(s))) {
+		VM_WARN_ON_ONCE(1);
+		return true;
+	}
+
 	flags &= gfp_allowed_mask;
 
 	if (lru) {
