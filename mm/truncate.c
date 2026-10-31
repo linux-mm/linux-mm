@@ -959,7 +959,7 @@ void truncate_pagecache_range(struct inode *inode, loff_t lstart, loff_t lend)
 	 * once (before truncating pagecache), and without "even_cows" flag:
 	 * hole-punching should not remove private COWed pages from the hole.
 	 */
-	if ((u64)unmap_end > (u64)unmap_start)
+	if (lend == -1 || (u64)unmap_end + 1 > (u64)unmap_start)
 		unmap_mapping_range(mapping, unmap_start,
 				    1 + unmap_end - unmap_start, 0);
 	truncate_inode_pages_range(mapping, lstart, lend);
