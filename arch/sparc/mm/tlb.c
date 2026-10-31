@@ -176,13 +176,23 @@ static void tlb_batch_pmd_scan(struct mm_struct *mm, unsigned long vaddr,
 }
 
 
+/*
+ * Only valid huge PMDs are counted: an invalidated or PROT_NONE PMD gives no
+ * access and never goes into the TSB.
+ */
+static bool pmd_huge_valid(pmd_t pmd)
+{
+	return (pmd_val(pmd) & (_PAGE_PMD_HUGE | _PAGE_VALID)) ==
+	       (_PAGE_PMD_HUGE | _PAGE_VALID);
+}
+
 static void __set_pmd_acct(struct mm_struct *mm, unsigned long addr,
 			   pmd_t orig, pmd_t pmd)
 {
 	if (mm == &init_mm)
 		return;
 
-	if ((pmd_val(pmd) ^ pmd_val(orig)) & _PAGE_PMD_HUGE) {
+	if (pmd_huge_valid(pmd) != pmd_huge_valid(orig)) {
 		/*
 		 * Note that this routine only sets pmds for THP pages.
 		 * Hugetlb pages are handled elsewhere.  We need to check
@@ -191,7 +201,7 @@ static void __set_pmd_acct(struct mm_struct *mm, unsigned long addr,
 		 * for TSB entries.  So, huge zero page counts go into
 		 * hugetlb_pte_count.
 		 */
-		if (pmd_val(pmd) & _PAGE_PMD_HUGE) {
+		if (pmd_huge_valid(pmd)) {
 			if (is_huge_zero_pmd(pmd))
 				mm->context.hugetlb_pte_count++;
 			else
@@ -250,9 +260,6 @@ static inline pmd_t pmdp_establish(struct vm_area_struct *vma,
 	return old;
 }
 
-/*
- * This routine is only called when splitting a THP
- */
 pmd_t pmdp_invalidate(struct vm_area_struct *vma, unsigned long address,
 		     pmd_t *pmdp)
 {
@@ -262,15 +269,6 @@ pmd_t pmdp_invalidate(struct vm_area_struct *vma, unsigned long address,
 	entry = __pmd(pmd_val(*pmdp) & ~_PAGE_VALID);
 	old = pmdp_establish(vma, address, pmdp, entry);
 	flush_tlb_range(vma, address, address + HPAGE_PMD_SIZE);
-
-	/*
-	 * set_pmd_at() will not be called in a way to decrement
-	 * thp_pte_count when splitting a THP, so do it now.
-	 * Sanity check pmd before doing the actual decrement.
-	 */
-	if ((pmd_val(entry) & _PAGE_PMD_HUGE) &&
-	    !is_huge_zero_pmd(entry))
-		(vma->vm_mm)->context.thp_pte_count--;
 
 	return old;
 }
