@@ -1307,7 +1307,7 @@ static int write_protect_page(struct vm_area_struct *vma, struct folio *folio,
 	if (WARN_ON_ONCE(folio_test_large(folio)))
 		return err;
 
-	pvmw.address = page_address_in_vma(folio, folio_page(folio, 0), vma);
+	pvmw.address = vma_anon_address(vma, folio_pgoff(folio), 1);
 	if (pvmw.address == -EFAULT)
 		goto out;
 
@@ -1408,7 +1408,7 @@ static int replace_page(struct vm_area_struct *vma, struct page *page,
 	int err = -EFAULT;
 	struct mmu_notifier_range range;
 
-	addr = page_address_in_vma(folio, page, vma);
+	addr = vma_anon_address(vma, page_pgoff(folio, page), 1);
 	if (addr == -EFAULT)
 		goto out;
 
@@ -1515,7 +1515,7 @@ static int try_to_merge_one_page(struct vm_area_struct *vma,
 	if (page == kpage)			/* ksm page forked */
 		return 0;
 
-	if (!folio_test_anon(folio))
+	if (!folio_test_anon(folio) || folio_test_ksm(folio))
 		goto out;
 
 	/*
