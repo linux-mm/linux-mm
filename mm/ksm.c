@@ -2872,6 +2872,11 @@ static int ksm_scan_thread(void *nothing)
 	return 0;
 }
 
+bool current_is_ksmd(void)
+{
+	return kthread_func(current) == ksm_scan_thread;
+}
+
 static bool __ksm_should_add_vma(const struct file *file, vma_flags_t vma_flags)
 {
 	if (vma_flags_test(&vma_flags, VMA_MERGEABLE_BIT))
