@@ -192,9 +192,21 @@ static struct bucket_table *bucket_table_alloc(struct rhashtable *ht,
 	size_t size;
 	int i;
 
-	tbl = alloc_hooks_tag(ht->alloc_tag,
-			kvmalloc_node_align_noprof(struct_size(tbl, buckets, nbuckets),
-					     1, gfp|__GFP_ZERO, NUMA_NO_NODE));
+	/*
+	 * vmalloc() takes locks that are not safe against interrupts, and the
+	 * emergency rehash runs in whatever context the insert runs in. So a
+	 * caller that cannot block gets slab memory, or else a nested table.
+	 */
+	if (gfpflags_allow_blocking(gfp))
+		tbl = alloc_hooks_tag(ht->alloc_tag,
+				      kvmalloc_node_align_noprof(
+					struct_size(tbl, buckets, nbuckets),
+					1, gfp | __GFP_ZERO, NUMA_NO_NODE));
+	else
+		tbl = alloc_hooks_tag(ht->alloc_tag,
+				      kmalloc_noprof(
+					struct_size(tbl, buckets, nbuckets),
+					gfp | __GFP_ZERO));
 
 	size = nbuckets;
 
