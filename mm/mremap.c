@@ -1038,7 +1038,7 @@ static void vrm_stat_account(struct vma_remap_struct *vrm,
 }
 
 static bool __check_map_count_against_split(struct mm_struct *mm,
-					    bool pre_split,
+					    bool source_stays,
 					    bool before_unmaps)
 {
 	const int sys_map_count = get_sysctl_max_map_count();
@@ -1092,14 +1092,15 @@ static bool __check_map_count_against_split(struct mm_struct *mm,
 	 */
 	map_count += 2;
 
-	/* If pre-split, the -1 observed above doesn't apply. */
-	if (pre_split)
+	/* If the split off source stays, the -1 observed above doesn't apply. */
+	if (source_stays)
 		map_count++;
 
 	return map_count <= sys_map_count;
 }
 
-static bool needs_pre_split(struct vma_remap_struct *vrm)
+/* Is the source range split off its VMA, to then stay mapped? */
+static bool split_source_stays(struct vma_remap_struct *vrm)
 {
 	/*
 	 * An MREMAP_DONTUNMAP of a mlock()'d VMA needs to unlock the
@@ -1109,11 +1110,32 @@ static bool needs_pre_split(struct vma_remap_struct *vrm)
 		vma_test(vrm->vma, VMA_LOCKED_BIT);
 }
 
+static bool needs_pre_split(struct vma_remap_struct *vrm)
+{
+	/* This duplicates a shared mapping: no range to split off or unmap. */
+	if (!vrm->old_len)
+		return false;
+
+	/*
+	 * The source range is unmapped once its page tables have moved.  If a
+	 * split fails at that point there is nothing left to go back to, so
+	 * split while the failure can still be reported.
+	 *
+	 * hugetlb relies on this too: fixup_hugetlb_reservations() takes the
+	 * reservations away from the source VMA, and the parts of it that do
+	 * not move have to keep theirs.
+	 */
+	if (!(vrm->flags & MREMAP_DONTUNMAP))
+		return true;
+
+	return split_source_stays(vrm);
+}
+
 /* Do we violate the map count limit if we split VMAs when moving the VMA? */
 static bool check_map_count_against_split(struct vma_remap_struct *vrm)
 {
 	return __check_map_count_against_split(current->mm,
-		needs_pre_split(vrm), /*before_unmaps=*/false);
+		split_source_stays(vrm), /*before_unmaps=*/false);
 }
 
 /* Do we violate the map count limit if we split VMAs prior to early unmaps? */
@@ -1162,13 +1184,10 @@ static unsigned long prep_move_vma(struct vma_remap_struct *vrm)
 	if (err)
 		return err;
 
-	/*
-	 * To account mlock()'d pages correctly in the MREMAP_DONTUNMAP
-	 * case perform any split ahead of time for an mlock()'d VMA.
-	 */
 	if (needs_pre_split(vrm)) {
 		VMA_ITERATOR(vmi, vma->vm_mm, old_addr);
 
+		/* This leaves vma as the VMA that spans the range to move. */
 		if (split_before)
 			err = split_vma(&vmi, vma, old_addr, 1);
 		if (!err && split_after)
@@ -1236,8 +1255,22 @@ static void unmap_source_vma(struct vma_remap_struct *vrm)
 	vrm->vma = NULL; /* Invalidated. */
 	vrm->vmi_needs_invalidate = true;
 	if (err) {
-		/* OOM: unable to split vma, just get accounts right */
-		vm_acct_memory(len >> PAGE_SHIFT);
+		/*
+		 * The unmap failed, just get accounts right. Both the old and
+		 * the new range remain mapped, so charge the range a second
+		 * time, and reinstate the flag on all that is left of the VMA
+		 * so the charge is returned when it gets unmapped.
+		 *
+		 * An old_len of 0 ends up here as well. It has nothing to unmap.
+		 */
+		if (accountable_move) {
+			vm_acct_memory(len >> PAGE_SHIFT);
+			vma_iter_set(&vmi, vm_start);
+			for_each_vma_range(vmi, vma, vm_end) {
+				vma_start_write(vma);
+				vma_set_flags(vma, VMA_ACCOUNT_BIT);
+			}
+		}
 		return;
 	}
 
