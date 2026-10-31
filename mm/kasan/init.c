@@ -17,6 +17,7 @@
 
 #include <asm/page.h>
 
+#include "../pgalloc-track.h"
 #include "kasan.h"
 
 /*
@@ -107,7 +108,7 @@ static void __ref zero_pte_populate(pmd_t *pmd, unsigned long addr,
 }
 
 static int __ref zero_pmd_populate(pud_t *pud, unsigned long addr,
-				unsigned long end)
+				unsigned long end, pgtbl_mod_mask *mask)
 {
 	pmd_t *pmd = pmd_offset(pud, addr);
 	unsigned long next;
@@ -115,25 +116,26 @@ static int __ref zero_pmd_populate(pud_t *pud, unsigned long addr,
 	do {
 		next = pmd_addr_end(addr, end);
 
-		if (IS_ALIGNED(addr, PMD_SIZE) && end - addr >= PMD_SIZE) {
+		if (IS_ALIGNED(addr, PMD_SIZE) && end - addr >= PMD_SIZE &&
+		    pmd_none(*pmd)) {
 			pmd_populate_kernel(&init_mm, pmd,
 					lm_alias(kasan_early_shadow_pte));
+			*mask |= PGTBL_PMD_MODIFIED;
 			continue;
 		}
 
 		if (pmd_none(*pmd)) {
-			pte_t *p;
+			if (slab_is_available()) {
+				if (!pte_alloc_kernel_track(pmd, addr, mask))
+					return -ENOMEM;
+			} else {
+				pte_t *p;
 
-			if (slab_is_available())
-				p = pte_alloc_one_kernel(&init_mm);
-			else {
 				p = early_alloc(PAGE_SIZE, NUMA_NO_NODE);
 				kernel_pte_init(p);
+				pmd_populate_kernel(&init_mm, pmd, p);
+				*mask |= PGTBL_PMD_MODIFIED;
 			}
-			if (!p)
-				return -ENOMEM;
-
-			pmd_populate_kernel(&init_mm, pmd, p);
 		}
 		zero_pte_populate(pmd, addr, next);
 	} while (pmd++, addr = next, addr != end);
@@ -142,80 +144,93 @@ static int __ref zero_pmd_populate(pud_t *pud, unsigned long addr,
 }
 
 static int __ref zero_pud_populate(p4d_t *p4d, unsigned long addr,
-				unsigned long end)
+				unsigned long end, pgtbl_mod_mask *mask)
 {
 	pud_t *pud = pud_offset(p4d, addr);
 	unsigned long next;
+	int ret;
 
 	do {
 		next = pud_addr_end(addr, end);
-		if (IS_ALIGNED(addr, PUD_SIZE) && end - addr >= PUD_SIZE) {
+		if (IS_ALIGNED(addr, PUD_SIZE) && end - addr >= PUD_SIZE &&
+		    pud_none(*pud)) {
 			pmd_t *pmd;
 
 			pud_populate(&init_mm, pud,
 					lm_alias(kasan_early_shadow_pmd));
+			*mask |= PGTBL_PUD_MODIFIED;
 			pmd = pmd_offset(pud, addr);
 			pmd_populate_kernel(&init_mm, pmd,
 					lm_alias(kasan_early_shadow_pte));
+			*mask |= PGTBL_PMD_MODIFIED;
 			continue;
 		}
 
 		if (pud_none(*pud)) {
-			pmd_t *p;
-
 			if (slab_is_available()) {
-				p = pmd_alloc(&init_mm, pud, addr);
-				if (!p)
+				if (!pmd_alloc_track(&init_mm, pud, addr, mask))
 					return -ENOMEM;
 			} else {
+				pmd_t *p;
+
 				p = early_alloc(PAGE_SIZE, NUMA_NO_NODE);
 				pmd_init(p);
 				pud_populate(&init_mm, pud, p);
+				*mask |= PGTBL_PUD_MODIFIED;
 			}
 		}
-		zero_pmd_populate(pud, addr, next);
+		ret = zero_pmd_populate(pud, addr, next, mask);
+		if (ret)
+			return ret;
 	} while (pud++, addr = next, addr != end);
 
 	return 0;
 }
 
 static int __ref zero_p4d_populate(pgd_t *pgd, unsigned long addr,
-				unsigned long end)
+				unsigned long end, pgtbl_mod_mask *mask)
 {
 	p4d_t *p4d = p4d_offset(pgd, addr);
 	unsigned long next;
+	int ret;
 
 	do {
 		next = p4d_addr_end(addr, end);
-		if (IS_ALIGNED(addr, P4D_SIZE) && end - addr >= P4D_SIZE) {
+		if (IS_ALIGNED(addr, P4D_SIZE) && end - addr >= P4D_SIZE &&
+		    p4d_none(*p4d)) {
 			pud_t *pud;
 			pmd_t *pmd;
 
-			p4d_populate_kernel(addr, p4d,
+			p4d_populate(&init_mm, p4d,
 					lm_alias(kasan_early_shadow_pud));
+			*mask |= PGTBL_P4D_MODIFIED;
 			pud = pud_offset(p4d, addr);
 			pud_populate(&init_mm, pud,
 					lm_alias(kasan_early_shadow_pmd));
+			*mask |= PGTBL_PUD_MODIFIED;
 			pmd = pmd_offset(pud, addr);
 			pmd_populate_kernel(&init_mm, pmd,
 					lm_alias(kasan_early_shadow_pte));
+			*mask |= PGTBL_PMD_MODIFIED;
 			continue;
 		}
 
 		if (p4d_none(*p4d)) {
-			pud_t *p;
-
 			if (slab_is_available()) {
-				p = pud_alloc(&init_mm, p4d, addr);
-				if (!p)
+				if (!pud_alloc_track(&init_mm, p4d, addr, mask))
 					return -ENOMEM;
 			} else {
+				pud_t *p;
+
 				p = early_alloc(PAGE_SIZE, NUMA_NO_NODE);
 				pud_init(p);
-				p4d_populate_kernel(addr, p4d, p);
+				p4d_populate(&init_mm, p4d, p);
+				*mask |= PGTBL_P4D_MODIFIED;
 			}
 		}
-		zero_pud_populate(p4d, addr, next);
+		ret = zero_pud_populate(p4d, addr, next, mask);
+		if (ret)
+			return ret;
 	} while (p4d++, addr = next, addr != end);
 
 	return 0;
@@ -230,15 +245,19 @@ static int __ref zero_p4d_populate(pgd_t *pgd, unsigned long addr,
 int __ref kasan_populate_early_shadow(const void *shadow_start,
 					const void *shadow_end)
 {
-	unsigned long addr = (unsigned long)shadow_start;
+	unsigned long start = (unsigned long)shadow_start;
+	unsigned long addr = start;
 	unsigned long end = (unsigned long)shadow_end;
 	pgd_t *pgd = pgd_offset_k(addr);
 	unsigned long next;
+	pgtbl_mod_mask mask = 0;
+	int ret = 0;
 
 	do {
 		next = pgd_addr_end(addr, end);
 
-		if (IS_ALIGNED(addr, PGDIR_SIZE) && end - addr >= PGDIR_SIZE) {
+		if (IS_ALIGNED(addr, PGDIR_SIZE) && end - addr >= PGDIR_SIZE &&
+		    pgd_none(*pgd)) {
 			p4d_t *p4d;
 			pud_t *pud;
 			pmd_t *pmd;
@@ -251,40 +270,55 @@ int __ref kasan_populate_early_shadow(const void *shadow_start,
 			 * puds,pmds, so pgd_populate(), pud_populate()
 			 * is noops.
 			 */
-			pgd_populate_kernel(addr, pgd,
+			pgd_populate(&init_mm, pgd,
 					lm_alias(kasan_early_shadow_p4d));
+			mask |= PGTBL_PGD_MODIFIED;
 			p4d = p4d_offset(pgd, addr);
-			p4d_populate_kernel(addr, p4d,
+			p4d_populate(&init_mm, p4d,
 					lm_alias(kasan_early_shadow_pud));
+			mask |= PGTBL_P4D_MODIFIED;
 			pud = pud_offset(p4d, addr);
 			pud_populate(&init_mm, pud,
 					lm_alias(kasan_early_shadow_pmd));
+			mask |= PGTBL_PUD_MODIFIED;
 			pmd = pmd_offset(pud, addr);
 			pmd_populate_kernel(&init_mm, pmd,
 					lm_alias(kasan_early_shadow_pte));
+			mask |= PGTBL_PMD_MODIFIED;
 			continue;
 		}
 
 		if (pgd_none(*pgd)) {
 
 			if (slab_is_available()) {
-				if (!p4d_alloc(&init_mm, pgd, addr))
-					return -ENOMEM;
+				if (!p4d_alloc_track(&init_mm, pgd, addr, &mask)) {
+					ret = -ENOMEM;
+					break;
+				}
 			} else {
-				pgd_populate_kernel(addr, pgd,
+				pgd_populate(&init_mm, pgd,
 					early_alloc(PAGE_SIZE, NUMA_NO_NODE));
+				mask |= PGTBL_PGD_MODIFIED;
 			}
 		}
-		zero_p4d_populate(pgd, addr, next);
+		ret = zero_p4d_populate(pgd, addr, next, &mask);
+		if (ret)
+			break;
 	} while (pgd++, addr = next, addr != end);
 
-	return 0;
+	if (mask & ARCH_PAGE_TABLE_SYNC_MASK)
+		arch_sync_kernel_mappings(start, end);
+
+	return ret;
 }
 
 static void kasan_free_pte(pte_t *pte_start, pmd_t *pmd)
 {
 	pte_t *pte;
 	int i;
+
+	if (ARCH_PAGE_TABLE_SYNC_MASK & PGTBL_PMD_MODIFIED)
+		return;
 
 	for (i = 0; i < PTRS_PER_PTE; i++) {
 		pte = pte_start + i;
@@ -301,6 +335,9 @@ static void kasan_free_pmd(pmd_t *pmd_start, pud_t *pud)
 	pmd_t *pmd;
 	int i;
 
+	if (ARCH_PAGE_TABLE_SYNC_MASK & PGTBL_PUD_MODIFIED)
+		return;
+
 	for (i = 0; i < PTRS_PER_PMD; i++) {
 		pmd = pmd_start + i;
 		if (!pmd_none(*pmd))
@@ -316,6 +353,9 @@ static void kasan_free_pud(pud_t *pud_start, p4d_t *p4d)
 	pud_t *pud;
 	int i;
 
+	if (ARCH_PAGE_TABLE_SYNC_MASK & PGTBL_P4D_MODIFIED)
+		return;
+
 	for (i = 0; i < PTRS_PER_PUD; i++) {
 		pud = pud_start + i;
 		if (!pud_none(*pud))
@@ -330,6 +370,9 @@ static void kasan_free_p4d(p4d_t *p4d_start, pgd_t *pgd)
 {
 	p4d_t *p4d;
 	int i;
+
+	if (ARCH_PAGE_TABLE_SYNC_MASK & PGTBL_PGD_MODIFIED)
+		return;
 
 	for (i = 0; i < PTRS_PER_P4D; i++) {
 		p4d = p4d_start + i;
@@ -377,6 +420,9 @@ static void kasan_remove_pmd_table(pmd_t *pmd, unsigned long addr,
 			continue;
 
 		if (kasan_pte_table(*pmd)) {
+			if (ARCH_PAGE_TABLE_SYNC_MASK & PGTBL_PMD_MODIFIED)
+				continue;
+
 			if (IS_ALIGNED(addr, PMD_SIZE) &&
 			    IS_ALIGNED(next, PMD_SIZE)) {
 				pmd_clear(pmd);
@@ -403,6 +449,9 @@ static void kasan_remove_pud_table(pud_t *pud, unsigned long addr,
 			continue;
 
 		if (kasan_pmd_table(*pud)) {
+			if (ARCH_PAGE_TABLE_SYNC_MASK & PGTBL_PUD_MODIFIED)
+				continue;
+
 			if (IS_ALIGNED(addr, PUD_SIZE) &&
 			    IS_ALIGNED(next, PUD_SIZE)) {
 				pud_clear(pud);
@@ -430,6 +479,9 @@ static void kasan_remove_p4d_table(p4d_t *p4d, unsigned long addr,
 			continue;
 
 		if (kasan_pud_table(*p4d)) {
+			if (ARCH_PAGE_TABLE_SYNC_MASK & PGTBL_P4D_MODIFIED)
+				continue;
+
 			if (IS_ALIGNED(addr, P4D_SIZE) &&
 			    IS_ALIGNED(next, P4D_SIZE)) {
 				p4d_clear(p4d);
@@ -464,6 +516,9 @@ void kasan_remove_zero_shadow(void *start, unsigned long size)
 			continue;
 
 		if (kasan_p4d_table(*pgd)) {
+			if (ARCH_PAGE_TABLE_SYNC_MASK & PGTBL_PGD_MODIFIED)
+				continue;
+
 			if (IS_ALIGNED(addr, PGDIR_SIZE) &&
 			    IS_ALIGNED(next, PGDIR_SIZE)) {
 				pgd_clear(pgd);
