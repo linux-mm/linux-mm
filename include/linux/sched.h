@@ -833,6 +833,16 @@ struct task_ipi_mask {
 struct task_ipi_mask { };
 #endif
 
+#ifdef CONFIG_NUMA_BALANCING
+enum numa_tiering_fault_stats {
+	NUMA_TIERING_FAULT_COLD,
+	NUMA_TIERING_FAULT_HOT,
+	NUMA_TIERING_FAULT_THROTTLED,
+	NUMA_TIERING_FAULT_MIGRATE_FAIL,
+	NR_NUMA_TIERING_FAULT_STATS
+};
+#endif
+
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -1432,6 +1442,13 @@ struct task_struct {
 	 * weights depending on whether they were shared or private faults
 	 */
 	unsigned long			numa_faults_locality[3];
+
+	/*
+	 * Memory tiering faults are tracked separately from normal NUMA
+	 * placement statistics. In tiering-only mode, slow-memory hint faults
+	 * are used to decide promotion, not task placement.
+	 */
+	unsigned long			numa_tiering_faults[NR_NUMA_TIERING_FAULT_STATS];
 
 	unsigned long			numa_pages_migrated;
 #endif /* CONFIG_NUMA_BALANCING */
