@@ -87,6 +87,9 @@ static struct vfsmount *shm_mnt __ro_after_init;
 
 #include "internal.h"
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/shmem.h>
+
 #define VM_ACCT(size)    (PAGE_ALIGN(size) >> PAGE_SHIFT)
 
 /* Pretend that each entry is of this size in directory's i_size */
@@ -2153,17 +2156,23 @@ static struct folio *shmem_alloc_and_add_folio(struct vm_fault *vmf,
 	unsigned long suitable_orders = 0;
 	struct folio *folio = NULL;
 	pgoff_t aligned_index;
+	pgoff_t orig_index = index;
 	long pages;
 	int error, order;
+	int requested_order, suitable_order;
+	int charge_error = 0;
+	unsigned int stage;
 
 	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
 		orders = 0;
 
+	requested_order = orders ? highest_order(orders) : 0;
 	if (orders > 0) {
 		suitable_orders = shmem_suitable_orders(inode, vmf,
 							mapping, index, orders);
 
 		order = highest_order(suitable_orders);
+		suitable_order = order;
 		while (suitable_orders) {
 			pages = 1UL << order;
 			aligned_index = round_down(index, pages);
@@ -2179,19 +2188,35 @@ static struct folio *shmem_alloc_and_add_folio(struct vm_fault *vmf,
 			order = next_order(&suitable_orders, order);
 		}
 	} else {
+		suitable_order = 0;
 		pages = 1;
 		folio = shmem_alloc_folio(gfp, 0, info, index);
 	}
-	if (!folio)
+	if (!folio) {
+		if (suitable_order < 0)
+			trace_shmem_alloc_folio_finish(inode, orig_index,
+						       requested_order,
+						       suitable_order, -1,
+						       SHMEM_ALLOC_FILTER, 0,
+						       -ENOMEM);
+		else
+			trace_shmem_alloc_folio_finish(inode, orig_index,
+						       requested_order,
+						       suitable_order, -1,
+						       SHMEM_ALLOC_ALLOC, -ENOMEM,
+						       -ENOMEM);
 		return ERR_PTR(-ENOMEM);
+	}
 
 allocated:
 	__folio_set_locked(folio);
 	__folio_set_swapbacked(folio);
 
 	gfp &= GFP_RECLAIM_MASK;
+	stage = SHMEM_ALLOC_CHARGE;
 	error = mem_cgroup_charge(folio, fault_mm, gfp);
 	if (error) {
+		charge_error = error;
 		if (xa_find(&mapping->i_pages, &index,
 				index + pages - 1, XA_PRESENT)) {
 			error = -EEXIST;
@@ -2206,10 +2231,12 @@ allocated:
 		goto unlock;
 	}
 
+	stage = SHMEM_ALLOC_CACHE;
 	error = shmem_add_to_page_cache(folio, mapping, index, NULL, gfp);
 	if (error)
 		goto unlock;
 
+	stage = SHMEM_ALLOC_ACCOUNT;
 	error = shmem_inode_acct_blocks(inode, pages);
 	if (error) {
 		struct shmem_sb_info *sbinfo = SHMEM_SB(inode->i_sb);
@@ -2240,9 +2267,17 @@ allocated:
 
 	shmem_recalc_inode(inode, pages, 0);
 	folio_add_lru(folio);
+	if (folio_order(folio) < requested_order)
+		trace_shmem_alloc_folio_finish(inode, orig_index,
+					       requested_order, suitable_order,
+					       folio_order(folio),
+					       SHMEM_ALLOC_DONE, 0, 0);
 	return folio;
 
 unlock:
+	trace_shmem_alloc_folio_finish(inode, orig_index, requested_order,
+				       suitable_order, folio_order(folio), stage,
+				       charge_error ?: error, error);
 	folio_unlock(folio);
 	folio_put(folio);
 	return ERR_PTR(error);
@@ -2250,16 +2285,22 @@ unlock:
 
 static struct folio *shmem_swap_alloc_folio(struct inode *inode,
 		struct vm_fault *vmf, pgoff_t index,
-		swp_entry_t entry, int order, gfp_t gfp)
+		swp_entry_t entry, int order, gfp_t gfp,
+		unsigned int *fallback, int *fallback_error)
 {
 	pgoff_t ilx;
 	struct folio *folio;
 	struct mempolicy *mpol;
 	struct shmem_inode_info *info = SHMEM_I(inode);
 
-	if ((vmf && unlikely(userfaultfd_armed(vmf->vma))) ||
-	     !zswap_never_enabled())
-		order = 0;
+	if (order) {
+		if (vmf && unlikely(userfaultfd_armed(vmf->vma)))
+			*fallback |= SHMEM_SWAPIN_FALLBACK_USERFAULTFD;
+		if (!zswap_never_enabled())
+			*fallback |= SHMEM_SWAPIN_FALLBACK_ZSWAP;
+		if (*fallback)
+			order = 0;
+	}
 
 again:
 	mpol = shmem_get_pgoff_policy(info, index, order, &ilx);
@@ -2270,6 +2311,8 @@ again:
 		return folio;
 
 	if (order) {
+		*fallback |= SHMEM_SWAPIN_FALLBACK_SYNC;
+		*fallback_error = PTR_ERR(folio);
 		order = 0;
 		goto again;
 	}
@@ -2472,7 +2515,12 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	softleaf_t index_entry;
 	struct swap_info_struct *si;
 	struct folio *folio = NULL;
-	int error, nr_pages, order;
+	int error, nr_pages, order = -1;
+	int actual_order = -1;
+	unsigned int path = SHMEM_SWAPIN_LOOKUP;
+	unsigned int fallback = SHMEM_SWAPIN_FALLBACK_NONE;
+	int fallback_error = 0;
+	pgoff_t orig_index = index;
 	pgoff_t offset;
 
 	VM_BUG_ON(!*foliop || !xa_is_value(*foliop));
@@ -2480,20 +2528,21 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	swap = index_entry;
 	*foliop = NULL;
 
-	if (softleaf_is_poison_marker(index_entry))
-		return -EIO;
+	if (softleaf_is_poison_marker(index_entry)) {
+		path = SHMEM_SWAPIN_POISON;
+		error = -EIO;
+		goto out;
+	}
 
 	si = get_swap_device(index_entry);
 	order = shmem_confirm_swap(mapping, index, index_entry);
 	if (IS_ERR_OR_NULL(si)) {
-		if (order < 0)
-			return -EEXIST;
-		else
-			return -EINVAL;
+		error = order < 0 ? -EEXIST : -EINVAL;
+		goto out;
 	}
 	if (unlikely(order < 0)) {
-		put_swap_device(si);
-		return -EEXIST;
+		error = -EEXIST;
+		goto put_swap;
 	}
 
 	/* index may point to the middle of a large entry, get the sub entry */
@@ -2507,10 +2556,13 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	if (!folio) {
 		if (data_race(si->flags & SWP_SYNCHRONOUS_IO)) {
 			/* Direct swapin skipping swap cache & readahead */
+			path = SHMEM_SWAPIN_SYNC;
 			folio = shmem_swap_alloc_folio(inode, vmf, index,
-						       swap, order, gfp);
+						       swap, order, gfp, &fallback,
+						       &fallback_error);
 		} else {
 			/* Cached swapin only supports order 0 folio */
+			path = SHMEM_SWAPIN_READAHEAD;
 			folio = shmem_swapin_cluster(swap, gfp, info, index);
 		}
 		if (IS_ERR_OR_NULL(folio)) {
@@ -2527,6 +2579,7 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 			count_memcg_event_mm(fault_mm, PGMAJFAULT);
 		}
 	} else {
+		path = SHMEM_SWAPIN_CACHE;
 		swap_update_readahead(folio, NULL, 0);
 	}
 
@@ -2607,10 +2660,9 @@ static int shmem_swapin_folio(struct inode *inode, pgoff_t index,
 	folio_put_swap(folio, NULL);
 	swap_cache_del_folio(folio);
 	folio_mark_dirty(folio);
-	put_swap_device(si);
-
+	actual_order = folio_order(folio);
 	*foliop = folio;
-	return 0;
+	goto put_swap;
 failed:
 	if (shmem_confirm_swap(mapping, index, swap) < 0)
 		error = -EEXIST;
@@ -2629,10 +2681,16 @@ unlock:
 	if (folio)
 		folio_unlock(folio);
 failed_nolock:
-	if (folio)
+	if (folio) {
+		actual_order = folio_order(folio);
 		folio_put(folio);
+	}
+put_swap:
 	put_swap_device(si);
-
+out:
+	trace_shmem_swapin_folio(inode, orig_index, swp_type(index_entry),
+				 swp_offset(index_entry), order, actual_order,
+				 path, fallback, fallback_error, error);
 	return error;
 }
 
