@@ -1483,6 +1483,14 @@ static int test_memcg_sock(const char *root)
 
 	/* the uncharge is done, but a flush still walking the CPUs can hide it from a read */
 	while (flush_rounds--) {
+		/*
+		 * Drain per-CPU memcg_stock so cached MEMCG_SOCK deltas in
+		 * stock->nr_sock[] are flushed to vmstats.
+		 */
+		if (cg_write(memcg, "memory.high", "0") ||
+		    cg_write(memcg, "memory.high", "max"))
+			goto cleanup;
+
 		if (cg_run(memcg, alloc_anon, (void *)MEMCG_FLUSH_BYTES))
 			goto cleanup;
 
