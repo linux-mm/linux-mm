@@ -15,6 +15,7 @@
 #include "internal.h"
 #include "swap.h"
 #include "swap_table.h"
+#include "vswap.h"
 #include "memcontrol-v1.h"
 
 /* for OOM */
@@ -299,7 +300,10 @@ void __memcg1_swapout(struct folio *folio, struct swap_cluster_info *ci)
 	 */
 	nr_entries = folio_nr_pages(folio);
 	private_id = mem_cgroup_private_id_get(memcg, nr_entries);
-	mod_memcg_state(memcg, MEMCG_SWAP, nr_entries);
+	if (is_vswap_entry(folio->swap))
+		mod_memcg_state(memcg, MEMCG_VSWAP, nr_entries);
+	else
+		mod_memcg_state(memcg, MEMCG_SWAP, nr_entries);
 
 	__swap_cgroup_set(ci, swp_cluster_offset(folio->swap), nr_entries, private_id);
 
@@ -371,7 +375,10 @@ void memcg1_swapin(struct folio *folio)
 	id = __swap_cgroup_clear(ci, swp_cluster_offset(folio->swap),
 				 nr_pages);
 	swap_cluster_unlock(ci);
-	mem_cgroup_uncharge_swap(id, nr_pages);
+	if (!id)
+		return;
+	mem_cgroup_swap_uncharge(id, nr_pages);
+	mem_cgroup_swap_put(id, nr_pages, is_vswap_entry(folio->swap));
 }
 #endif
 
@@ -1837,6 +1844,7 @@ static const unsigned int memcg1_stats[] = {
 #ifdef CONFIG_SWAP
 	MEMCG_SWAP,
 	NR_SWAPCACHE,
+	MEMCG_VSWAP,
 #endif
 };
 
@@ -1855,6 +1863,7 @@ static const char *const memcg1_stat_names[] = {
 #ifdef CONFIG_SWAP
 	"swap",
 	"swapcached",
+	"vswap",
 #endif
 };
 
