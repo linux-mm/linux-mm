@@ -2266,21 +2266,13 @@ static inline bool pfn_section_first_valid(struct mem_section *ms, unsigned long
 #endif
 
 #ifndef CONFIG_HAVE_ARCH_PFN_VALID
-/**
- * pfn_valid - check if there is a valid memory map entry for a PFN
- * @pfn: the page frame number to check
- *
- * Check if there is a valid memory map entry aka struct page for the @pfn.
- * Note, that availability of the memory map entry does not imply that
- * there is actual usable memory at that @pfn. The struct page may
- * represent a hole or an unusable page frame.
- *
- * Return: 1 for PFNs that have memory map entries and 0 otherwise
+/*
+ * Like pfn_valid(), but the caller must be in an RCU-sched read-side critical
+ * section, for example by disabling preemption.
  */
-static inline int pfn_valid(unsigned long pfn)
+static inline int __pfn_valid(unsigned long pfn)
 {
 	struct mem_section *ms;
-	int ret;
 
 	/*
 	 * Ensure the upper PAGE_SHIFT bits are clear in the
@@ -2294,16 +2286,32 @@ static inline int pfn_valid(unsigned long pfn)
 	if (pfn_to_section_nr(pfn) >= NR_MEM_SECTIONS)
 		return 0;
 	ms = __pfn_to_section(pfn);
-	rcu_read_lock_sched();
-	if (!valid_section(ms)) {
-		rcu_read_unlock_sched();
+	if (!valid_section(ms))
 		return 0;
-	}
 	/*
 	 * Traditionally early sections always returned pfn_valid() for
 	 * the entire section-sized span.
 	 */
-	ret = early_section(ms) || pfn_section_valid(ms, pfn);
+	return early_section(ms) || pfn_section_valid(ms, pfn);
+}
+
+/**
+ * pfn_valid - check if there is a valid memory map entry for a PFN
+ * @pfn: the page frame number to check
+ *
+ * Check if there is a valid memory map entry aka struct page for the @pfn.
+ * Note, that availability of the memory map entry does not imply that
+ * there is actual usable memory at that @pfn. The struct page may
+ * represent a hole or an unusable page frame.
+ *
+ * Return: 1 for PFNs that have memory map entries and 0 otherwise
+ */
+static inline int pfn_valid(unsigned long pfn)
+{
+	int ret;
+
+	rcu_read_lock_sched();
+	ret = __pfn_valid(pfn);
 	rcu_read_unlock_sched();
 
 	return ret;
