@@ -889,12 +889,57 @@ static long gup_grab_folio_pages(struct folio *folio,
 	return 0;
 }
 
+/*
+ * Resolve one present PTE to the page it maps. Returns no page and no error
+ * when the PTE cannot be followed but the caller may fault it in, and a
+ * negative errno when the caller must report the failure.
+ */
+static long gup_lookup_pte(struct vm_area_struct *vma, unsigned long address,
+		pte_t *ptep, pte_t pte, unsigned int flags, struct page **pagep)
+{
+	struct page *page;
+
+	*pagep = NULL;
+
+	if (!pte_present(pte))
+		return 0;
+	if (pte_protnone(pte) && !gup_can_follow_protnone(vma, flags))
+		return 0;
+
+	page = vm_normal_page(vma, address, pte);
+
+	/*
+	 * We only care about anon pages in can_follow_write_pte().
+	 */
+	if ((flags & FOLL_WRITE) && !can_follow_write_pte(pte, page, vma, flags))
+		return 0;
+
+	if (unlikely(!page)) {
+		if (flags & FOLL_DUMP) {
+			/* Avoid special (like zero) pages in core dumps */
+			return -EFAULT;
+		}
+		if (!is_zero_pfn(pte_pfn(pte)))
+			return follow_pfn_pte(vma, address, ptep, flags);
+		page = pte_page(pte);
+	}
+
+	if (!pte_write(pte) && gup_must_unshare(vma, flags, page))
+		return -EMLINK;
+
+	VM_WARN_ON_ONCE_PAGE((flags & FOLL_PIN) && PageAnon(page) &&
+			     !PageAnonExclusive(page), page);
+
+	*pagep = page;
+	return 0;
+}
+
 static long follow_page_pte(struct vm_area_struct *vma,
 		unsigned long address, pmd_t *pmd, unsigned int flags,
 		struct page **pages)
 {
 	struct mm_struct *mm = vma->vm_mm;
-	struct folio *folio;
+	bool need_no_page_table = false;
 	struct page *page;
 	spinlock_t *ptl;
 	pte_t *ptep, pte;
@@ -904,61 +949,30 @@ static long follow_page_pte(struct vm_area_struct *vma,
 	if (!ptep)
 		return no_page_table(vma, flags, address);
 	pte = ptep_get(ptep);
-	if (!pte_present(pte))
-		goto no_page;
-	if (pte_protnone(pte) && !gup_can_follow_protnone(vma, flags))
-		goto no_page;
 
-	page = vm_normal_page(vma, address, pte);
-
-	/*
-	 * We only care about anon pages in can_follow_write_pte().
-	 */
-	if ((flags & FOLL_WRITE) &&
-	    !can_follow_write_pte(pte, page, vma, flags)) {
-		ret = 0;
-		goto out;
+	ret = gup_lookup_pte(vma, address, ptep, pte, flags, &page);
+	if (!ret && page) {
+		ret = gup_grab_folio_pages(page_folio(page), page,
+						     1, pte_dirty(pte), flags, pages);
+		if (!ret)
+			ret = 1;
+	} else if (!ret && pte_none(pte)) {
+		/*
+		 * no_page_table() may look up the page cache, so it cannot run
+		 * under the PTE lock. A none PTE returns from gup_lookup_pte()
+		 * before any write check runs, so this is the same call the old
+		 * code made -- not a new failure mode for FOLL_WRITE.
+		 */
+		need_no_page_table = true;
 	}
 
-	if (unlikely(!page)) {
-		if (flags & FOLL_DUMP) {
-			/* Avoid special (like zero) pages in core dumps */
-			ret = -EFAULT;
-			goto out;
-		}
-
-		if (is_zero_pfn(pte_pfn(pte))) {
-			page = pte_page(pte);
-		} else {
-			ret = follow_pfn_pte(vma, address, ptep, flags);
-			goto out;
-		}
-	}
-	folio = page_folio(page);
-
-	if (!pte_write(pte) && gup_must_unshare(vma, flags, page)) {
-		ret = -EMLINK;
-		goto out;
-	}
-
-	VM_WARN_ON_ONCE_PAGE((flags & FOLL_PIN) && PageAnon(page) &&
-			     !PageAnonExclusive(page), page);
-
-	ret = gup_grab_folio_pages(folio, page, 1,
-			pte_dirty(pte), flags, pages);
-	if (ret)
-		goto out;
-	ret = 1;
-out:
 	pte_unmap_unlock(ptep, ptl);
+
+	if (need_no_page_table)
+		return no_page_table(vma, flags, address);
 	if (ret > 0)
 		gup_flush_pages(vma, address, pages, ret);
 	return ret;
-no_page:
-	pte_unmap_unlock(ptep, ptl);
-	if (!pte_none(pte))
-		return 0;
-	return no_page_table(vma, flags, address);
 }
 
 static long follow_pmd_mask(struct vm_area_struct *vma,
