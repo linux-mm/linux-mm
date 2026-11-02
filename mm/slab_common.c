@@ -1373,6 +1373,10 @@ void __init kvfree_rcu_init(void)
  * per-CPU. Object size is equal to one page. This value
  * can be changed at boot time.
  */
+/* These used to be rcutree parameters; keep their documented names. */
+#undef MODULE_PARAM_PREFIX
+#define MODULE_PARAM_PREFIX "rcutree."
+
 static int rcu_min_cached_objs = 5;
 module_param(rcu_min_cached_objs, int, 0444);
 
@@ -1983,7 +1987,13 @@ run_page_cache_worker(struct kfree_rcu_cpu *krcp)
 
 	if (rcu_scheduler_active == RCU_SCHEDULER_RUNNING &&
 			!atomic_xchg(&krcp->work_in_progress, 1)) {
-		if (atomic_read(&krcp->backoff_page_cache_fill)) {
+		/*
+		 * A zero delay would queue the work right here, under
+		 * krcp->lock and possibly the caller's pi_lock, so let the
+		 * hrtimer do it.
+		 */
+		if (atomic_read(&krcp->backoff_page_cache_fill) &&
+		    rcu_delay_page_cache_fill_msec) {
 			queue_delayed_work(rcu_reclaim_wq,
 				&krcp->page_cache_work,
 					msecs_to_jiffies(rcu_delay_page_cache_fill_msec));
