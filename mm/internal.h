@@ -418,7 +418,7 @@ static inline unsigned int folio_pte_batch_flags(struct folio *folio,
 		struct vm_area_struct *vma, pte_t *ptep, pte_t *ptentp,
 		unsigned int max_nr, fpb_t flags)
 {
-	bool any_writable = false, any_young = false, any_dirty = false;
+	bool any_writable = false, any_young = false, any_dirty = false, writable;
 	pte_t expected_pte, pte = *ptentp;
 	unsigned int nr, cur_nr;
 
@@ -438,12 +438,23 @@ static inline unsigned int folio_pte_batch_flags(struct folio *folio,
 
 	nr = pte_batch_hint(ptep, pte);
 	expected_pte = __pte_batch_clear_ignored(pte_advance_pfn(pte, nr), flags);
+	writable = !!pte_write(pte);
 	ptep = ptep + nr;
 
 	while (nr < max_nr) {
 		pte = ptep_get(ptep);
 
 		if (!pte_same(__pte_batch_clear_ignored(pte, flags), expected_pte))
+			break;
+
+		/*
+		 * x86 shadow-stack PTEs encode writability as RW=0, DIRTY=1.
+		 * Without FPB_RESPECT_DIRTY, __pte_batch_clear_ignored()
+		 * considers shadow-stack PTE as the same with subsequent
+		 * ordinary read-only PTEs. Therefore, check whether pte writable.
+		 */
+		if (unlikely((flags & (FPB_RESPECT_WRITE | FPB_RESPECT_DIRTY)) == FPB_RESPECT_WRITE &&
+			     writable != !!pte_write(pte)))
 			break;
 
 		if (flags & FPB_MERGE_WRITE)
