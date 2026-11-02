@@ -114,7 +114,6 @@ static idtentry_t sysvec_table[NR_SYSTEM_VECTORS] __ro_after_init = {
 
 	SYSVEC(RESCHEDULE_VECTOR,		reschedule_ipi),
 	SYSVEC(CALL_FUNCTION_SINGLE_VECTOR,	call_function_single),
-	SYSVEC(CALL_FUNCTION_VECTOR,		call_function),
 	SYSVEC(REBOOT_VECTOR,			reboot),
 
 	SYSVEC(THRESHOLD_APIC_VECTOR,		threshold),

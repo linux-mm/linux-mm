@@ -88,14 +88,14 @@ void native_send_call_func_ipi(const struct cpumask *mask)
 			goto sendmask;
 
 		if (cpumask_test_cpu(cpu, mask))
-			__apic_send_IPI_all(CALL_FUNCTION_VECTOR);
+			__apic_send_IPI_all(CALL_FUNCTION_SINGLE_VECTOR);
 		else if (num_online_cpus() > 1)
-			__apic_send_IPI_allbutself(CALL_FUNCTION_VECTOR);
+			__apic_send_IPI_allbutself(CALL_FUNCTION_SINGLE_VECTOR);
 		return;
 	}
 
 sendmask:
-	__apic_send_IPI_mask(mask, CALL_FUNCTION_VECTOR);
+	__apic_send_IPI_mask(mask, CALL_FUNCTION_SINGLE_VECTOR);
 }
 
 void apic_send_nmi_to_offline_cpu(unsigned int cpu)

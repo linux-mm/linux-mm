@@ -255,15 +255,6 @@ DEFINE_IDTENTRY_SYSVEC_SIMPLE(sysvec_reschedule_ipi)
 	trace_reschedule_exit(RESCHEDULE_VECTOR);
 }
 
-DEFINE_IDTENTRY_SYSVEC(sysvec_call_function)
-{
-	apic_eoi();
-	trace_call_function_entry(CALL_FUNCTION_VECTOR);
-	inc_irq_stat(CALL_FUNCTION);
-	generic_smp_call_function_interrupt();
-	trace_call_function_exit(CALL_FUNCTION_VECTOR);
-}
-
 DEFINE_IDTENTRY_SYSVEC(sysvec_call_function_single)
 {
 	apic_eoi();
