@@ -391,8 +391,13 @@ static unsigned long elf_map(struct file *filep, unsigned long addr,
 	if (total_size) {
 		total_size = ELF_PAGEALIGN(total_size);
 		map_addr = vm_mmap(filep, addr, total_size, prot, type, off);
-		if (!BAD_ADDR(map_addr))
-			vm_munmap(map_addr+size, total_size-size);
+		if (!BAD_ADDR(map_addr) && total_size > size) {
+			int err = vm_munmap(map_addr + size, total_size - size);
+
+			/* Don't run an image that has its holes filled. */
+			if (err)
+				map_addr = err;
+		}
 	} else
 		map_addr = vm_mmap(filep, addr, size, prot, type, off);
 
@@ -1166,7 +1171,9 @@ out_free_interp:
 							 PTR_ERR((void*)load_bias) : -EINVAL;
 						goto out_free_dentry;
 					}
-					vm_munmap(load_bias, total_size);
+					retval = vm_munmap(load_bias, total_size);
+					if (retval)
+						goto out_free_dentry;
 					/* Adjust alignment as requested. */
 					if (alignment)
 						load_bias &= ~(alignment - 1);
