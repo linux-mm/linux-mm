@@ -375,6 +375,56 @@ static void uffd_wp_unpopulated_test(uffd_global_test_opts_t *gopts, uffd_test_a
 	uffd_test_pass();
 }
 
+/*
+ * UFFDIO_WRITEPROTECT over a range whose second page is not registered must
+ * fail without changing the first page, in both directions.
+ */
+static void uffd_wp_partial_range_test(uffd_global_test_opts_t *gopts,
+				       uffd_test_args_t *args)
+{
+	struct uffdio_writeprotect prms = {
+		.range.start = (uint64_t)gopts->area_dst,
+		.range.len = 2 * gopts->page_size,
+	};
+	uint64_t value;
+	int pagemap_fd;
+
+	/* Only the first page is registered; the second is a separate VMA */
+	if (uffd_register(gopts->uffd, gopts->area_dst, gopts->page_size,
+			  false, true, false))
+		err("register failed");
+
+	pagemap_fd = pagemap_open();
+	*gopts->area_dst = 1;
+
+	prms.mode = UFFDIO_WRITEPROTECT_MODE_WP;
+	if (!ioctl(gopts->uffd, UFFDIO_WRITEPROTECT, &prms) || errno != ENOENT) {
+		uffd_test_fail("protect over an unregistered page did not fail with ENOENT");
+		goto out;
+	}
+	value = pagemap_get_entry(pagemap_fd, gopts->area_dst);
+	if (value & PM_UFFD_WP) {
+		uffd_test_fail("failed protect changed the first page");
+		goto out;
+	}
+
+	wp_range(gopts->uffd, (uint64_t)gopts->area_dst, gopts->page_size, true);
+	prms.mode = 0;
+	if (!ioctl(gopts->uffd, UFFDIO_WRITEPROTECT, &prms) || errno != ENOENT) {
+		uffd_test_fail("unprotect over an unregistered page did not fail with ENOENT");
+		goto out;
+	}
+	value = pagemap_get_entry(pagemap_fd, gopts->area_dst);
+	if (!(value & PM_UFFD_WP)) {
+		uffd_test_fail("failed unprotect changed the first page");
+		goto out;
+	}
+
+	uffd_test_pass();
+out:
+	close(pagemap_fd);
+}
+
 static void uffd_wp_fork_test_common(uffd_global_test_opts_t *gopts, uffd_test_args_t *args,
 				     bool with_event)
 {
@@ -2402,6 +2452,12 @@ uffd_test_case_t uffd_tests[] = {
 		.mem_targets = MEM_ANON,
 		.uffd_feature_required =
 		UFFD_FEATURE_PAGEFAULT_FLAG_WP | UFFD_FEATURE_WP_UNPOPULATED,
+	},
+	{
+		.name = "wp-partial-range",
+		.uffd_fn = uffd_wp_partial_range_test,
+		.mem_targets = MEM_ANON,
+		.uffd_feature_required = UFFD_FEATURE_PAGEFAULT_FLAG_WP,
 	},
 	{
 		.name = "minor",
