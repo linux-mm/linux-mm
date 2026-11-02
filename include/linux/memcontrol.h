@@ -968,6 +968,10 @@ unsigned long lruvec_page_state_monotonic(const struct lruvec *lruvec,
 					  enum node_stat_item idx);
 unsigned long lruvec_page_state_local(const struct lruvec *lruvec,
 				      enum node_stat_item idx);
+unsigned long lruvec_lru_page_state(const struct lruvec *lruvec,
+				    enum node_stat_item idx);
+unsigned long lruvec_lru_page_state_monotonic(const struct lruvec *lruvec,
+					      enum node_stat_item idx);
 
 void mod_memcg_lruvec_state(struct lruvec *lruvec,
 			    enum node_stat_item idx, int val);
@@ -1428,6 +1432,18 @@ static inline unsigned long lruvec_page_state_local(const struct lruvec *lruvec,
 						    enum node_stat_item idx)
 {
 	return node_page_state(lruvec_pgdat(lruvec), idx);
+}
+
+static inline unsigned long lruvec_lru_page_state(const struct lruvec *lruvec,
+						  enum node_stat_item idx)
+{
+	return node_page_state(lruvec_pgdat(lruvec), idx);
+}
+
+static inline unsigned long lruvec_lru_page_state_monotonic(const struct lruvec *lruvec,
+							    enum node_stat_item idx)
+{
+	return node_page_state_monotonic(lruvec_pgdat(lruvec), idx);
 }
 
 static inline void mod_memcg_lruvec_state(struct lruvec *lruvec,

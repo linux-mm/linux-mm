@@ -483,10 +483,13 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 	 * section (for e.g, in cachestat) - these callers need to skip flushing
 	 * stats (via the flush argument).
 	 *
+	 * For the root memcg, the LRU sizes are read directly from the node
+	 * counters (see lruvec_lru_page_state()).
+	 *
 	 * XXX: With per-memcg flushing and thresholding, is ratelimiting
 	 * still needed here?
 	 */
-	if (flush)
+	if (flush && !mem_cgroup_is_root(eviction_memcg))
 		mem_cgroup_flush_stats_ratelimited(eviction_memcg);
 
 	eviction_lruvec = mem_cgroup_lruvec(eviction_memcg, pgdat);
@@ -518,17 +521,17 @@ bool workingset_test_recent(void *shadow, bool file, bool *workingset,
 	 * workingset competition needs to consider anon or not depends
 	 * on having free swap space.
 	 */
-	workingset_size = lruvec_page_state(eviction_lruvec, NR_ACTIVE_FILE);
+	workingset_size = lruvec_lru_page_state(eviction_lruvec, NR_ACTIVE_FILE);
 	if (!file) {
-		workingset_size += lruvec_page_state(eviction_lruvec,
-						     NR_INACTIVE_FILE);
+		workingset_size += lruvec_lru_page_state(eviction_lruvec,
+							 NR_INACTIVE_FILE);
 	}
 	if (mem_cgroup_get_nr_swap_pages(eviction_memcg) > 0) {
-		workingset_size += lruvec_page_state(eviction_lruvec,
-						     NR_ACTIVE_ANON);
+		workingset_size += lruvec_lru_page_state(eviction_lruvec,
+							 NR_ACTIVE_ANON);
 		if (file) {
-			workingset_size += lruvec_page_state(eviction_lruvec,
-						     NR_INACTIVE_ANON);
+			workingset_size += lruvec_lru_page_state(eviction_lruvec,
+								 NR_INACTIVE_ANON);
 		}
 	}
 
