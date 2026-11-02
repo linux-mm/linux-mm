@@ -248,6 +248,7 @@ static int sysvipc_sem_proc_show(struct seq_file *s, void *it);
 
 void sem_init_ns(struct ipc_namespace *ns)
 {
+	mutex_init(&ns->sem_ctls_mutex);
 	ns->sc_semmsl = SEMMSL;
 	ns->sc_semmns = SEMMNS;
 	ns->sc_semopm = SEMOPM;
@@ -2234,7 +2235,7 @@ static long do_semtimedop(int semid, struct sembuf __user *tsops,
 		return -EINVAL;
 
 	if (nsops > SEMOPM_FAST) {
-		sops = kvmalloc_objs(*sops, nsops);
+		sops = kvmalloc_objs(*sops, nsops, GFP_KERNEL_ACCOUNT);
 		if (sops == NULL)
 			return -ENOMEM;
 	}
