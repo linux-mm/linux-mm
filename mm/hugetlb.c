@@ -142,6 +142,7 @@ static void hugetlb_unmap_range(struct mmu_gather *tlb,
 				unsigned long end, struct folio *folio,
 				zap_flags_t zap_flags);
 static struct resv_map *vma_resv_map(struct vm_area_struct *vma);
+static void account_new_hugetlb_folio(struct hstate *h, struct folio *folio);
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
@@ -1444,8 +1445,7 @@ void add_hugetlb_folio(struct hstate *h, struct folio *folio,
 	lockdep_assert_held(&hugetlb_lock);
 
 	INIT_LIST_HEAD(&folio->lru);
-	h->nr_huge_pages++;
-	h->nr_huge_pages_node[nid]++;
+	account_new_hugetlb_folio(h, folio);
 
 	if (adjust_surplus) {
 		h->surplus_huge_pages++;
