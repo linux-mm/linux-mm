@@ -597,6 +597,12 @@ static int __memcg_list_lru_alloc(struct mem_cgroup *memcg,
 			parent = parent_mem_cgroup(pos);
 		}
 
+		if (!css_is_dying(&pos->css) &&
+		    memcg_shrinker_unit_alloc(pos, lru_shrinker_id(lru), gfp)) {
+			kfree(mlru);
+			return -ENOMEM;
+		}
+
 		if (!mlru) {
 			mlru = memcg_init_list_lru_one(lru, gfp);
 			if (!mlru)
@@ -666,18 +672,20 @@ int __list_lru_init(struct list_lru *lru, bool memcg_aware, struct shrinker *shr
 	int i;
 
 #ifdef CONFIG_MEMCG
+	if (mem_cgroup_disabled() || mem_cgroup_kmem_disabled())
+		memcg_aware = false;
+
 	/*
 	 * If the shrinker fell back to being non-memcg-aware (e.g. with
-	 * cgroup.memory=nokmem), its id was never assigned and holds a
-	 * stale 0. Don't let set_shrinker_bit() act on it.
+	 * cgroup.memory=nokmem), its id is not valid. Don't let
+	 * set_shrinker_bit() act on it, nor on a list that is not
+	 * per-memcg: such a list gets no shrinker units.
 	 */
-	if (shrinker && (shrinker->flags & SHRINKER_MEMCG_AWARE))
+	if (shrinker && memcg_aware &&
+	    (shrinker->flags & SHRINKER_MEMCG_AWARE))
 		lru->shrinker_id = shrinker->id;
 	else
 		lru->shrinker_id = -1;
-
-	if (mem_cgroup_disabled() || mem_cgroup_kmem_disabled())
-		memcg_aware = false;
 #endif
 
 	lru->node = kzalloc_objs(*lru->node, nr_node_ids);

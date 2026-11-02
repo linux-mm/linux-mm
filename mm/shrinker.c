@@ -42,31 +42,38 @@ static struct shrinker_info_unit *shrinker_unit_get(struct mem_cgroup *memcg,
 }
 
 /*
- * A memcg is visible to expand_shrinker_info() before it goes online, so
- * a unit may already be there from either side.
+ * Installs run with the caller's gfp, possibly under the i_pages lock, which
+ * is taken from interrupts: hence the irq-safe lock and xas_nomem().
  */
-static int shrinker_unit_install(struct mem_cgroup *memcg, int nid, int index)
+static int shrinker_unit_install(struct mem_cgroup *memcg, int nid, int index,
+				 gfp_t gfp)
 {
-	struct xarray *units = &memcg->nodeinfo[nid]->shrinker_units;
+	XA_STATE(xas, &memcg->nodeinfo[nid]->shrinker_units, index);
 	struct shrinker_info_unit *unit;
-	int ret;
+	unsigned long flags;
 
-	if (xa_load(units, index))
+	if (xa_load(xas.xa, index))
 		return 0;
 
-	unit = kmem_cache_alloc_node(shrinker_unit_cachep,
-				     GFP_KERNEL | __GFP_ZERO, nid);
+	unit = kmem_cache_alloc_node(shrinker_unit_cachep, gfp | __GFP_ZERO,
+				     nid);
 	if (!unit)
 		return -ENOMEM;
 
-	ret = xa_insert(units, index, unit, GFP_KERNEL);
-	if (ret) {
-		kmem_cache_free(shrinker_unit_cachep, unit);
-		if (ret == -EBUSY)
-			ret = 0;
-	}
+	do {
+		xas_lock_irqsave(&xas, flags);
+		if (!xas_load(&xas)) {
+			xas_store(&xas, unit);
+			if (!xas_error(&xas))
+				unit = NULL;
+		}
+		xas_unlock_irqrestore(&xas, flags);
+	} while (xas_nomem(&xas, gfp));
 
-	return ret;
+	if (unit)
+		kmem_cache_free(shrinker_unit_cachep, unit);
+
+	return xas_error(&xas);
 }
 
 static int shrinker_units_install(struct mem_cgroup *memcg, int start, int end)
@@ -75,7 +82,8 @@ static int shrinker_units_install(struct mem_cgroup *memcg, int start, int end)
 
 	for_each_node(nid) {
 		for (index = start; index < end; index++) {
-			ret = shrinker_unit_install(memcg, nid, index);
+			ret = shrinker_unit_install(memcg, nid, index,
+						    GFP_KERNEL);
 			if (ret)
 				return ret;
 		}
@@ -84,13 +92,11 @@ static int shrinker_units_install(struct mem_cgroup *memcg, int start, int end)
 	return 0;
 }
 
-static void __free_shrinker_info(struct mem_cgroup *memcg)
+void free_shrinker_info(struct mem_cgroup *memcg)
 {
 	struct shrinker_info_unit *unit;
 	unsigned long index;
 	int nid;
-
-	lockdep_assert_held(&shrinker_mutex);
 
 	for_each_node(nid) {
 		struct xarray *units = &memcg->nodeinfo[nid]->shrinker_units;
@@ -101,22 +107,22 @@ static void __free_shrinker_info(struct mem_cgroup *memcg)
 	}
 }
 
-void free_shrinker_info(struct mem_cgroup *memcg)
-{
-	mutex_lock(&shrinker_mutex);
-	__free_shrinker_info(memcg);
-	mutex_unlock(&shrinker_mutex);
-}
-
+/*
+ * Global reclaim keeps the deferred work of memcg-aware shrinkers in the
+ * root's units, and root has no list_lru allocation to install them from.
+ */
 int alloc_shrinker_info(struct mem_cgroup *memcg)
 {
 	int ret;
+
+	if (!mem_cgroup_is_root(memcg))
+		return 0;
 
 	mutex_lock(&shrinker_mutex);
 	ret = shrinker_units_install(memcg, 0,
 				     shrinker_id_to_index(shrinker_nr_max));
 	if (ret)
-		__free_shrinker_info(memcg);
+		free_shrinker_info(memcg);
 	mutex_unlock(&shrinker_mutex);
 
 	return ret;
@@ -124,26 +130,15 @@ int alloc_shrinker_info(struct mem_cgroup *memcg)
 
 static int expand_shrinker_info(int new_id)
 {
-	int ret = 0;
 	int new_nr_max = round_up(new_id + 1, SHRINKER_UNIT_BITS);
-	struct mem_cgroup *memcg;
-
-	if (!root_mem_cgroup)
-		goto out;
+	int ret = 0;
 
 	lockdep_assert_held(&shrinker_mutex);
 
-	memcg = mem_cgroup_iter(NULL, NULL, NULL);
-	do {
-		ret = shrinker_units_install(memcg,
+	if (root_mem_cgroup)
+		ret = shrinker_units_install(root_mem_cgroup,
 					     shrinker_id_to_index(shrinker_nr_max),
 					     shrinker_id_to_index(new_nr_max));
-		if (ret) {
-			mem_cgroup_iter_break(NULL, memcg);
-			goto out;
-		}
-	} while ((memcg = mem_cgroup_iter(NULL, memcg, NULL)) != NULL);
-out:
 	if (!ret)
 		shrinker_nr_max = new_nr_max;
 
@@ -211,7 +206,8 @@ static long xchg_nr_deferred_memcg(int nid, struct shrinker *shrinker,
 	struct shrinker_info_unit *unit;
 
 	unit = shrinker_unit_get(memcg, nid, shrinker->id);
-	if (WARN_ON_ONCE(!unit))
+	/* No unit: this memcg never held objects of this shrinker. */
+	if (!unit)
 		return 0;
 
 	return atomic_long_xchg(&unit->nr_deferred[shrinker_id_to_offset(shrinker->id)], 0);
@@ -223,10 +219,33 @@ static long add_nr_deferred_memcg(long nr, int nid, struct shrinker *shrinker,
 	struct shrinker_info_unit *unit;
 
 	unit = shrinker_unit_get(memcg, nid, shrinker->id);
-	if (WARN_ON_ONCE(!unit))
+	if (!unit)
 		return 0;
 
 	return atomic_long_add_return(nr, &unit->nr_deferred[shrinker_id_to_offset(shrinker->id)]);
+}
+
+/*
+ * Called before @memcg gets a list on a list_lru of shrinker @shrinker_id:
+ * a map bit is only ever set on a memcg that has such a list.
+ */
+int memcg_shrinker_unit_alloc(struct mem_cgroup *memcg, int shrinker_id,
+			      gfp_t gfp)
+{
+	int nid, ret;
+
+	if (shrinker_id < 0 || mem_cgroup_is_root(memcg))
+		return 0;
+
+	for_each_node(nid) {
+		ret = shrinker_unit_install(memcg, nid,
+					    shrinker_id_to_index(shrinker_id),
+					    gfp);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 void reparent_shrinker_deferred(struct mem_cgroup *memcg)
@@ -237,14 +256,13 @@ void reparent_shrinker_deferred(struct mem_cgroup *memcg)
 	int nid, offset;
 	long nr;
 
-	/* Prevent from concurrent shrinker_info expand */
-	mutex_lock(&shrinker_mutex);
 	for_each_node(nid) {
 		struct xarray *parent_units = &parent->nodeinfo[nid]->shrinker_units;
 
 		xa_for_each(&memcg->nodeinfo[nid]->shrinker_units, index, child_unit) {
 			parent_unit = xa_load(parent_units, index);
-			if (WARN_ON_ONCE(!parent_unit))
+			/* Installed but never listed: nothing deferred in it. */
+			if (!parent_unit)
 				continue;
 			for (offset = 0; offset < SHRINKER_UNIT_BITS; offset++) {
 				nr = atomic_long_read(&child_unit->nr_deferred[offset]);
@@ -252,7 +270,6 @@ void reparent_shrinker_deferred(struct mem_cgroup *memcg)
 			}
 		}
 	}
-	mutex_unlock(&shrinker_mutex);
 }
 #else
 static int shrinker_memcg_alloc(struct shrinker *shrinker)

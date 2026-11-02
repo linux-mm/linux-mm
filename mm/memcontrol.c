@@ -4245,7 +4245,7 @@ static bool alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
 	INIT_LIST_HEAD(&pn->objcg_list);
 
 	lruvec_init(&pn->lruvec);
-	xa_init(&pn->shrinker_units);
+	xa_init_flags(&pn->shrinker_units, XA_FLAGS_LOCK_IRQ);
 	pn->memcg = memcg;
 
 	memcg->nodeinfo[node] = pn;
@@ -4412,11 +4412,6 @@ static int mem_cgroup_css_online(struct cgroup_subsys_state *css)
 
 	memcg_online_kmem(memcg);
 
-	/*
-	 * A memcg must be visible for expand_shrinker_info()
-	 * by the time the maps are allocated. So, we allocate maps
-	 * here, when mem_cgroup_iter() can't skip it.
-	 */
 	if (alloc_shrinker_info(memcg))
 		goto offline_kmem;
 
