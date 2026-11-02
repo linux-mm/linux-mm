@@ -83,7 +83,8 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 					   unsigned long nr_pages,
 					   gfp_t gfp_mask,
 					   unsigned int reclaim_options,
-					   int *swappiness);
+					   int *swappiness,
+					   nodemask_t *source_nodes);
 
 #ifdef CONFIG_NUMA
 extern int sysctl_min_unmapped_ratio;
