@@ -20,16 +20,16 @@ KCSAN_INSTRUMENT_BARRIERS := y
 # These files are disabled because they produce non-interesting and/or
 # flaky coverage that is not a function of syscall inputs. E.g. slab is out of
 # free pages, or a task is migrated between nodes.
-KCOV_INSTRUMENT_slab_common.o := n
-KCOV_INSTRUMENT_slub.o := n
-KCOV_INSTRUMENT_page_alloc.o := n
-KCOV_INSTRUMENT_debug-pagealloc.o := n
-KCOV_INSTRUMENT_kmemleak.o := n
-KCOV_INSTRUMENT_memcontrol.o := n
-KCOV_INSTRUMENT_memcontrol-v1.o := n
-KCOV_INSTRUMENT_mmzone.o := n
-KCOV_INSTRUMENT_vmstat.o := n
-KCOV_INSTRUMENT_failslab.o := n
+KCOV_INSTRUMENT_slab_common.o := $(kcov-noisy)
+KCOV_INSTRUMENT_slub.o := $(kcov-noisy)
+KCOV_INSTRUMENT_page_alloc.o := $(kcov-noisy)
+KCOV_INSTRUMENT_debug-pagealloc.o := $(kcov-noisy)
+KCOV_INSTRUMENT_kmemleak.o := $(kcov-noisy)
+KCOV_INSTRUMENT_memcontrol.o := $(kcov-noisy)
+KCOV_INSTRUMENT_memcontrol-v1.o := $(kcov-noisy)
+KCOV_INSTRUMENT_mmzone.o := $(kcov-noisy)
+KCOV_INSTRUMENT_vmstat.o := $(kcov-noisy)
+KCOV_INSTRUMENT_failslab.o := $(kcov-noisy)
 
 CFLAGS_init-mm.o += -Wno-override-init
 

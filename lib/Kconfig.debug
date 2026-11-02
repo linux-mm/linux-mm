@@ -2233,6 +2233,51 @@ config KCOV_INSTRUMENT_ALL
 	  filesystem fuzzing with AFL) then you will want to enable coverage
 	  for more specific subsets of files, and should say n here.
 
+config EARLY_KCOV
+	bool "Collect code coverage of the early boot path"
+	depends on KCOV && DEBUG_FS
+	help
+	  Record every PC executed by the boot task (init_task) from right
+	  after early parameter parsing in start_kernel() until rest_init(),
+	  with KCOV_TRACE_PC semantics, and export it via
+	  /sys/kernel/debug/early_kcov. Writing to that file removes it and
+	  frees the buffer. This shows which code a given configuration and
+	  machine actually run during boot. Only instrumented code is
+	  recorded, so this is mostly useful with KCOV_INSTRUMENT_ALL.
+	  See Documentation/dev-tools/kcov.rst.
+
+	  This reserves EARLY_KCOV_SIZE_MB of memory during boot and slows
+	  down the boot. If unsure, say n.
+
+config EARLY_KCOV_SIZE_MB
+	int "Default early boot coverage buffer size in MiB"
+	depends on EARLY_KCOV
+	range 0 2048
+	default 256
+	help
+	  Size of the early boot coverage buffer, rounded up to a page. It
+	  can be overridden with early_kcov_size=. 0 disables the collection
+	  unless early_kcov_size= is given.
+
+	  Each recorded PC takes one word. With KCOV_INSTRUMENT_ALL an x86_64
+	  boot records about 17M PCs (130 MiB), and 30M to 40M PCs (240 to
+	  310 MiB) with KCOV_INSTRUMENT_NOISY, growing with the amount of
+	  memory. PCs that do not fit are not recorded.
+
+config KCOV_INSTRUMENT_NOISY
+	bool "Also instrument code excluded only for noisy coverage"
+	depends on EARLY_KCOV && KCOV_INSTRUMENT_ALL
+	help
+	  Some code (scheduler, RCU, locking, page and slab allocators,
+	  rbtree, stack unwinding, ...) is excluded from KCOV instrumentation
+	  because its coverage is not a function of system call inputs and
+	  only adds noise to coverage-guided fuzzing. Code that is excluded
+	  because it cannot be instrumented safely is not affected.
+
+	  Say y to instrument the noisy code as well, so that the early boot
+	  coverage shows the complete execution path. This degrades the
+	  coverage signal for syscall fuzzing, so say n for fuzzing kernels.
+
 config KCOV_IRQ_AREA_SIZE
 	hex "Size of interrupt coverage collection area in words"
 	depends on KCOV
