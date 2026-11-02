@@ -3618,7 +3618,7 @@ static struct folio *get_pfn_folio(unsigned long pfn, struct mem_cgroup *memcg,
 		return NULL;
 
 	rcu_read_lock();
-	if (folio_memcg(folio) != memcg)
+	if (!mem_cgroup_is_descendant(memcg, folio_memcg(folio)))
 		folio = NULL;
 	rcu_read_unlock();
 
@@ -3723,7 +3723,7 @@ restart:
 			continue;
 
 		if (last != folio) {
-			walk_update_folio(walk, args->vma, walk->lruvec, last, dirty);
+			walk_update_folio(walk, args->vma, folio_lruvec(last), last, dirty);
 
 			last = folio;
 			dirty = false;
@@ -3736,7 +3736,7 @@ restart:
 		walk->mm_stats[MM_LEAF_YOUNG] += nr;
 	}
 
-	walk_update_folio(walk, args->vma, walk->lruvec, last, dirty);
+	walk_update_folio(walk, args->vma, folio_lruvec(last), last, dirty);
 	last = NULL;
 
 	if (i < PTRS_PER_PTE && get_next_vma(PMD_MASK, PAGE_SIZE, args, &start, &end))
@@ -3812,7 +3812,7 @@ static void walk_pmd_range_locked(pud_t *pud, unsigned long addr, struct vm_area
 			goto next;
 
 		if (last != folio) {
-			walk_update_folio(walk, vma, walk->lruvec, last, dirty);
+			walk_update_folio(walk, vma, folio_lruvec(last), last, dirty);
 
 			last = folio;
 			dirty = false;
@@ -3826,7 +3826,7 @@ next:
 		i = i > MIN_LRU_BATCH ? 0 : find_next_bit(bitmap, MIN_LRU_BATCH, i) + 1;
 	} while (i <= MIN_LRU_BATCH);
 
-	walk_update_folio(walk, vma, walk->lruvec, last, dirty);
+	walk_update_folio(walk, vma, folio_lruvec(last), last, dirty);
 
 	lazy_mmu_mode_disable();
 	spin_unlock(ptl);
@@ -4499,7 +4499,7 @@ bool lru_gen_look_around(struct page_vma_mapped_walk *pvmw, unsigned int nr)
 			continue;
 
 		if (last != folio) {
-			walk_update_folio(walk, vma, lruvec, last, dirty);
+			walk_update_folio(walk, vma, folio_lruvec(last), last, dirty);
 
 			last = folio;
 			dirty = false;
@@ -4511,7 +4511,7 @@ bool lru_gen_look_around(struct page_vma_mapped_walk *pvmw, unsigned int nr)
 		young += nr;
 	}
 
-	walk_update_folio(walk, vma, lruvec, last, dirty);
+	walk_update_folio(walk, vma, folio_lruvec(last), last, dirty);
 
 	lazy_mmu_mode_disable();
 
