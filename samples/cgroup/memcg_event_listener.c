@@ -293,12 +293,6 @@ static int initialize_memcg_events(struct memcg_events *events,
 		return ret;
 	}
 
-	ret = read_memcg_events(events, /* show_diff = */false);
-	if (ret) {
-		warnx("Failed to read initial memcg events state (%d)", ret);
-		return ret;
-	}
-
 	events->inotify_fd = inotify_init();
 	if (events->inotify_fd < 0) {
 		warn("Failed to setup new inotify device");
@@ -311,6 +305,17 @@ static int initialize_memcg_events(struct memcg_events *events,
 	if (events->inotify_wd < 0) {
 		warn("Couldn't add monitor in dir %s", events->path);
 		return -EIO;
+	}
+
+	/*
+	 * Read the initial state only after the watch is armed, so no
+	 * event can slip through the window between the baseline read and
+	 * the watch creation.
+	 */
+	ret = read_memcg_events(events, /* show_diff = */false);
+	if (ret) {
+		warnx("Failed to read initial memcg events state (%d)", ret);
+		return ret;
 	}
 
 	printf("Initialized MEMCG events with counters:\n");
