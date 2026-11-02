@@ -669,6 +669,8 @@ enum ksm_walk_lock {
 	KSM_WALK_MMAP_RDLOCK,
 	/* walk under mmap_write_lock() */
 	KSM_WALK_MMAP_WRLOCK,
+	/* walk with the vma already read-locked (per-VMA locking) */
+	KSM_WALK_VMA_RDLOCK,
 };
 
 static enum page_walk_lock ksm_walk_lock_to_pgwalk(enum ksm_walk_lock lock)
@@ -676,6 +678,8 @@ static enum page_walk_lock ksm_walk_lock_to_pgwalk(enum ksm_walk_lock lock)
 	switch (lock) {
 	case KSM_WALK_MMAP_WRLOCK:
 		return PGWALK_WRLOCK;
+	case KSM_WALK_VMA_RDLOCK:
+		return PGWALK_VMA_RDLOCK_VERIFY;
 	default:
 		return PGWALK_RDLOCK;
 	}
@@ -784,15 +788,36 @@ static bool vma_ksm_compatible(struct vm_area_struct *vma)
 	return ksm_compatible(vma->vm_file, vma->flags);
 }
 
-static struct vm_area_struct *find_mergeable_vma(struct mm_struct *mm,
-		unsigned long addr)
+/**
+ * find_mergeable_vma_locked() - Find the VMA covering 'address' which is
+ * VM_MERGEABLE and read-lock it by per-VMA locks. Please use vma_end_read()
+ * to unlock vma after finishing reading the VMA (non-NULL).
+ *
+ * Return: If a VMA exists which spans @address, return that VMA, read-locked.
+ * If no VMA is mapped there or, very unlikely, a reference count overflow
+ * occurred, return NULL, and no read-locked.
+ *
+ * IMPORTANT: If a VMA exists but is not VM_MERGEABLE or has no anon_vma,
+ * this function releases the per-VMA read lock before returning NULL.
+ * Callers must NOT call vma_end_read() on a NULL return value.
+ */
+static struct vm_area_struct *find_mergeable_vma_locked(struct mm_struct *mm,
+		unsigned long address)
 {
 	struct vm_area_struct *vma;
+
 	if (ksm_test_exit(mm))
 		return NULL;
-	vma = vma_lookup(mm, addr);
-	if (!vma || !(vma->vm_flags & VM_MERGEABLE) || !vma_has_anon_rmap(vma))
+
+	vma = vma_start_read_unlocked(mm, address);
+	if (!vma)
 		return NULL;
+
+	if (!(vma->vm_flags & VM_MERGEABLE) || !vma->anon_vma) {
+		vma_end_read(vma);
+		return NULL;
+	}
+
 	return vma;
 }
 
@@ -818,11 +843,12 @@ static void break_cow(struct ksm_rmap_item *rmap_item)
 	 */
 	rmap_item->linear_page_index = 0;
 
-	mmap_read_lock(mm);
-	vma = find_mergeable_vma(mm, addr);
-	if (vma)
-		break_ksm(vma, addr, addr + PAGE_SIZE, KSM_WALK_MMAP_RDLOCK);
-	mmap_read_unlock(mm);
+	vma = find_mergeable_vma_locked(mm, addr);
+	if (!vma)
+		return;
+
+	break_ksm(vma, addr, addr + PAGE_SIZE, KSM_WALK_VMA_RDLOCK);
+	vma_end_read(vma);
 }
 
 static struct page *get_mergeable_page(struct ksm_rmap_item *rmap_item)
@@ -833,13 +859,12 @@ static struct page *get_mergeable_page(struct ksm_rmap_item *rmap_item)
 	struct page *page = NULL;
 	struct folio *folio;
 	struct folio_walk fw = {
-		.walk_lock  = PGWALK_RDLOCK,
+		.walk_lock  = PGWALK_VMA_RDLOCK_VERIFY,
 	};
 
-	mmap_read_lock(mm);
-	vma = find_mergeable_vma(mm, addr);
+	vma = find_mergeable_vma_locked(mm, addr);
 	if (!vma)
-		goto out;
+		return NULL;
 
 	folio = folio_walk_start(&fw, vma, addr, 0);
 	if (folio) {
@@ -850,12 +875,12 @@ static struct page *get_mergeable_page(struct ksm_rmap_item *rmap_item)
 		}
 		folio_walk_end(&fw, vma);
 	}
-out:
+
 	if (page) {
 		flush_anon_page(vma, page, addr);
 		flush_dcache_page(page);
 	}
-	mmap_read_unlock(mm);
+	vma_end_read(vma);
 	return page;
 }
 
@@ -1596,14 +1621,14 @@ static int try_to_merge_with_zero_page(struct ksm_rmap_item *rmap_item,
 	if (ksm_use_zero_pages && (rmap_item->oldchecksum == zero_checksum)) {
 		struct vm_area_struct *vma;
 
-		mmap_read_lock(mm);
-		vma = find_mergeable_vma(mm, rmap_item->address);
+		vma = find_mergeable_vma_locked(mm, rmap_item->address);
 		if (vma) {
 			err = try_to_merge_one_page(vma, page,
 					ZERO_PAGE(rmap_item->address));
 			trace_ksm_merge_one_page(
 				page_to_pfn(ZERO_PAGE(rmap_item->address)),
 				rmap_item, mm, err);
+			vma_end_read(vma);
 		} else {
 			/*
 			 * If the vma is out of date, we do not need to
@@ -1611,7 +1636,6 @@ static int try_to_merge_with_zero_page(struct ksm_rmap_item *rmap_item,
 			 */
 			err = 0;
 		}
-		mmap_read_unlock(mm);
 	}
 
 	return err;
@@ -1630,10 +1654,9 @@ static int try_to_merge_with_ksm_page(struct ksm_rmap_item *rmap_item,
 	struct vm_area_struct *vma;
 	int err = -EFAULT;
 
-	mmap_read_lock(mm);
-	vma = find_mergeable_vma(mm, rmap_item->address);
+	vma = find_mergeable_vma_locked(mm, rmap_item->address);
 	if (!vma)
-		goto out;
+		goto out_trace;
 
 	err = try_to_merge_one_page(vma, page, kpage);
 	if (err)
@@ -1653,7 +1676,8 @@ static int try_to_merge_with_ksm_page(struct ksm_rmap_item *rmap_item,
 	rmap_item->linear_page_index = linear_anon_page_index(vma, rmap_item->address);
 	get_anon_vma(vma->anon_vma);
 out:
-	mmap_read_unlock(mm);
+	vma_end_read(vma);
+out_trace:
 	trace_ksm_merge_with_ksm_page(kpage, page_to_pfn(kpage ? kpage : page),
 				rmap_item, mm, err);
 	return err;
@@ -3119,6 +3143,7 @@ void __ksm_exit(struct mm_struct *mm)
 {
 	struct ksm_mm_slot *mm_slot = NULL;
 	struct mm_slot *slot;
+	struct vm_area_struct *vma;
 	int easy_to_free = 0;
 
 	/*
@@ -3153,7 +3178,20 @@ unlock:
 		mm_flags_clear(MMF_VM_MERGEABLE, mm);
 		mmdrop(mm);
 	} else if (mm_slot) {
+		/*
+		 * ksmd may be walking this mm's page tables under a per-VMA
+		 * read lock (see find_mergeable_vma_locked()).  A plain
+		 * mmap_write_lock() does not exclude such readers, so also
+		 * write-lock every VMA: this blocks until any in-flight ksmd
+		 * walk drops its per-VMA read lock, and prevents new ones
+		 * from starting (vma_start_read_unlocked() backs out when a
+		 * VMA is write-locked).  The per-VMA write locks are released
+		 * by mmap_write_unlock() via vma_end_write_all().
+		 */
 		mmap_write_lock(mm);
+		VMA_ITERATOR(vmi, mm, 0);
+		for_each_vma(vmi, vma)
+			vma_start_write(vma);
 		mmap_write_unlock(mm);
 	}
 
