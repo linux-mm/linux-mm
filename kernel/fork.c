@@ -1108,6 +1108,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	memset(&mm->rss_stat, 0, sizeof(mm->rss_stat));
 	spin_lock_init(&mm->page_table_lock);
 	spin_lock_init(&mm->arg_lock);
+	mutex_init(&mm->rss_stat_mutex);
 	mm_init_cpumask(mm);
 	mm_init_aio(mm);
 	mm_init_owner(mm, p);
@@ -1148,8 +1149,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	if (mm_alloc_sched(mm))
 		goto fail_sched;
 
-	if (percpu_counter_tree_init_many(mm->rss_stat, NR_MM_COUNTERS, RSS_STAT_BATCH_SIZE,
-					  GFP_KERNEL_ACCOUNT))
+	if (percpu_counter_tree_init_many_lazy(mm->rss_stat, NR_MM_COUNTERS, RSS_STAT_BATCH_SIZE))
 		goto fail_pcpu;
 
 	lru_gen_init_mm(mm);
@@ -1542,6 +1542,8 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
 
 	if (!mm_init(mm, tsk))
 		goto fail_nomem;
+	/* The child owns its RSS counters, see __add_mm_counter(). */
+	mm->rss_owner = tsk;
 
 	uprobe_start_dup_mmap();
 	err = dup_mmap(mm, oldmm);
@@ -1569,6 +1571,23 @@ fail_nomem:
 	return NULL;
 }
 
+/*
+ * Serialize the activations of the RSS counter tree, whichever tasks create
+ * threads. Once the last counter is active, the activation is complete and
+ * thread creation skips the mutex. That check needs no acquire: the updates
+ * and the sums of the counters order their own accesses to the tree. Not
+ * observing the other counters active yet only delays their updates going
+ * to the tree.
+ */
+static int mm_activate_rss_stat(struct mm_struct *mm)
+{
+	if (percpu_counter_tree_active(&mm->rss_stat[NR_MM_COUNTERS - 1]))
+		return 0;
+	guard(mutex)(&mm->rss_stat_mutex);
+	return percpu_counter_tree_activate_many(mm->rss_stat, NR_MM_COUNTERS,
+						 GFP_KERNEL_ACCOUNT);
+}
+
 static int copy_mm(u64 clone_flags, struct task_struct *tsk)
 {
 	struct mm_struct *mm, *oldmm;
@@ -1593,6 +1612,18 @@ static int copy_mm(u64 clone_flags, struct task_struct *tsk)
 		return 0;
 
 	if (clone_flags & CLONE_VM) {
+		int err = 0;
+
+		/*
+		 * A second thread shares the mm: activate the RSS counter
+		 * tree. A vfork child shares the mm while the parent waits,
+		 * so the single counters still fit. The tree stays active if
+		 * the clone fails later, which is harmless.
+		 */
+		if (!(clone_flags & CLONE_VFORK))
+			err = mm_activate_rss_stat(oldmm);
+		if (err)
+			return err;
 		mmget(oldmm);
 		mm = oldmm;
 	} else {

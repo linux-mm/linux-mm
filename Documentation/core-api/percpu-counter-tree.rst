@@ -102,6 +102,13 @@ The activations of the same counters must be serialized by the caller:
 a concurrent activation would publish a second tree and lose the
 updates made to the first.
 
+The RSS counters of an mm use this: the task owning the mm updates the
+plain counter, and other tasks, such as reclaim, update the atomic
+counter. The tree is activated when a second thread shares the mm,
+under mm->rss_stat_mutex, which serializes the activations.
+A single-threaded process therefore has exact RSS counters, cheap
+precise sums, and neither per-cpu memory nor tree items for them.
+
 Use Cases
 =========
 

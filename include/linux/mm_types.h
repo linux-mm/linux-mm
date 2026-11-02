@@ -1352,6 +1352,22 @@ struct mm_struct {
 #endif
 
 		struct percpu_counter_tree rss_stat[NR_MM_COUNTERS];
+		/*
+		 * Task updating rss_stat with percpu_counter_tree_add_owner()
+		 * until the counter tree is activated by a second thread: the
+		 * task running on this mm, set by dup_mm() and exec_mmap(),
+		 * cleared when that task exits or execs, NULL for the other
+		 * users of mm_alloc(). Only compared with current, never
+		 * dereferenced. Not mm->owner, which depends on CONFIG_MEMCG
+		 * and which mm_update_next_owner() hands over to another task
+		 * while a vfork() child may still update the counters.
+		 */
+		struct task_struct *rss_owner;
+		/*
+		 * Serializes the activations of the rss_stat counter tree,
+		 * until the tree is active. See mm_activate_rss_stat().
+		 */
+		struct mutex rss_stat_mutex;
 
 		struct linux_binfmt *binfmt;
 
