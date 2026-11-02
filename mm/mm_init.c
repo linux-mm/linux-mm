@@ -211,7 +211,7 @@ void mm_compute_batch(int overcommit_policy)
 	else
 		memsized_batch = min_t(u64, ram_pages/nr/4, INT_MAX);
 
-	vm_committed_as_batch = max_t(s32, memsized_batch, batch);
+	WRITE_ONCE(vm_committed_as_batch, max_t(s32, memsized_batch, batch));
 }
 
 static int __meminit mm_compute_batch_notifier(struct notifier_block *self,
