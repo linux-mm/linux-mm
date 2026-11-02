@@ -1017,9 +1017,9 @@ static void create_page_chain(struct size_class *class, struct zspage *zspage,
 /*
  * Allocate a zspage for the given size class
  */
-static struct zspage *alloc_zspage(struct zs_pool *pool,
-				   struct size_class *class,
-				   gfp_t gfp, const int nid)
+static noinline struct zspage *alloc_zspage(struct zs_pool *pool,
+					    struct size_class *class,
+					    gfp_t gfp, const int nid)
 {
 	int i;
 	struct zpdesc *zpdescs[ZS_MAX_PAGES_PER_ZSPAGE];
@@ -1252,8 +1252,9 @@ size_t zs_huge_class_size(struct zs_pool *pool)
 }
 EXPORT_SYMBOL_GPL(zs_huge_class_size);
 
-static unsigned long obj_malloc(struct zs_pool *pool,
-				struct zspage *zspage, unsigned long handle)
+static __always_inline unsigned long obj_malloc(struct zs_pool *pool,
+						struct zspage *zspage,
+						unsigned long handle)
 {
 	int i, nr_zpdesc, offset;
 	unsigned long obj;
@@ -1362,7 +1363,7 @@ out:
 }
 EXPORT_SYMBOL_GPL(zs_malloc);
 
-static void obj_free(int class_size, unsigned long obj)
+static __always_inline void obj_free(int class_size, unsigned long obj)
 {
 	struct link_free *link;
 	struct zspage *zspage;
