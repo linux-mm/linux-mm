@@ -197,6 +197,28 @@ static void free_vmemmap_page_list(struct list_head *list)
 		free_vmemmap_page(page);
 }
 
+static int alloc_vmemmap_page_list(struct list_head *head, unsigned int nr_pages,
+				   int nid)
+{
+	LIST_HEAD(local);
+
+	for (unsigned int i = 0; i < nr_pages; i++) {
+		struct page *page;
+
+		page = alloc_pages_node(nid, GFP_KERNEL | __GFP_RETRY_MAYFAIL, 0);
+		if (!page) {
+			memmap_pages_add(i);
+			free_vmemmap_page_list(&local);
+			return -ENOMEM;
+		}
+		list_add(&page->lru, &local);
+	}
+	list_splice(&local, head);
+	memmap_pages_add(nr_pages);
+
+	return 0;
+}
+
 static struct page *vmemmap_dup_page_from_list(const struct page *src,
 					       struct list_head *vmemmap_pages)
 {
@@ -323,28 +345,6 @@ static int vmemmap_remap_free(unsigned long start, unsigned long end,
 	vmemmap_remap_range(start, end, &walk);
 
 	return ret;
-}
-
-static int alloc_vmemmap_page_list(struct list_head *head, unsigned int nr_pages,
-				   int nid)
-{
-	LIST_HEAD(local);
-
-	for (unsigned int i = 0; i < nr_pages; i++) {
-		struct page *page;
-
-		page = alloc_pages_node(nid, GFP_KERNEL | __GFP_RETRY_MAYFAIL, 0);
-		if (!page) {
-			memmap_pages_add(i);
-			free_vmemmap_page_list(&local);
-			return -ENOMEM;
-		}
-		list_add(&page->lru, &local);
-	}
-	list_splice(&local, head);
-	memmap_pages_add(nr_pages);
-
-	return 0;
 }
 
 /**
