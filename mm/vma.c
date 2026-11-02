@@ -679,7 +679,7 @@ void validate_mm(struct mm_struct *mm)
 	mt_validate(&mm->mm_mt);
 	for_each_vma(vmi, vma) {
 #ifdef CONFIG_DEBUG_VM_RB
-		struct anon_vma *anon_vma = vma->anon_vma;
+		struct anon_vma *anon_vma;
 		struct anon_vma_chain *avc;
 #endif
 		unsigned long vmi_start, vmi_end;
@@ -703,7 +703,13 @@ void validate_mm(struct mm_struct *mm)
 		}
 
 #ifdef CONFIG_DEBUG_VM_RB
-		if (vma_has_anon_rmap(vma)) {
+		/*
+		 * Callers may hold only the mmap read lock, in which case a
+		 * concurrent fault can install vma->anon_vma at any time. Read
+		 * it once, so that the check and the lock use the same value.
+		 */
+		anon_vma = data_race(vma->anon_vma);
+		if (anon_vma) {
 			anon_vma_lock_read(anon_vma);
 			list_for_each_entry(avc, &vma->anon_vma_chain, same_vma)
 				anon_rmap_tree_verify(avc);
