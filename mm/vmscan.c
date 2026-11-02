@@ -2271,8 +2271,8 @@ static bool inactive_is_low(struct lruvec *lruvec, enum lru_list inactive_lru)
 	unsigned long inactive_ratio;
 	unsigned long gb;
 
-	inactive = lruvec_page_state(lruvec, NR_LRU_BASE + inactive_lru);
-	active = lruvec_page_state(lruvec, NR_LRU_BASE + active_lru);
+	inactive = lruvec_lru_page_state(lruvec, NR_LRU_BASE + inactive_lru);
+	active = lruvec_lru_page_state(lruvec, NR_LRU_BASE + active_lru);
 
 	gb = (inactive + active) >> (30 - PAGE_SHIFT);
 	if (gb)
@@ -2320,7 +2320,7 @@ static void prepare_scan_control(pg_data_t *pgdat, struct scan_control *sc)
 	 * into a decaying average. This ensures currency, as workloads
 	 * change over time, and avoids overflow in the calculations.
 	 *
-	 * Use lruvec_page_state_monotonic() so unsigned subtraction
+	 * Use lruvec_lru_page_state_monotonic() so unsigned subtraction
 	 * yields the correct delta across a signed-long wraparound of
 	 * the underlying counter (a real hazard on 32-bit that the
 	 * clamp in lruvec_page_state() would otherwise turn into a huge
@@ -2332,13 +2332,13 @@ static void prepare_scan_control(pg_data_t *pgdat, struct scan_control *sc)
 		struct lru_cost *cost = &target_lruvec->cost[f];
 		unsigned long rotated, io, nr_rotated, nr_io;
 
-		rotated = lruvec_page_state_monotonic(target_lruvec,
-						      PGROTATE_ANON + f);
-		io = lruvec_page_state_monotonic(target_lruvec,
-						 WORKINGSET_RESTORE_BASE + f);
+		rotated = lruvec_lru_page_state_monotonic(target_lruvec,
+							  PGROTATE_ANON + f);
+		io = lruvec_lru_page_state_monotonic(target_lruvec,
+						     WORKINGSET_RESTORE_BASE + f);
 		if (f == WORKINGSET_ANON)
-			io += lruvec_page_state_monotonic(target_lruvec,
-							  NR_VMSCAN_WRITE);
+			io += lruvec_lru_page_state_monotonic(target_lruvec,
+							      NR_VMSCAN_WRITE);
 
 		nr_rotated = rotated - cost->last_rotated;
 		nr_io = io - cost->last_io;
@@ -2360,10 +2360,10 @@ static void prepare_scan_control(pg_data_t *pgdat, struct scan_control *sc)
 	anon_cost = &target_lruvec->cost[WORKINGSET_ANON];
 	file_cost = &target_lruvec->cost[WORKINGSET_FILE];
 
-	lrusize = lruvec_page_state(target_lruvec, NR_INACTIVE_ANON) +
-		  lruvec_page_state(target_lruvec, NR_ACTIVE_ANON) +
-		  lruvec_page_state(target_lruvec, NR_INACTIVE_FILE) +
-		  lruvec_page_state(target_lruvec, NR_ACTIVE_FILE);
+	lrusize = lruvec_lru_page_state(target_lruvec, NR_INACTIVE_ANON) +
+		  lruvec_lru_page_state(target_lruvec, NR_ACTIVE_ANON) +
+		  lruvec_lru_page_state(target_lruvec, NR_INACTIVE_FILE) +
+		  lruvec_lru_page_state(target_lruvec, NR_ACTIVE_FILE);
 
 	while (anon_cost->count + file_cost->count > lrusize / 4) {
 		anon_cost->count /= 2;
@@ -2387,7 +2387,7 @@ static void prepare_scan_control(pg_data_t *pgdat, struct scan_control *sc)
 		 * workingset is being established. Deactivate to get
 		 * rid of any stale active pages quickly.
 		 */
-		refaults = lruvec_page_state(target_lruvec,
+		refaults = lruvec_lru_page_state(target_lruvec,
 				WORKINGSET_ACTIVATE_ANON);
 		if (refaults != target_lruvec->refaults[WORKINGSET_ANON] ||
 			inactive_is_low(target_lruvec, LRU_INACTIVE_ANON))
@@ -2395,7 +2395,7 @@ static void prepare_scan_control(pg_data_t *pgdat, struct scan_control *sc)
 		else
 			sc->may_deactivate &= ~DEACTIVATE_ANON;
 
-		refaults = lruvec_page_state(target_lruvec,
+		refaults = lruvec_lru_page_state(target_lruvec,
 				WORKINGSET_ACTIVATE_FILE);
 		if (refaults != target_lruvec->refaults[WORKINGSET_FILE] ||
 		    inactive_is_low(target_lruvec, LRU_INACTIVE_FILE))
@@ -2410,7 +2410,7 @@ static void prepare_scan_control(pg_data_t *pgdat, struct scan_control *sc)
 	 * thrashing, try to reclaim those first before touching
 	 * anonymous pages.
 	 */
-	file = lruvec_page_state(target_lruvec, NR_INACTIVE_FILE);
+	file = lruvec_lru_page_state(target_lruvec, NR_INACTIVE_FILE);
 	if (file >> sc->priority && !(sc->may_deactivate & DEACTIVATE_FILE) &&
 	    !sc->no_cache_trim_mode)
 		sc->cache_trim_mode = 1;
@@ -6554,9 +6554,9 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
 		return;
 
 	target_lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
-	refaults = lruvec_page_state(target_lruvec, WORKINGSET_ACTIVATE_ANON);
+	refaults = lruvec_lru_page_state(target_lruvec, WORKINGSET_ACTIVATE_ANON);
 	target_lruvec->refaults[WORKINGSET_ANON] = refaults;
-	refaults = lruvec_page_state(target_lruvec, WORKINGSET_ACTIVATE_FILE);
+	refaults = lruvec_lru_page_state(target_lruvec, WORKINGSET_ACTIVATE_FILE);
 	target_lruvec->refaults[WORKINGSET_FILE] = refaults;
 }
 

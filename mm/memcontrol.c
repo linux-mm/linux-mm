@@ -585,6 +585,50 @@ unsigned long lruvec_page_state_local(const struct lruvec *lruvec,
 	return x;
 }
 
+static bool lruvec_is_root(const struct lruvec *lruvec)
+{
+	return !mem_cgroup_disabled() && mem_cgroup_is_root(lruvec_memcg(lruvec));
+}
+
+/**
+ * lruvec_lru_page_state - read an LRU stat of an lruvec
+ * @lruvec: the LRU vector to read from
+ * @idx: the node_stat_item to read
+ *
+ * Like lruvec_page_state(), but for the root memcg the node counter is read
+ * instead. For stats that only track memory charged to a memcg (LRU sizes,
+ * workingset, rotation and reclaim writeback counts), the root memcg's
+ * hierarchical value equals the node counter. The root memcg can just read the
+ * node counter directly instead of going through rstat, which requires
+ * flushing. Flushing the root memcg flushes every cgroup in the system.
+ *
+ * Use lruvec_page_state() for other stats (eg slab).
+ */
+unsigned long lruvec_lru_page_state(const struct lruvec *lruvec,
+				    enum node_stat_item idx)
+{
+	if (lruvec_is_root(lruvec))
+		return node_page_state(lruvec_pgdat(lruvec), idx);
+
+	return lruvec_page_state(lruvec, idx);
+}
+
+/**
+ * lruvec_lru_page_state_monotonic - lruvec_lru_page_state() for delta sampling
+ * @lruvec: the LRU vector to read from
+ * @idx: the node_stat_item to read
+ *
+ * See lruvec_page_state_monotonic() and lruvec_lru_page_state().
+ */
+unsigned long lruvec_lru_page_state_monotonic(const struct lruvec *lruvec,
+					      enum node_stat_item idx)
+{
+	if (lruvec_is_root(lruvec))
+		return node_page_state_monotonic(lruvec_pgdat(lruvec), idx);
+
+	return lruvec_page_state_monotonic(lruvec, idx);
+}
+
 static void __mod_memcg_lruvec_state(struct mem_cgroup *memcg, int nid,
 				     enum node_stat_item idx, long val);
 
