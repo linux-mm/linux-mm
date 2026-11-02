@@ -1283,6 +1283,10 @@ int migrate_device_coherent_folio(struct folio *folio);
 int __must_check try_grab_folio(struct folio *folio, int refs,
 				unsigned int flags);
 
+unsigned long gup_unshared_pages(struct vm_area_struct *vma, unsigned int flags,
+				 struct folio *folio, struct page *page,
+				 unsigned long nr_pages);
+
 /*
  * mm/huge_memory.c
  */
@@ -1355,50 +1359,11 @@ enum {
  * to fallback to the slow path just to lookup the vma.
  */
 static inline bool gup_must_unshare(struct vm_area_struct *vma,
-				    unsigned int flags, struct page *page)
+				    unsigned int flags,
+				    struct folio *folio, struct page *page)
 {
-	/*
-	 * FOLL_WRITE is implicitly handled correctly as the page table entry
-	 * has to be writable -- and if it references (part of) an anonymous
-	 * folio, that part is required to be marked exclusive.
-	 */
-	if ((flags & (FOLL_WRITE | FOLL_PIN)) != FOLL_PIN)
-		return false;
-	/*
-	 * Note: PageAnon(page) is stable until the page is actually getting
-	 * freed.
-	 */
-	if (!PageAnon(page)) {
-		/*
-		 * We only care about R/O long-term pining: R/O short-term
-		 * pinning does not have the semantics to observe successive
-		 * changes through the process page tables.
-		 */
-		if (!(flags & FOLL_LONGTERM))
-			return false;
-
-		/* We really need the vma ... */
-		if (!vma)
-			return true;
-
-		/*
-		 * ... because we only care about writable private ("COW")
-		 * mappings where we have to break COW early.
-		 */
-		return vma_is_cow_mapping(vma);
-	}
-
-	/* Paired with a memory barrier in folio_try_share_anon_rmap_*(). */
-	if (IS_ENABLED(CONFIG_HAVE_GUP_FAST))
-		smp_rmb();
-
-	/*
-	 * Note that KSM pages cannot be exclusive, and consequently,
-	 * cannot get pinned.
-	 */
-	return !PageAnonExclusive(page);
+	return gup_unshared_pages(vma, flags, folio, page, 1) != 1;
 }
-
 
 static inline bool vma_soft_dirty_enabled(struct vm_area_struct *vma)
 {
