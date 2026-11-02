@@ -938,6 +938,35 @@ static long gup_lookup_pte(struct vm_area_struct *vma, unsigned long address,
 }
 
 /*
+ * Return how many PTEs map consecutive pages of the same folio and can be
+ * committed as one run. Always at least 1.
+ *
+ * The write-fault and unshare checks in gup_lookup_pte() are per PTE, but a
+ * writable run needs no repeat: a writable anon page is exclusive. A read-only
+ * run under FOLL_WRITE or FOLL_PIN does need the per-page check, so it stays
+ * one page at a time.
+ */
+static unsigned long gup_pte_batch_len(struct vm_area_struct *vma,
+		unsigned long address, unsigned long walk_end,
+		struct folio *folio, pte_t *ptep, pte_t *batch_pte, unsigned int flags)
+{
+	unsigned long max;
+
+	if (!folio_test_large(folio))
+		return 1;
+	if (!pte_write(*batch_pte) && (flags & (FOLL_WRITE | FOLL_PIN)))
+		return 1;
+
+	max = (walk_end - address) >> PAGE_SHIFT;
+	if (max <= 1)
+		return 1;
+
+	/* Merge young/dirty across batch so folio_mark_dirty sees any dirty. */
+	return folio_pte_batch_flags(folio, vma, ptep, batch_pte, max,
+				     FPB_RESPECT_WRITE | FPB_MERGE_YOUNG_DIRTY);
+}
+
+/*
  * Walk the PTEs from the start address to the end of this page table or VMA,
  * whichever comes first, and commit every page found.
  *
@@ -968,7 +997,10 @@ static long follow_page_pte(struct vm_area_struct *vma,
 
 	for (; address < walk_end; address += PAGE_SIZE, ptep++) {
 		pte_t pte = ptep_get(ptep);
+		struct folio *folio;
 		struct page *page;
+		unsigned long batch;
+		pte_t batch_pte;
 
 		ret = gup_lookup_pte(vma, address, ptep, pte, flags, &page);
 		if (ret || !page) {
@@ -983,12 +1015,23 @@ static long follow_page_pte(struct vm_area_struct *vma,
 				need_no_page_table = true;
 			break;
 		}
-		ret = gup_grab_folio_pages(page_folio(page), page,
-						     1, pte_dirty(pte), flags,
+		folio = page_folio(page);
+		batch_pte = pte;
+
+		batch = gup_pte_batch_len(vma, address, walk_end, folio,
+					 ptep, &batch_pte, flags);
+		ret = gup_grab_folio_pages(folio, page, batch,
+						     pte_dirty(batch_pte), flags,
 						     pages ? pages + nr : NULL);
 		if (ret)
 			break;
-		nr++;
+		nr += batch;
+		/*
+		 * The loop's own increment covers one PTE; skip
+		 * the rest of the batch.
+		 */
+		ptep += batch - 1;
+		address += (batch - 1) * PAGE_SIZE;
 	}
 	pte_unmap_unlock(orig_ptep, ptl);
 
