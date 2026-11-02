@@ -885,6 +885,8 @@ int
 isolate_migratepages_range(struct compact_control *cc,
 			   unsigned long low_pfn, unsigned long end_pfn);
 
+unsigned long release_free_list(struct list_head *freepages);
+
 #endif /* CONFIG_COMPACTION || CONFIG_CMA */
 
 struct cma;
