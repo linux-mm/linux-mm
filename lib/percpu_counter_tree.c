@@ -328,10 +328,12 @@ int __percpu_counter_tree_init(struct percpu_counter_tree *counter,
 		return -EINVAL;
 	counter->batch_order = ilog2(batch_size);
 	counter->bias = 0;
+	atomic_long_set(&counter->atomic_bias, 0);
 	counter->level0 = level0;
 	counter->items_stride = items_stride;
-	/* The root is the last item. */
-	counter->approx_sum = &items[(tree_topology.nr_items - 1) * items_stride];
+	/* The root is the last item, allocated by the activation if lazy. */
+	counter->approx_sum = items ?
+		&items[(tree_topology.nr_items - 1) * items_stride] : NULL;
 	return 0;
 }
 
@@ -364,6 +366,26 @@ unsigned long percpu_counter_tree_accuracy(struct percpu_counter_tree *counter)
 	return batch_size * tree_topology.accuracy_multiplier - nr_cpu_ids;
 }
 
+/* Initialize @nr_counters counters, with their per-CPU counters and tree items, or NULL if lazy. */
+static
+int __percpu_counter_tree_init_many(struct percpu_counter_tree *counters,
+				    unsigned int nr_counters, unsigned long batch_size,
+				    s8 __percpu *level0, atomic_long_t *items)
+{
+	unsigned int items_stride = percpu_counter_tree_items_stride(nr_counters);
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < nr_counters; i++) {
+		ret = __percpu_counter_tree_init(&counters[i], batch_size,
+						 level0 ? level0 + i : NULL,
+						 items ? items + i : NULL, items_stride);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
 /**
  * percpu_counter_tree_init_many() - Initialize many per-CPU counter trees.
  * @counters: An array of @nr_counters counters to initialize.
@@ -392,10 +414,8 @@ int percpu_counter_tree_init_many(struct percpu_counter_tree *counters,
 				  unsigned int nr_counters, unsigned long batch_size,
 				  gfp_t gfp_flags)
 {
-	unsigned int items_stride = percpu_counter_tree_items_stride(nr_counters);
 	s8 __percpu *level0;
 	atomic_long_t *items;
-	unsigned int i;
 	int ret;
 
 	/* The tree shape is selected by percpu_counter_tree_subsystem_init() at boot. */
@@ -410,15 +430,9 @@ int percpu_counter_tree_init_many(struct percpu_counter_tree *counters,
 		ret = -ENOMEM;
 		goto free_level0;
 	}
-	for (i = 0; i < nr_counters; i++) {
-		ret = __percpu_counter_tree_init(&counters[i], batch_size, level0 + i,
-						 items + i, items_stride);
-		if (ret)
-			goto free_items;
-	}
-	return 0;
-
-free_items:
+	ret = __percpu_counter_tree_init_many(counters, nr_counters, batch_size, level0, items);
+	if (!ret)
+		return 0;
 	percpu_counter_tree_free_items(items, nr_counters);
 free_level0:
 	free_percpu(level0);
@@ -451,13 +465,170 @@ int percpu_counter_tree_init(struct percpu_counter_tree *counter,
 EXPORT_SYMBOL_GPL(percpu_counter_tree_init);
 
 /**
+ * percpu_counter_tree_init_many_lazy() - Initialize many counters, without their tree.
+ * @counters: An array of @nr_counters counters to initialize.
+ *	      Their memory is provided by the caller.
+ * @nr_counters: The number of counter trees to initialize
+ * @batch_size: The batch size, as for percpu_counter_tree_init_many().
+ *
+ * Initialize counters without allocating their per-CPU counters and tree
+ * items, for counters which may never need the scalability of the tree,
+ * such as the RSS counters of a single-threaded process. Until
+ * percpu_counter_tree_activate_many() allocates the tree, the counters
+ * are exact: percpu_counter_tree_add_owner() adds to the bias, written
+ * only by the owner, percpu_counter_tree_add() adds to the atomic bias,
+ * and the precise and approximate sums read both in O(1).
+ * percpu_counter_tree_destroy_many() and percpu_counter_tree_set() work on
+ * counters which were never activated. The accuracy range of a lazily
+ * initialized counter is the range of its tree, even before activation,
+ * which keeps the comparison functions correct across an activation.
+ * The batch size is fixed here: the activation only publishes the per-CPU
+ * counters and the tree, so updaters read the batch size without ordering.
+ *
+ * Return:
+ * * %0: Success
+ * * %-EINVAL:		- Invalid @batch_size argument
+ */
+int percpu_counter_tree_init_many_lazy(struct percpu_counter_tree *counters,
+				       unsigned int nr_counters, unsigned long batch_size)
+{
+	/* The tree shape is selected by percpu_counter_tree_subsystem_init() at boot. */
+	if (WARN_ON_ONCE(tree_topology.nr_items == UINT_MAX))
+		return -EINVAL;
+	return __percpu_counter_tree_init_many(counters, nr_counters, batch_size, NULL, NULL);
+}
+EXPORT_SYMBOL_GPL(percpu_counter_tree_init_many_lazy);
+
+/*
+ * Publication of the tree
+ *
+ * The updaters and the readers of a counter take no lock, and may run
+ * while percpu_counter_tree_activate_many() publishes its tree. The
+ * activation allocates the per-CPU counters and the tree items zeroed,
+ * then publishes two pointers per counter, each with a store-release:
+ *
+ * - the release of approx_sum: the root is zeroed before its pointer,
+ * - the release of level0, after it: the per-CPU counters, the tree items
+ *   and approx_sum are set before level0.
+ *
+ * level0 opens the tree to updates: until it is published, the tree is
+ * empty. Each load of a published pointer pairs with one of the releases:
+ *
+ * - Update fast path, percpu_counter_tree_add() and
+ *   percpu_counter_tree_add_owner(): READ_ONCE(level0), then the per-CPU
+ *   counters through it. The address dependency pairs with the release of
+ *   level0, as for rcu_dereference().
+ * - Carry slow path: smp_rmb() after the read of level0, then
+ *   READ_ONCE(approx_sum). Pairs with the release of level0, which
+ *   follows the store of approx_sum.
+ * - Precise sum: smp_load_acquire(level0), then approx_sum, the tree items
+ *   and the per-CPU counters. Pairs with the release of level0.
+ * - Approximate sum: READ_ONCE(approx_sum), then the root through it. The
+ *   address dependency pairs with the release of approx_sum.
+ * - percpu_counter_tree_active(): READ_ONCE(level0), without ordering. It
+ *   only selects the update function, which reads level0 again, or lets
+ *   the caller skip an activation which is complete.
+ * - Activations: serialized by the caller, for instance with a mutex,
+ *   which orders a complete activation before the check of level0 at the
+ *   start of the next one.
+ *
+ * The update fast path has no acquire. smp_load_acquire() is free on
+ * strongly ordered architectures such as x86, but on weakly ordered ones,
+ * such as arm64, powerpc and RISC-V, it costs an ordering load or a barrier
+ * on every update, to order a publication which happens at most once in
+ * the life of a counter. The address dependency orders the per-CPU
+ * counters, reached through level0, at no cost. It does not order
+ * approx_sum, a separate field: the carry slow path, taken only when an
+ * update carries, pays an smp_rmb() to read it, and the precise sum, which
+ * reads the whole tree, reads level0 with an acquire.
+ *
+ * Missing the publication is harmless. An updater which reads level0 as
+ * NULL adds to the bias (owner) or to the atomic bias (others), and a
+ * reader which reads a NULL pointer sums the bias and the atomic bias:
+ * the sums keep reading both after the activation, and the tree receives
+ * no update before level0 is published.
+ *
+ * The read barriers between the levels of the precise sum are unrelated
+ * to the publication: they order carries, see
+ * percpu_counter_tree_precise_sum_unbiased().
+ */
+
+/**
+ * percpu_counter_tree_activate_many() - Activate the tree of lazily initialized counters.
+ * @counters: The array of @nr_counters counters passed to
+ *	      percpu_counter_tree_init_many_lazy().
+ * @nr_counters: The number of counters.
+ * @gfp_flags: gfp flags to pass to the per-CPU and tree item allocators.
+ *
+ * Allocate the per-CPU counters and the tree items, and publish them:
+ * later updates go to the tree, and the approximation then has the
+ * accuracy of the tree. The updates made before activation stay in the
+ * bias and the atomic bias, which the sums keep reading, so updates racing
+ * with the activation are not lost: the bias only has the owner as writer,
+ * and the atomic bias only receives atomic additions. Activating active
+ * counters does nothing. @counters and @nr_counters must be those passed
+ * to percpu_counter_tree_init_many_lazy().
+ *
+ * The activations of the same counters must be serialized by the caller,
+ * for instance with a mutex: a concurrent activation would publish a second
+ * tree and lose the updates made to the first. The counters are published
+ * in order: once percpu_counter_tree_active() reports the last one active,
+ * the activation is complete, and a caller can skip it and its
+ * serialization. The caller may not observe the other counters active yet,
+ * which only delays their updates going to the tree.
+ *
+ * Return:
+ * * %0: Success
+ * * %-EINVAL:		- @nr_counters differs from percpu_counter_tree_init_many_lazy()
+ * * %-ENOMEM:		- Out of memory
+ */
+int percpu_counter_tree_activate_many(struct percpu_counter_tree *counters,
+				      unsigned int nr_counters, gfp_t gfp_flags)
+{
+	s8 __percpu *level0;
+	atomic_long_t *items, *root;
+	unsigned int i;
+
+	/* Serialized by the caller: a previous activation is complete. */
+	if (counters[0].level0)
+		return 0;
+	/* The tree items are sized for @nr_counters, at the stride set by the initialization. */
+	if (WARN_ON_ONCE(counters[0].items_stride !=
+			 percpu_counter_tree_items_stride(nr_counters)))
+		return -EINVAL;
+	level0 = __alloc_percpu_gfp(nr_counters * sizeof(*level0),
+				    __alignof__(*counters->level0), gfp_flags);
+	if (!level0)
+		return -ENOMEM;
+	items = percpu_counter_tree_alloc_items(nr_counters, gfp_flags);
+	if (!items) {
+		free_percpu(level0);
+		return -ENOMEM;
+	}
+	root = &items[(tree_topology.nr_items - 1) * counters[0].items_stride];
+	/* See "Publication of the tree" above. */
+	for (i = 0; i < nr_counters; i++) {
+		/* Release of approx_sum: the root is zeroed before its pointer. */
+		smp_store_release(&counters[i].approx_sum, root + i);
+		/*
+		 * Release of level0: the per-CPU counters, the tree items and
+		 * approx_sum are set before level0, which opens the tree to
+		 * updates.
+		 */
+		smp_store_release(&counters[i].level0, level0 + i);
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(percpu_counter_tree_activate_many);
+
+/**
  * percpu_counter_tree_destroy_many() - Destroy many per-CPU counter trees.
  * @counters: Array of counters trees to destroy.
  * @nr_counters: The number of counter trees to destroy.
  *
  * Release internal resources allocated for @nr_counters per-CPU counter trees.
  * @counters and @nr_counters must be those passed to
- * percpu_counter_tree_init_many().
+ * percpu_counter_tree_init_many() or percpu_counter_tree_init_many_lazy().
  */
 void percpu_counter_tree_destroy_many(struct percpu_counter_tree *counters,
 				      unsigned int nr_counters)
@@ -470,8 +641,9 @@ void percpu_counter_tree_destroy_many(struct percpu_counter_tree *counters,
 	if (WARN_ON_ONCE(counters->items_stride !=
 			 percpu_counter_tree_items_stride(nr_counters)))
 		return;
-	/* The first item of the first counter is the base of the tree items. */
-	percpu_counter_tree_free_items(percpu_counter_tree_items(counters), nr_counters);
+	/* The first item of the first counter is the base of the tree items, if allocated. */
+	if (counters->approx_sum)
+		percpu_counter_tree_free_items(percpu_counter_tree_items(counters), nr_counters);
 }
 EXPORT_SYMBOL_GPL(percpu_counter_tree_destroy_many);
 
@@ -511,9 +683,19 @@ void percpu_counter_tree_add_slowpath(struct percpu_counter_tree *counter, long 
 		     level, n_arity_order;
 	unsigned long bit_mask;
 	unsigned int stride = counter->items_stride;
-	atomic_long_t *item = percpu_counter_tree_items(counter);
 	unsigned int cpu = raw_smp_processor_id();
+	atomic_long_t *root, *item;
 
+	/*
+	 * Pairs with the release of level0 in
+	 * percpu_counter_tree_activate_many(), which follows the store of
+	 * approx_sum. The caller read level0, but approx_sum is a separate
+	 * field, which the address dependency of that read does not order:
+	 * read it after level0.
+	 */
+	smp_rmb();
+	root = READ_ONCE(counter->approx_sum);
+	item = root - (tree_topology.nr_items - 1) * stride;
 	n_arity_order = tree_topology.config->n_arity_order[0];
 	bit_mask = percpu_counter_tree_batch_size(counter) << n_arity_order;
 	level_items = 1U << (tree_topology.nr_cpus_order - n_arity_order);
@@ -571,19 +753,14 @@ void percpu_counter_tree_add_slowpath(struct percpu_counter_tree *counter, long 
 		level_items >>= n_arity_order;
 		bit_mask <<= n_arity_order;
 	}
-	atomic_long_add_return_release(inc, counter->approx_sum);
+	/* The atomic API has no add with release ordering without a return value. */
+	atomic_long_add_return_release(inc, root);
 }
 
-/**
- * percpu_counter_tree_add() - Add to a per-CPU counter tree.
- * @counter: Counter added to.
- * @inc: Increment value (either positive or negative).
- *
- * Add @inc to a per-CPU counter tree. This is a fast-path which will
- * typically increment per-CPU counters as long as there is no carry
- * greater or equal to the counter tree batch size.
- */
-void percpu_counter_tree_add(struct percpu_counter_tree *counter, long inc)
+/* Add @inc to the per-CPU counters @level0 of an activated tree. */
+static inline
+void percpu_counter_tree_add_tree(struct percpu_counter_tree *counter,
+				  s8 __percpu *level0, long inc)
 {
 	unsigned long bit_mask = percpu_counter_tree_batch_size(counter);
 	s8 old, new;
@@ -605,17 +782,68 @@ void percpu_counter_tree_add(struct percpu_counter_tree *counter, long inc)
 	 * interrupts, and the carry may propagate from any CPU, see
 	 * percpu_counter_tree_add_slowpath().
 	 */
-	old = this_cpu_read(*counter->level0);
+	old = this_cpu_read(*level0);
 	do {
 		v = old + inc;
 		carry = percpu_counter_tree_item_carry(v, bit_mask);
 		new = (s8)(v - carry);
-	} while (!this_cpu_try_cmpxchg(*counter->level0, &old, new));
+	} while (!this_cpu_try_cmpxchg(*level0, &old, new));
 	if (likely(!carry))
 		return;
 	percpu_counter_tree_add_slowpath(counter, carry);
 }
+
+/**
+ * percpu_counter_tree_add() - Add to a per-CPU counter tree.
+ * @counter: Counter added to.
+ * @inc: Increment value (either positive or negative).
+ *
+ * Add @inc to a per-CPU counter tree. This is a fast-path which will
+ * typically increment per-CPU counters as long as there is no carry
+ * greater or equal to the counter tree batch size. Before the tree is
+ * activated, add to the atomic bias.
+ */
+void percpu_counter_tree_add(struct percpu_counter_tree *counter, long inc)
+{
+	/*
+	 * Pairs with the release of level0 in
+	 * percpu_counter_tree_activate_many(): the per-CPU counters are only
+	 * reached through this pointer, and the address dependency orders
+	 * their initialization before their use, as for rcu_dereference().
+	 * No acquire, see "Publication of the tree".
+	 */
+	s8 __percpu *level0 = READ_ONCE(counter->level0);
+
+	if (!level0) {
+		atomic_long_add(inc, &counter->atomic_bias);
+		return;
+	}
+	percpu_counter_tree_add_tree(counter, level0, inc);
+}
 EXPORT_SYMBOL_GPL(percpu_counter_tree_add);
+
+/**
+ * percpu_counter_tree_add_owner() - Add to a per-CPU counter tree as its owner.
+ * @counter: Counter added to.
+ * @inc: Increment value (either positive or negative).
+ *
+ * Like percpu_counter_tree_add(), but before the tree is activated, add
+ * to the bias without atomic instruction. The calls for a given counter
+ * must not run concurrently with each other: they come from a single
+ * context, the owner chosen by the user of the counter, such as a task.
+ */
+void percpu_counter_tree_add_owner(struct percpu_counter_tree *counter, long inc)
+{
+	/* Address dependency, as in percpu_counter_tree_add(). */
+	s8 __percpu *level0 = READ_ONCE(counter->level0);
+
+	if (!level0) {
+		WRITE_ONCE(counter->bias, (long)((unsigned long)READ_ONCE(counter->bias) + inc));
+		return;
+	}
+	percpu_counter_tree_add_tree(counter, level0, inc);
+}
+EXPORT_SYMBOL_GPL(percpu_counter_tree_add_owner);
 
 /*
  * The precise sum is the sum of the residuals of all tree levels. A carry
@@ -630,19 +858,29 @@ long percpu_counter_tree_precise_sum_unbiased(struct percpu_counter_tree *counte
 {
 	unsigned int nr_levels = tree_topology.config->nr_levels, i,
 		     level_items[MAX_NR_LEVELS], stride = counter->items_stride;
+	/*
+	 * Pairs with the release of level0 in
+	 * percpu_counter_tree_activate_many(): approx_sum, the tree items and
+	 * the per-CPU counters read below are set before level0.
+	 */
+	s8 __percpu *level0 = smp_load_acquire(&counter->level0);
+	unsigned long sum = atomic_long_read(&counter->atomic_bias);
 	atomic_long_t *item;
-	unsigned long sum;
 	int level, cpu;
 
+	/* Before activation, the atomic bias holds the whole unbiased sum. */
+	if (!level0)
+		return (long)sum;
 	/* Number of items of each level above level 0. */
 	level_items[0] = 1U << tree_topology.nr_cpus_order;
 	for (level = 1; level < (int)nr_levels; level++)
 		level_items[level] = level_items[level - 1] >>
 				     tree_topology.config->n_arity_order[level - 1];
-	sum = atomic_long_read(counter->approx_sum);
+	/* Published before level0, so ordered by its acquire. */
+	item = READ_ONCE(counter->approx_sum);
+	sum += atomic_long_read(item);
 	smp_rmb();	/* Read each level before the level below it. */
 	/* The items of each level precede those of the level above it. */
-	item = counter->approx_sum;
 	for (level = (int)nr_levels - 1; level >= 1; level--) {
 		item -= level_items[level] * stride;
 		for (i = 0; i < level_items[level]; i++)
@@ -650,7 +888,7 @@ long percpu_counter_tree_precise_sum_unbiased(struct percpu_counter_tree *counte
 		smp_rmb();	/* Read this level before the level below it. */
 	}
 	for_each_possible_cpu(cpu)
-		sum += (long)READ_ONCE(*per_cpu_ptr(counter->level0, cpu));
+		sum += (long)READ_ONCE(*per_cpu_ptr(level0, cpu));
 	return (long)sum;
 }
 
@@ -1013,6 +1251,7 @@ EXPORT_SYMBOL_IF_KUNIT(percpu_counter_tree_check_config);
  * - a counter at level N, above level 0, holds a multiple of
  *   BATCH(level N - 1) within (-BATCH(level N), +BATCH(level N)),
  * - the root holds a multiple of the batch of the last level.
+ * Before activation, a lazily initialized counter has no tree to check.
  *
  * Return: The number of violated invariants.
  */
@@ -1020,11 +1259,14 @@ unsigned int percpu_counter_tree_check_residuals(struct percpu_counter_tree *cou
 {
 	unsigned int nr_levels = tree_topology.config->nr_levels, level, level_items,
 		     nr_errors = 0, stride = counter->items_stride;
-	atomic_long_t *item = percpu_counter_tree_items(counter);
 	unsigned long lo = percpu_counter_tree_batch_size(counter);
+	atomic_long_t *item;
 	long root;
 	int cpu;
 
+	if (!counter->level0)
+		return 0;
+	item = percpu_counter_tree_items(counter);
 	for_each_possible_cpu(cpu) {
 		long v = READ_ONCE(*per_cpu_ptr(counter->level0, cpu));
 
@@ -1063,7 +1305,7 @@ EXPORT_SYMBOL_IF_KUNIT(percpu_counter_tree_check_residuals);
 /*
  * Copy the state of counter @src into counter @dst, initialized with the
  * same batch size and without concurrent updates: their per-CPU counters,
- * tree items and bias.
+ * tree items and biases. Both trees are active.
  */
 void percpu_counter_tree_copy_state(struct percpu_counter_tree *dst,
 				    struct percpu_counter_tree *src)
@@ -1079,6 +1321,7 @@ void percpu_counter_tree_copy_state(struct percpu_counter_tree *dst,
 		atomic_long_set(&dst_items[pos * dst->items_stride],
 				atomic_long_read(&src_items[pos * src->items_stride]));
 	dst->bias = src->bias;
+	atomic_long_set(&dst->atomic_bias, atomic_long_read(&src->atomic_bias));
 }
 EXPORT_SYMBOL_IF_KUNIT(percpu_counter_tree_copy_state);
 #endif

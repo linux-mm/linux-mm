@@ -19,6 +19,10 @@
  *   and check the accuracy range contract and the comparison functions
  *   against shadow sums after each increment.
  *
+ * - Lazy counter: random owner and atomic updates of a lazily initialized
+ *   counter, exact before its tree is activated halfway, with the same
+ *   checks after each increment.
+ *
  * The test is single-threaded, so it only covers settled counters.
  */
 
@@ -28,6 +32,7 @@
 unsigned int nr_cpu_ids;
 unsigned int hpcc_current_cpu;
 unsigned long hpcc_nr_warnings;
+long hpcc_nr_allocs;
 
 #include "../../../lib/percpu_counter_tree.c"
 
@@ -329,6 +334,47 @@ static void test_random_walk(unsigned long batch_size, unsigned long nr_steps)
 	test_counter_destroy(&c[1]);
 }
 
+static void test_lazy(unsigned long batch_size, unsigned long nr_steps)
+{
+	long nr_allocs = hpcc_nr_allocs;
+	struct test_counter c;
+	unsigned long step;
+
+	if (percpu_counter_tree_init_many_lazy(&c.tree, 1, batch_size)) {
+		CHECK(0);
+		return;
+	}
+	c.shadow = 0;
+	CHECK(!c.tree.level0);
+	CHECK(!c.tree.approx_sum);
+	CHECK(!percpu_counter_tree_active(&c.tree));
+	for (step = 0; step < nr_steps; step++) {
+		long inc = random_increment(batch_size);
+
+		hpcc_current_cpu = rnd() % nr_cpu_ids;
+		if (rnd() & 1)
+			percpu_counter_tree_add_owner(&c.tree, inc);
+		else
+			percpu_counter_tree_add(&c.tree, inc);
+		c.shadow += inc;
+		if (!c.tree.level0)
+			CHECK(percpu_counter_tree_approximate_sum(&c.tree) == c.shadow);
+		check_counter(&c);
+		if (step == nr_steps / 2) {
+			CHECK(!percpu_counter_tree_activate_many(&c.tree, 1, GFP_KERNEL));
+			CHECK(c.tree.level0);
+			CHECK(c.tree.approx_sum);
+			CHECK(percpu_counter_tree_active(&c.tree));
+			/* One tree: its per-CPU counters and its tree items. */
+			CHECK(hpcc_nr_allocs == nr_allocs + 2);
+			CHECK(!percpu_counter_tree_activate_many(&c.tree, 1, GFP_KERNEL));
+			CHECK(hpcc_nr_allocs == nr_allocs + 2);
+		}
+	}
+	test_counter_destroy(&c);
+	CHECK(hpcc_nr_allocs == nr_allocs);
+}
+
 static const unsigned int test_nr_cpus[] = {
 	1, 2, 3, 4, 5, 8, 9, 16, 17, 32, 33, 64, 65, 100, 128, 256, 512,
 	1000, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
@@ -359,6 +405,7 @@ static int run_case(unsigned int nr_cpus, unsigned long batch_size)
 	test_saturated(batch_size, 1);
 	test_saturated(batch_size, -1);
 	test_random_walk(batch_size, nr_steps);
+	test_lazy(batch_size, nr_steps / 2);
 	CHECK(!hpcc_nr_warnings);
 	printf("%sok %d - nr_cpus=%u batch_size=%lu\n", nr_case_failures ? "not " : "",
 	       ++test_num, nr_cpus, batch_size);
