@@ -661,15 +661,25 @@ out_unlock:
 	return found;
 }
 
-static const struct mm_walk_ops break_ksm_ops = {
-	.pmd_entry = break_ksm_pmd_entry,
-	.walk_lock = PGWALK_RDLOCK,
+/*
+ * Locking contexts in which break_ksm() may walk the page tables.
+ */
+enum ksm_walk_lock {
+	/* walk under mmap_read_lock() */
+	KSM_WALK_MMAP_RDLOCK,
+	/* walk under mmap_write_lock() */
+	KSM_WALK_MMAP_WRLOCK,
 };
 
-static const struct mm_walk_ops break_ksm_lock_vma_ops = {
-	.pmd_entry = break_ksm_pmd_entry,
-	.walk_lock = PGWALK_WRLOCK,
-};
+static enum page_walk_lock ksm_walk_lock_to_pgwalk(enum ksm_walk_lock lock)
+{
+	switch (lock) {
+	case KSM_WALK_MMAP_WRLOCK:
+		return PGWALK_WRLOCK;
+	default:
+		return PGWALK_RDLOCK;
+	}
+}
 
 /*
  * Though it's very tempting to unmerge rmap_items from stable tree rather
@@ -697,17 +707,19 @@ static const struct mm_walk_ops break_ksm_lock_vma_ops = {
  * protection keys here anyway.
  */
 static int break_ksm(struct vm_area_struct *vma, unsigned long addr,
-		unsigned long end, bool lock_vma)
+		unsigned long end, enum ksm_walk_lock walk_lock)
 {
 	vm_fault_t ret = 0;
-	const struct mm_walk_ops *ops = lock_vma ?
-				&break_ksm_lock_vma_ops : &break_ksm_ops;
+	struct mm_walk_ops ops = {
+		.pmd_entry = break_ksm_pmd_entry,
+		.walk_lock = ksm_walk_lock_to_pgwalk(walk_lock),
+	};
 
 	do {
 		int ksm_page;
 
 		cond_resched();
-		ksm_page = walk_page_range_vma(vma, addr, end, ops, &addr);
+		ksm_page = walk_page_range_vma(vma, addr, end, &ops, &addr);
 		if (ksm_page <= 0)
 			return ksm_page;
 		ret = handle_mm_fault(vma, addr,
@@ -809,7 +821,7 @@ static void break_cow(struct ksm_rmap_item *rmap_item)
 	mmap_read_lock(mm);
 	vma = find_mergeable_vma(mm, addr);
 	if (vma)
-		break_ksm(vma, addr, addr + PAGE_SIZE, false);
+		break_ksm(vma, addr, addr + PAGE_SIZE, KSM_WALK_MMAP_RDLOCK);
 	mmap_read_unlock(mm);
 }
 
@@ -1247,7 +1259,7 @@ static int unmerge_and_remove_all_rmap_items(void)
 		for_each_vma(vmi, vma) {
 			if (!(vma->vm_flags & VM_MERGEABLE) || !vma_has_anon_rmap(vma))
 				continue;
-			err = break_ksm(vma, vma->vm_start, vma->vm_end, false);
+			err = break_ksm(vma, vma->vm_start, vma->vm_end, KSM_WALK_MMAP_RDLOCK);
 			if (err)
 				goto error;
 		}
@@ -2896,7 +2908,7 @@ static int __ksm_del_vma(struct vm_area_struct *vma)
 		return 0;
 
 	if (vma_has_anon_rmap(vma)) {
-		err = break_ksm(vma, vma->vm_start, vma->vm_end, true);
+		err = break_ksm(vma, vma->vm_start, vma->vm_end, KSM_WALK_MMAP_WRLOCK);
 		if (err)
 			return err;
 	}
@@ -3048,7 +3060,7 @@ int ksm_madvise(struct vm_area_struct *vma, unsigned long start,
 			return 0;		/* just ignore the advice */
 
 		if (vma_has_anon_rmap(vma)) {
-			err = break_ksm(vma, start, end, true);
+			err = break_ksm(vma, start, end, KSM_WALK_MMAP_WRLOCK);
 			if (err)
 				return err;
 		}
