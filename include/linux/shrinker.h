@@ -18,12 +18,6 @@ struct shrinker_info_unit {
 	DECLARE_BITMAP(map, SHRINKER_UNIT_BITS);
 };
 
-struct shrinker_info {
-	struct rcu_head rcu;
-	int map_nr_max;
-	struct shrinker_info_unit *unit[];
-};
-
 /*
  * This struct is used to pass information from page reclaim to the shrinkers.
  * We consolidate the values for easier extension later.

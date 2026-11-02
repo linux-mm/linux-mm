@@ -4245,6 +4245,7 @@ static bool alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
 	INIT_LIST_HEAD(&pn->objcg_list);
 
 	lruvec_init(&pn->lruvec);
+	xa_init(&pn->shrinker_units);
 	pn->memcg = memcg;
 
 	memcg->nodeinfo[node] = pn;
@@ -5953,7 +5954,7 @@ static void __init memcg_struct_check(void)
 	CACHELINE_ASSERT_GROUP_MEMBER(struct mem_cgroup_per_node,
 				      memcg_pn_read_mostly, lruvec_stats);
 	CACHELINE_ASSERT_GROUP_MEMBER(struct mem_cgroup_per_node,
-				      memcg_pn_read_mostly, shrinker_info);
+				      memcg_pn_read_mostly, shrinker_units);
 	CACHELINE_ASSERT_GROUP_MEMBER(struct mem_cgroup_per_node,
 				      memcg_pn_read_mostly, objcg);
 

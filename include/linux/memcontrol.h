@@ -24,6 +24,7 @@
 #include <linux/page-flags.h>
 #include <linux/shrinker.h>
 #include <linux/irq_work_types.h>
+#include <linux/xarray.h>
 
 struct mem_cgroup;
 struct obj_cgroup;
@@ -83,14 +84,14 @@ struct mem_cgroup_reclaim_iter {
  * per-node information in memory controller.
  */
 struct mem_cgroup_per_node {
-	/* Set when the memcg is created, then only read. */
+	/* Set when the memcg is created, then mostly read. */
 	__cacheline_group_begin_aligned(memcg_pn_read_mostly);
 	struct mem_cgroup	*memcg;		/* Back pointer, we cannot */
 						/* use container_of	   */
 
 	struct lruvec_stats_percpu __percpu	*lruvec_stats_percpu;
 	struct lruvec_stats			*lruvec_stats;
-	struct shrinker_info __rcu	*shrinker_info;
+	struct xarray			shrinker_units;
 	struct obj_cgroup __rcu		*objcg;
 
 	__cacheline_group_end_aligned(memcg_pn_read_mostly);
