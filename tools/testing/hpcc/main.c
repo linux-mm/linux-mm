@@ -81,6 +81,27 @@ int scnprintf(char *buf, size_t size, const char *fmt, ...)
 	return len < (int)size ? len : (int)size - 1;
 }
 
+/* Comma-separated integers, without the ranges of lib/cmdline.c. */
+char *get_options(const char *str, int nints, int *ints)
+{
+	char *end;
+	int i = 0;
+
+	while (i < nints - 1 && *str) {
+		long v = strtol(str, &end, 0);
+
+		if (end == str)
+			break;
+		ints[++i] = v;
+		str = end;
+		if (*str != ',')
+			break;
+		str++;
+	}
+	ints[0] = i;
+	return (char *)str;
+}
+
 static void hpcc_init_topology(unsigned int nr_cpus)
 {
 	nr_cpu_ids = nr_cpus;
@@ -414,6 +435,58 @@ static int run_case(unsigned int nr_cpus, unsigned long batch_size)
 	return nr_case_failures ? 1 : 0;
 }
 
+/* Tree shapes given with the arity boot parameter. */
+static const struct {
+	unsigned int nr_cpus;
+	const char *arity;
+	const char *shape;	/* Shape in use, NULL if the arity is invalid. */
+} test_arity[] = {
+	{ 16, "16", "16" },
+	{ 16, "4,4", "4,4" },
+	{ 16, "2,2,2,2", "2,2,2,2" },
+	{ 16, "4,2", NULL },		/* Covers 8 CPUs. */
+	{ 16, "4,8", NULL },		/* Covers 32 CPUs. */
+	{ 16, "4,4,1", NULL },		/* Fan-out of 1. */
+	{ 16, "4,3", NULL },		/* Not a power of 2. */
+	{ 16, "4,4x", NULL },		/* Trailing characters. */
+	{ 16, "-4,-4", NULL },
+	{ 17, "8,4", "8,4" },
+	{ 100, "128", "128" },
+	{ 192, "8,4,8", "8,4,8" },
+	{ 192, "2,2,2,2,2,2,2,2", NULL },	/* More than MAX_NR_LEVELS. */
+	{ 1024, "32,32", "32,32" },
+	{ 1, "2", NULL },
+};
+
+static int run_arity_case(unsigned int i)
+{
+	const char *expect = test_arity[i].shape;
+	char buf[SHAPE_BUF_SIZE];
+	int len;
+
+	nr_case_failures = 0;
+	hpcc_nr_warnings = 0;
+	tree_topology.config = NULL;
+	CHECK(!arity_param_set(test_arity[i].arity, NULL));
+	hpcc_init_topology(test_arity[i].nr_cpus);
+	arity_param = NULL;
+	CHECK(arity_param_set("16", NULL) == -EBUSY);
+	CHECK((tree_topology.config == &tree_topology.boot_config) == !!expect);
+	len = arity_param_get(buf, NULL);
+	CHECK(len > 0 && buf[len - 1] == '\n');
+	buf[len - 1] = '\0';
+	if (expect) {
+		CHECK(!strcmp(buf, expect));
+		test_saturated(2, 1);
+		test_saturated(32, -1);
+		test_random_walk(32, 20000);
+	}
+	CHECK(!hpcc_nr_warnings);
+	printf("%sok %d - arity nr_cpus=%u \"%s\" -> \"%s\"\n", nr_case_failures ? "not " : "",
+	       ++test_num, test_arity[i].nr_cpus, test_arity[i].arity, buf);
+	return nr_case_failures ? 1 : 0;
+}
+
 static int run_check_config(void)
 {
 	unsigned int nr_errors = percpu_counter_tree_check_config();
@@ -441,12 +514,15 @@ int main(int argc, char **argv)
 	if (argc == 2)
 		large = true;
 
-	nr_tests = 1 + ARRAY_SIZE(test_nr_cpus) * ARRAY_SIZE(test_batch_sizes);
+	nr_tests = 1 + ARRAY_SIZE(test_arity) +
+		   ARRAY_SIZE(test_nr_cpus) * ARRAY_SIZE(test_batch_sizes);
 	if (large)
 		nr_tests += ARRAY_SIZE(test_nr_cpus_large) * ARRAY_SIZE(test_batch_sizes);
 	printf("1..%u\n", nr_tests);
 
 	failed += run_check_config();
+	for (i = 0; i < ARRAY_SIZE(test_arity); i++)
+		failed += run_arity_case(i);
 	for (i = 0; i < ARRAY_SIZE(test_nr_cpus); i++)
 		for (j = 0; j < ARRAY_SIZE(test_batch_sizes); j++)
 			failed += run_case(test_nr_cpus[i], test_batch_sizes[j]);
