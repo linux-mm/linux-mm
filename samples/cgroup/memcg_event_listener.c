@@ -234,8 +234,11 @@ static void monitor_events(struct memcg_events *events)
 
 	for (;;) {
 		ret = poll(fds, ARRAY_SIZE(fds), -1);
-		if (ret < 0 && errno != EAGAIN)
-			err(EXIT_FAILURE, "Can't poll memcg events (%d)", ret);
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			err(EXIT_FAILURE, "Can't poll memcg events");
+		}
 
 		if (fds[0].revents & POLLERR)
 			err(EXIT_FAILURE, "Got POLLERR during monitor events");
