@@ -3,21 +3,30 @@
 #ifndef __NETMEM_PRIV_H
 #define __NETMEM_PRIV_H
 
+/* Use READ_ONCE() because every netmem_inc/dec_ref() checks netmem_is_pp(),
+ * and pp_magic shares a struct page union word with folio->lru.next which MM
+ * code may concurrently modify on page-cache folios in TX SKBs.
+ */
 static inline unsigned long netmem_get_pp_magic(netmem_ref netmem)
 {
-	return netmem_to_nmdesc(netmem)->pp_magic & ~PP_DMA_INDEX_MASK;
+	return READ_ONCE(netmem_to_nmdesc(netmem)->pp_magic) &
+	       ~PP_DMA_INDEX_MASK;
 }
 
 static inline void netmem_or_pp_magic(netmem_ref netmem, unsigned long pp_magic)
 {
-	netmem_to_nmdesc(netmem)->pp_magic |= pp_magic;
+	struct netmem_desc *nmdesc = netmem_to_nmdesc(netmem);
+
+	WRITE_ONCE(nmdesc->pp_magic, READ_ONCE(nmdesc->pp_magic) | pp_magic);
 }
 
 static inline void netmem_clear_pp_magic(netmem_ref netmem)
 {
-	WARN_ON_ONCE(netmem_to_nmdesc(netmem)->pp_magic & PP_DMA_INDEX_MASK);
+	struct netmem_desc *nmdesc = netmem_to_nmdesc(netmem);
 
-	netmem_to_nmdesc(netmem)->pp_magic = 0;
+	WARN_ON_ONCE(READ_ONCE(nmdesc->pp_magic) & PP_DMA_INDEX_MASK);
+
+	WRITE_ONCE(nmdesc->pp_magic, 0);
 }
 
 static inline bool netmem_is_pp(netmem_ref netmem)
@@ -27,7 +36,7 @@ static inline bool netmem_is_pp(netmem_ref netmem)
 
 static inline void netmem_set_pp(netmem_ref netmem, struct page_pool *pool)
 {
-	netmem_to_nmdesc(netmem)->pp = pool;
+	WRITE_ONCE(netmem_to_nmdesc(netmem)->pp, pool);
 }
 
 static inline void netmem_set_dma_addr(netmem_ref netmem,
@@ -43,7 +52,7 @@ static inline unsigned long netmem_get_dma_index(netmem_ref netmem)
 	if (WARN_ON_ONCE(netmem_is_net_iov(netmem)))
 		return 0;
 
-	magic = netmem_to_nmdesc(netmem)->pp_magic;
+	magic = READ_ONCE(netmem_to_nmdesc(netmem)->pp_magic);
 
 	return (magic & PP_DMA_INDEX_MASK) >> PP_DMA_INDEX_SHIFT;
 }
@@ -57,6 +66,6 @@ static inline void netmem_set_dma_index(netmem_ref netmem,
 		return;
 
 	magic = netmem_get_pp_magic(netmem) | (id << PP_DMA_INDEX_SHIFT);
-	netmem_to_nmdesc(netmem)->pp_magic = magic;
+	WRITE_ONCE(netmem_to_nmdesc(netmem)->pp_magic, magic);
 }
 #endif

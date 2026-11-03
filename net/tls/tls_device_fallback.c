@@ -397,8 +397,10 @@ static struct sk_buff *tls_sw_fallback(struct sock *sk, struct sk_buff *skb)
 	nskb = tls_enc_skb(tls_ctx, sg_out, sg_in, skb, sync_size, rcd_sn);
 
 put_sg:
-	while (resync_sgs)
-		put_page(sg_page(&sg_in[--resync_sgs]));
+	while (resync_sgs) {
+		resync_sgs--;
+		netmem_dec_ref(page_to_netmem(sg_page(&sg_in[resync_sgs])));
+	}
 	kfree(sg_in);
 free_orig:
 	if (nskb)

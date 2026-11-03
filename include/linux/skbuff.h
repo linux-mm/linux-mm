@@ -834,8 +834,6 @@ enum skb_tstamp_type {
  *	@head_frag: skb was allocated from page fragments,
  *		not allocated by kmalloc() or vmalloc().
  *	@pfmemalloc: skbuff was allocated from PFMEMALLOC reserves
- *	@pp_recycle: mark the packet for recycling instead of freeing (implies
- *		page_pool support on driver)
  *	@active_extensions: active extensions (skb_ext_id types)
  *	@ndisc_nodetype: router type (from link layer)
  *	@ooo_okay: allow the mapping of a socket to a queue to be changed
@@ -964,8 +962,7 @@ struct sk_buff {
 				fclone:2,
 				peeked:1,
 				head_frag:1,
-				pfmemalloc:1,
-				pp_recycle:1; /* page_pool recycle indicator */
+				pfmemalloc:1;
 #ifdef CONFIG_SKB_EXTENSIONS
 	__u8			active_extensions;
 #endif
@@ -5476,11 +5473,9 @@ static inline struct kcov_common_handle_id skb_get_kcov_handle(struct sk_buff *s
 	return skb->kcov_handle;
 }
 
+/* Deprecated: page_pool recycling is now determined per netmem. */
 static inline void skb_mark_for_recycle(struct sk_buff *skb)
 {
-#ifdef CONFIG_PAGE_POOL
-	skb->pp_recycle = 1;
-#endif
 }
 
 ssize_t skb_splice_from_iter(struct sk_buff *skb, struct iov_iter *iter,

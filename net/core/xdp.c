@@ -445,7 +445,7 @@ void __xdp_return(netmem_ref netmem, enum xdp_mem_type mem_type,
 					  napi_direct);
 		break;
 	case MEM_TYPE_PAGE_SHARED:
-		page_frag_free(__netmem_address(netmem));
+		netmem_dec_ref(netmem);
 		break;
 	case MEM_TYPE_PAGE_ORDER0:
 		put_page(__netmem_to_page(netmem));

@@ -2351,9 +2351,6 @@ static struct sk_buff *virtnet_skb_append_frag(struct receive_queue *rq,
 		if (unlikely(!nskb))
 			return NULL;
 
-		if (head_skb->pp_recycle)
-			skb_mark_for_recycle(nskb);
-
 		if (curr_skb == head_skb)
 			skb_shinfo(curr_skb)->frag_list = nskb;
 		else
@@ -2371,10 +2368,7 @@ static struct sk_buff *virtnet_skb_append_frag(struct receive_queue *rq,
 
 	offset = buf - page_address(page);
 	if (skb_can_coalesce(curr_skb, num_skb_frags, page, offset)) {
-		if (head_skb->pp_recycle)
-			page_pool_put_page(rq->page_pool, page, -1, true);
-		else
-			put_page(page);
+		netmem_dec_ref(page_to_netmem(page));
 		skb_coalesce_rx_frag(curr_skb, num_skb_frags - 1,
 				     len, truesize);
 	} else {

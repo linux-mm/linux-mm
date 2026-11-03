@@ -206,7 +206,7 @@ retry:
 			return ret;
 		}
 
-		put_page(p);
+		netmem_dec_ref(page_to_netmem(p));
 		sk_mem_uncharge(sk, sg->length);
 		sg = sg_next(sg);
 		if (!sg)
@@ -281,7 +281,7 @@ void tls_free_partial_record(struct sock *sk, struct tls_context *ctx)
 	struct scatterlist *sg;
 
 	for (sg = ctx->partially_sent_record; sg; sg = sg_next(sg)) {
-		put_page(sg_page(sg));
+		netmem_dec_ref(page_to_netmem(sg_page(sg)));
 		sk_mem_uncharge(sk, sg->length);
 	}
 	ctx->partially_sent_record = NULL;

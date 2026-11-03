@@ -825,9 +825,9 @@ static bool page_pool_recycle_in_cache(netmem_ref netmem,
 
 static bool __page_pool_page_can_be_recycled(netmem_ref netmem)
 {
-	return netmem_is_net_iov(netmem) ||
-	       (page_ref_count(netmem_to_page(netmem)) == 1 &&
-		!page_is_pfmemalloc(netmem_to_page(netmem)));
+	return page_pool_netmem_is_exclusively_owned(netmem) &&
+	       (netmem_is_net_iov(netmem) ||
+		!page_is_pfmemalloc(__netmem_to_page(netmem)));
 }
 
 /* If the page refcnt == 1, this will try to recycle the page.
@@ -853,6 +853,8 @@ __page_pool_put_page(struct page_pool *pool, netmem_ref netmem,
 	 */
 	if (likely(__page_pool_page_can_be_recycled(netmem))) {
 		/* Read barrier done in page_ref_count / READ_ONCE */
+		if (unlikely(!page_pool_ref_count(netmem)))
+			page_pool_fragment_netmem(netmem, 1);
 
 		page_pool_dma_sync_for_device(pool, netmem, dma_sync_size);
 
