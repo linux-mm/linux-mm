@@ -31,6 +31,8 @@
 #include <linux/kmemleak.h>
 #include <trace/events/cma.h>
 
+#include <asm/sections.h>
+
 #include "internal.h"
 #include "cma.h"
 #include "mm_init.h"
@@ -66,6 +68,16 @@ EXPORT_SYMBOL_GPL(cma_get_name);
 bool cma_has_dynamic_base(const struct cma *cma)
 {
 	return test_bit(CMA_DYNAMIC_BASE, &cma->flags);
+}
+
+static bool cma_overlaps_kernel_image(phys_addr_t base, phys_addr_t size)
+{
+	phys_addr_t end;
+
+	if (check_add_overflow(base, size, &end))
+		return true;
+
+	return base < __pa_symbol(_end) && __pa_symbol(_text) < end;
 }
 
 static unsigned long cma_bitmap_aligned_mask(const struct cma *cma,
@@ -294,6 +306,15 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	/* Sanity checks */
 	if (!size || !memblock_is_region_reserved(base, size))
 		return -EINVAL;
+
+	if (cma_overlaps_kernel_image(base, size)) {
+		phys_addr_t text = __pa_symbol(_text);
+		phys_addr_t end = __pa_symbol(_end);
+
+		pr_err("area %s (%pa, size %pa) overlaps kernel image [%pa-%pa]\n",
+		       name ?: "(unnamed)", &base, &size, &text, &end);
+		return -EBUSY;
+	}
 
 	/*
 	 * CMA uses CMA_MIN_ALIGNMENT_BYTES as alignment requirement which
