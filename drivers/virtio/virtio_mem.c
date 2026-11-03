@@ -158,6 +158,9 @@ struct virtio_mem {
 	/* If set, the driver is in SBM, otherwise in BBM. */
 	bool in_sbm;
 
+	/* Pages at the start of each Linux memory block hosting its memmap. */
+	unsigned long memmap_pages;
+
 	union {
 		struct {
 			/* Id of the first memory block of this device. */
@@ -995,21 +998,23 @@ static int virtio_mem_memory_notifier_cb(struct notifier_block *nb,
 	struct memory_notify *mhp = arg;
 	const unsigned long start = PFN_PHYS(mhp->start_pfn);
 	const unsigned long size = PFN_PHYS(mhp->nr_pages);
+	const unsigned long memmap_size = PFN_PHYS(vm->memmap_pages);
 	int rc = NOTIFY_OK;
-	unsigned long id;
+	unsigned long id, mb_start;
 
 	if (!virtio_mem_overlaps_range(vm, start, size))
 		return NOTIFY_DONE;
 
 	if (vm->in_sbm) {
 		id = virtio_mem_phys_to_mb_id(start);
+		mb_start = virtio_mem_mb_id_to_phys(id);
 		/*
 		 * In SBM, we add memory in separate memory blocks - we expect
-		 * it to be onlined/offlined in the same granularity. Bail out
-		 * if this ever changes.
+		 * it to be onlined/offlined in the same granularity, excluding
+		 * a self-hosted memmap. Bail out if this ever changes.
 		 */
-		if (WARN_ON_ONCE(size != memory_block_size_bytes() ||
-				 !IS_ALIGNED(start, memory_block_size_bytes())))
+		if (WARN_ON_ONCE(start != mb_start + memmap_size ||
+				 size != memory_block_size_bytes() - memmap_size))
 			return NOTIFY_BAD;
 	} else {
 		id = virtio_mem_phys_to_bb_id(vm, start);
@@ -1062,7 +1067,8 @@ static int virtio_mem_memory_notifier_cb(struct notifier_block *nb,
 		if (vm->in_sbm)
 			virtio_mem_sbm_notify_offline(vm, id);
 
-		atomic64_add(size, &vm->offline_size);
+		/* Adding/removing memory accounts the memmap as well. */
+		atomic64_add(size + memmap_size, &vm->offline_size);
 		/*
 		 * Trigger the workqueue. Now that we have some offline memory,
 		 * maybe we can handle pending unplug requests.
@@ -1077,7 +1083,7 @@ static int virtio_mem_memory_notifier_cb(struct notifier_block *nb,
 		if (vm->in_sbm)
 			virtio_mem_sbm_notify_online(vm, id, mhp->start_pfn);
 
-		atomic64_sub(size, &vm->offline_size);
+		atomic64_sub(size + memmap_size, &vm->offline_size);
 		/*
 		 * Start adding more memory once we onlined half of our
 		 * threshold. Don't trigger if it's possibly due to our action
