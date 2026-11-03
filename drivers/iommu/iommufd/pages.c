@@ -1426,10 +1426,17 @@ struct iopt_pages *iopt_alloc_file_pages(struct file *file,
 
 {
 	struct iopt_pages *pages;
+	int rc;
 
 	pages = iopt_alloc_pages(start_byte, length, writable);
 	if (IS_ERR(pages))
 		return pages;
+	/* Pins may be deferred until a domain or access is attached. */
+	rc = memfd_pin_folios_begin(file, writable);
+	if (rc) {
+		iopt_put_pages(pages);
+		return ERR_PTR(rc);
+	}
 	pages->file = get_file(file);
 	pages->start = start - start_byte;
 	pages->type = IOPT_ADDRESS_FILE;
@@ -1671,6 +1678,7 @@ void iopt_release_pages(struct kref *kref)
 		dma_buf_put(dmabuf);
 		WARN_ON(!list_empty(&pages->dmabuf.tracker));
 	} else if (pages->type == IOPT_ADDRESS_FILE) {
+		memfd_pin_folios_end(pages->file, pages->writable);
 		fput(pages->file);
 	}
 	mmdrop(pages->source_mm);
