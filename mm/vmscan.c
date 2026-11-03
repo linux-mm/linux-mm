@@ -5142,13 +5142,34 @@ retry:
 	return scanned;
 }
 
+static bool oldest_gen_thrashing(struct lruvec *lruvec, unsigned long *min_seq,
+				 int swappiness, unsigned long evictable)
+{
+	int tier;
+	unsigned long refaulted = 0;
+	struct lru_gen_folio *lrugen = &lruvec->lrugen;
+	int hist = lru_hist_from_seq(min_seq[LRU_GEN_FILE]);
+
+	if (swappiness == SWAPPINESS_ANON_ONLY)
+		return false;
+
+	for (tier = 0; tier < MAX_NR_TIERS; tier++)
+		refaulted += atomic_long_read(&lrugen->refaulted[hist][LRU_GEN_FILE][tier]);
+
+	return refaulted > evictable;
+}
+
 static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
-			     struct scan_control *sc, int swappiness)
+			     struct scan_control *sc, int swappiness,
+			     unsigned long evictable)
 {
 	DEFINE_MIN_SEQ(lruvec);
 
 	/* have to run aging, since eviction is not possible anymore */
 	if (evictable_min_seq(min_seq, swappiness) + MIN_NR_GENS > max_seq)
+		return true;
+
+	if (oldest_gen_thrashing(lruvec, min_seq, swappiness, evictable))
 		return true;
 
 	/* try to avoid aging, do gentle reclaim at the default priority */
@@ -5160,7 +5181,8 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq,
 }
 
 static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc,
-			   struct mem_cgroup *memcg, int swappiness)
+			   struct mem_cgroup *memcg, int swappiness,
+			   unsigned long *nr_evictable)
 {
 	unsigned long nr_to_scan, evictable;
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
@@ -5179,6 +5201,7 @@ static long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *sc,
 	}
 
 	evictable = lruvec_evictable_size(lruvec, swappiness);
+	*nr_evictable = evictable;
 
 	/* try to scrape all its memory if this memcg was deleted */
 	if (!mem_cgroup_online(memcg))
@@ -5229,10 +5252,11 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
 	bool need_rotate = false, should_age = false;
 	long nr_batch, nr_to_scan;
+	unsigned long evictable = 0;
 	int swappiness = get_swappiness(lruvec, sc);
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 
-	nr_to_scan = get_nr_to_scan(lruvec, sc, memcg, swappiness);
+	nr_to_scan = get_nr_to_scan(lruvec, sc, memcg, swappiness, &evictable);
 	while (nr_to_scan > 0) {
 		int delta;
 		DEFINE_MAX_SEQ(lruvec);
@@ -5242,7 +5266,7 @@ static bool try_to_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 			break;
 		}
 
-		if (should_run_aging(lruvec, max_seq, sc, swappiness)) {
+		if (should_run_aging(lruvec, max_seq, sc, swappiness, evictable)) {
 			if (try_to_inc_max_seq(lruvec, max_seq, swappiness, false))
 				need_rotate = true;
 			should_age = true;
