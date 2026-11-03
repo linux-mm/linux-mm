@@ -55,6 +55,19 @@ const char *cma_get_name(const struct cma *cma)
 }
 EXPORT_SYMBOL_GPL(cma_get_name);
 
+/**
+ * cma_has_dynamic_base() - was the area placed at an address CMA chose?
+ * @cma: Contiguous memory region
+ *
+ * An area without a dynamic base was placed where something outside the kernel
+ * said it should go, typically a device tree reserved-memory node, and so lands
+ * at the same address in every kernel booted with that description.
+ */
+bool cma_has_dynamic_base(const struct cma *cma)
+{
+	return test_bit(CMA_DYNAMIC_BASE, &cma->flags);
+}
+
 static unsigned long cma_bitmap_aligned_mask(const struct cma *cma,
 					     unsigned int align_order)
 {
@@ -519,6 +532,8 @@ static int __init __cma_declare_contiguous_nid(phys_addr_t *basep,
 	}
 
 	(*res_cma)->nid = nid;
+	if (!fixed)
+		set_bit(CMA_DYNAMIC_BASE, &(*res_cma)->flags);
 	*basep = base;
 
 	return 0;
@@ -708,6 +723,7 @@ int __init cma_declare_contiguous_multi(phys_addr_t total_size,
 
 	cma->nranges = nr;
 	cma->nid = nid;
+	set_bit(CMA_DYNAMIC_BASE, &cma->flags);
 	*res_cma = cma;
 
 out:
