@@ -2705,18 +2705,24 @@ bool slab_free_hook(struct kmem_cache *s, void *x, bool init,
 
 	kmsan_slab_free(s, x);
 
+	/*
+	 * debug_locks, KCSAN, KASAN may acquire a spinlock to report a bug,
+	 * but otherwise don't acquire any lock. Take the risk of deadlock
+	 * for reporting.
+	 */
+	debug_check_no_locks_freed(x, s->object_size);
+
+	/* Use KCSAN to help debug racy use-after-free. */
+	if (!still_accessible)
+		__kcsan_check_access(x, s->object_size,
+				     KCSAN_ACCESS_WRITE | KCSAN_ACCESS_ASSERT);
+
 	/* Hooks that acquire locks or kmalloc_nolock() skips alloc hook counterpart */
 	if (likely(allow_spin)) {
 		kmemleak_free_recursive(x, s->flags);
-		debug_check_no_locks_freed(x, s->object_size);
 
 		if (!(s->flags & SLAB_DEBUG_OBJECTS))
 			debug_check_no_obj_freed(x, s->object_size);
-
-		/* Use KCSAN to help debug racy use-after-free. */
-		if (!still_accessible)
-			__kcsan_check_access(x, s->object_size,
-					     KCSAN_ACCESS_WRITE | KCSAN_ACCESS_ASSERT);
 
 		if (kfence_free(x))
 			return false;
@@ -2725,13 +2731,6 @@ bool slab_free_hook(struct kmem_cache *s, void *x, bool init,
 	/*
 	 * Give KASAN a chance to notice an invalid free operation before we
 	 * modify the object.
-	 *
-	 * If KASAN finds a bug it will do kasan_report_invalid_free() which
-	 * will call raw_spin_lock_irqsave() which is technically unsafe from
-	 * NMI, but take chance and report kernel bug. The sequence of
-	 * kasan_report_invalid_free() -> raw_spin_lock_irqsave() -> NMI
-	 * -> kfree_nolock() -> kasan_report_invalid_free() on the same CPU
-	 *  is double buggy and deserves to deadlock.
 	 */
 	if (kasan_slab_pre_free(s, x))
 		return false;
