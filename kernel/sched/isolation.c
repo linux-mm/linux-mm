@@ -10,6 +10,7 @@
 #include <linux/sched/isolation.h>
 #include <linux/llist.h>
 #include <linux/pci.h>
+#include <linux/swap.h>
 #include "sched.h"
 
 enum hk_flags {
@@ -149,6 +150,13 @@ int housekeeping_update(struct cpumask *isol_mask)
 	pci_probe_flush_workqueue();
 	mem_cgroup_flush_workqueue();
 	vmstat_flush_workqueue();
+	/*
+	 * Folios batched on the newly isolated CPUs before the update would
+	 * otherwise linger in their per-CPU LRU batches, since isolated CPUs
+	 * stop batching from now on (see lru_batching_bypassed()) and remote
+	 * draining is exactly what must be avoided on them.
+	 */
+	lru_add_drain_all();
 
 	err = workqueue_unbound_housekeeping_update(housekeeping_cpumask(HK_TYPE_DOMAIN));
 	WARN_ON_ONCE(err < 0);
