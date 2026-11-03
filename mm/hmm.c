@@ -21,6 +21,7 @@
 #include <linux/pagemap.h>
 #include <linux/leafops.h>
 #include <linux/hugetlb.h>
+#include <linux/migrate.h>
 #include <linux/memremap.h>
 #include <linux/sched/mm.h>
 #include <linux/jump_label.h>
@@ -28,15 +29,23 @@
 #include <linux/pci-p2pdma.h>
 #include <linux/mmu_notifier.h>
 #include <linux/memory_hotplug.h>
+#include <asm/tlbflush.h>
 
 #include "internal.h"
 
 struct hmm_vma_walk {
-	struct hmm_range	*range;
-	bool			*locked;
-	unsigned long		last;
-	unsigned long		end;
-	unsigned int		required_fault;
+	struct mmu_notifier_range	mmu_range;
+	/* Set once mmu_range is armed with mmu_notifier_invalidate_range_start() */
+	bool				mmu_armed;
+	struct vm_area_struct		*vma;
+	struct hmm_range		*range;
+	unsigned long			start;
+	unsigned long			end;
+	unsigned long			last;
+	/* fault and lock drop related fields */
+	bool				*mmlocked;
+	unsigned long			fault_end;
+	unsigned int			required_fault;
 };
 
 /*
@@ -95,7 +104,7 @@ static int hmm_record_fault(unsigned long addr, unsigned long end,
 
 	WARN_ON_ONCE(!required_fault);
 	hmm_vma_walk->last = addr;
-	hmm_vma_walk->end = end;
+	hmm_vma_walk->fault_end = end;
 	hmm_vma_walk->required_fault = required_fault;
 	return HMM_FAULT_PENDING;
 }
@@ -176,7 +185,7 @@ static int hmm_vma_walk_hole(unsigned long addr, unsigned long end,
 	required_fault =
 		hmm_range_need_fault(hmm_vma_walk, hmm_pfns, npages, 0);
 	if (!walk->vma) {
-		if (required_fault)
+		if (required_fault || hmm_select_migrate(range))
 			return -EFAULT;
 		return hmm_pfns_fill(addr, end, range, HMM_PFN_ERROR);
 	}
@@ -400,6 +409,73 @@ static int hmm_vma_handle_absent_pmd(struct mm_walk *walk, unsigned long start,
 }
 #endif  /* CONFIG_ARCH_HAS_PMD_SOFTLEAVES */
 
+static int hmm_vma_capture_migrate_range(unsigned long start,
+					 unsigned long end,
+					 struct mm_walk *walk)
+{
+	struct hmm_vma_walk *hmm_vma_walk = walk->private;
+	struct hmm_range *range = hmm_vma_walk->range;
+	struct vm_area_struct *vma = walk->vma;
+
+	if (!hmm_select_migrate(range))
+		return 0;
+
+	if (!hmm_vma_walk->vma) {
+		/* Same vma restrictions as migrate_vma_setup() */
+		if (!vma_is_mm_backed(vma) || vma_is_hugetlb(vma) ||
+		    vma_is_dax(vma))
+			return -EINVAL;
+		/*
+		 * migrate_vma covers the whole range and indexes src[] from
+		 * range->start, so a single vma must cover the whole range.
+		 */
+		if (vma->vm_start > range->start ||
+		    vma->vm_end < range->end)
+			return -ERANGE;
+		hmm_vma_walk->vma = vma;
+		hmm_vma_walk->start = start;
+		hmm_vma_walk->end = end;
+	}
+
+	/*
+	 * The invalidation is closed before faulting, see
+	 * hmm_range_fault_locked(), so (re)open it for each walk.
+	 */
+	if (!hmm_vma_walk->mmu_armed) {
+		mmu_notifier_range_init_owner(&hmm_vma_walk->mmu_range, MMU_NOTIFY_MIGRATE, 0,
+					      walk->vma->vm_mm, hmm_vma_walk->start,
+					      hmm_vma_walk->end, range->dev_private_owner);
+		mmu_notifier_invalidate_range_start(&hmm_vma_walk->mmu_range);
+		hmm_vma_walk->mmu_armed = true;
+	}
+
+	return 0;
+}
+
+static void hmm_vma_migrate_disarm(struct hmm_vma_walk *hmm_vma_walk)
+{
+	if (hmm_vma_walk->mmu_armed) {
+		mmu_notifier_invalidate_range_end(&hmm_vma_walk->mmu_range);
+		hmm_vma_walk->mmu_armed = false;
+	}
+}
+
+static void hmm_vma_post_range_fault(struct hmm_vma_walk *hmm_vma_walk)
+{
+	struct hmm_range *range = hmm_vma_walk->range;
+
+	/*
+	 * The migrate_vma path has the following initialized. For the fault
+	 * path fill them in, also when the walk failed before capturing the
+	 * vma, so migrate_hmm_range_setup() always sees the range.
+	 */
+	if (hmm_select_migrate(range) && range->notifier)
+		hmm_fill_migrate_vma(range,
+				     hmm_vma_walk->vma,
+				     range->start, range->end);
+	hmm_vma_migrate_disarm(hmm_vma_walk);
+}
+
 static int hmm_vma_walk_pmd(pmd_t *pmdp,
 			    unsigned long start,
 			    unsigned long end,
@@ -594,10 +670,13 @@ static int hmm_vma_walk_test(unsigned long start, unsigned long end,
 	struct hmm_vma_walk *hmm_vma_walk = walk->private;
 	struct hmm_range *range = hmm_vma_walk->range;
 	struct vm_area_struct *vma = walk->vma;
+	/* Migration without faulting moves pages regardless of VM_READ */
+	bool migrate_only = hmm_select_migrate(range) &&
+			    !(range->default_flags & HMM_PFN_REQ_FAULT);
 
 	if (!(vma->vm_flags & (VM_IO | VM_PFNMAP)) &&
-	    vma->vm_flags & VM_READ)
-		return 0;
+	    (vma->vm_flags & VM_READ || migrate_only))
+		return hmm_vma_capture_migrate_range(start, end, walk);
 
 	/*
 	 * vma ranges that don't have struct page backing them or map I/O
@@ -607,10 +686,11 @@ static int hmm_vma_walk_test(unsigned long start, unsigned long end,
 	 * allow write access either. HMM does not support architectures that
 	 * allow write without read.
 	 *
-	 * If a fault is requested for an unsupported range then it is a hard
-	 * failure.
+	 * If a fault or migration is requested for an unsupported range then
+	 * it is a hard failure.
 	 */
-	if (hmm_range_need_fault(hmm_vma_walk,
+	if (hmm_select_migrate(range) ||
+	    hmm_range_need_fault(hmm_vma_walk,
 				 range->hmm_pfns +
 					 ((start - range->start) >> PAGE_SHIFT),
 				 (end - start) >> PAGE_SHIFT, 0))
@@ -646,12 +726,12 @@ static int hmm_do_fault(struct mm_struct *mm,
 			struct hmm_vma_walk *hmm_vma_walk)
 {
 	unsigned long addr = hmm_vma_walk->last;
-	unsigned long end = hmm_vma_walk->end;
+	unsigned long end = hmm_vma_walk->fault_end;
 	unsigned int required_fault = hmm_vma_walk->required_fault;
 	unsigned int fault_flags = FAULT_FLAG_REMOTE;
 	struct vm_area_struct *vma;
 
-	if (hmm_vma_walk->locked)
+	if (hmm_vma_walk->mmlocked)
 		fault_flags |= FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
 
 	vma = vma_lookup(mm, addr);
@@ -670,8 +750,8 @@ static int hmm_do_fault(struct mm_struct *mm,
 		ret = handle_mm_fault(vma, addr, fault_flags, NULL);
 
 		if (ret & (VM_FAULT_COMPLETED | VM_FAULT_RETRY)) {
-			if (hmm_vma_walk->locked)    /* needed by sparse */
-				*hmm_vma_walk->locked = false;
+			if (hmm_vma_walk->mmlocked)    /* needed by sparse */
+				*hmm_vma_walk->mmlocked = false;
 			else
 				WARN_ON_ONCE(1);    /* broken fault handler */
 			return HMM_FAULT_UNLOCKED;
@@ -694,19 +774,45 @@ static int hmm_range_fault_locked(struct hmm_range *range, bool *locked)
 {
 	struct hmm_vma_walk hmm_vma_walk = {
 		.range = range,
-		.locked = locked,
+		.mmlocked = locked,
 		.last = range->start,
 	};
-	struct mm_struct *mm = range->notifier->mm;
+	/*
+	 *  Could be serving a device fault or come from migrate
+	 *  entry point. For the former we have not resolved the vma
+	 *  yet, and the latter we don't have a notifier (but have a vma).
+	 *
+	 */
+	struct mm_struct *mm = hmm_range_fault_mm(range);
 	int ret;
+
+	/* Migration is incompatible with mmap lock drop */
+	if (locked && hmm_select_migrate(range))
+		return -EINVAL;
+
+	/*
+	 * Migration takes its requests only from default_flags, so the input
+	 * pfns carry nothing. Clear them so that collected entries can be
+	 * told apart reliably during the walk and on rollback.
+	 */
+	if (hmm_select_migrate(range)) {
+		WARN_ON_ONCE(range->pfn_flags_mask);
+		WARN_ON_ONCE(range->dev_private_owner !=
+			     range->migrate->pgmap_owner);
+		memset(range->hmm_pfns, 0,
+		       ((range->end - range->start) >> PAGE_SHIFT) *
+		       sizeof(*range->hmm_pfns));
+	}
 
 	mmap_assert_locked(mm);
 
 	do {
 		/* If range is no longer valid force retry. */
-		if (mmu_interval_check_retry(range->notifier,
-					     range->notifier_seq))
-			return -EBUSY;
+		if (range->notifier && mmu_interval_check_retry(range->notifier,
+								range->notifier_seq)) {
+			ret =  -EBUSY;
+			break;
+		}
 		ret = walk_page_range(mm, hmm_vma_walk.last, range->end,
 				      &hmm_walk_ops, &hmm_vma_walk);
 		/*
@@ -718,6 +824,13 @@ static int hmm_range_fault_locked(struct hmm_range *range, bool *locked)
 		 * now-present entries.
 		 */
 		if (ret == HMM_FAULT_PENDING) {
+			/*
+			 * Don't hold the migrate invalidation across a
+			 * possibly sleeping fault. Already collected entries
+			 * stay locked and referenced, and the next walk
+			 * reopens the invalidation.
+			 */
+			hmm_vma_migrate_disarm(&hmm_vma_walk);
 			ret = hmm_do_fault(mm, &hmm_vma_walk);
 			if (ret == HMM_FAULT_UNLOCKED) {
 				if (fatal_signal_pending(current))
@@ -732,6 +845,8 @@ static int hmm_range_fault_locked(struct hmm_range *range, bool *locked)
 		 * output, and all >= are still at their input values.
 		 */
 	} while (ret == -EBUSY);
+
+	hmm_vma_post_range_fault(&hmm_vma_walk);
 	return ret;
 }
 
