@@ -496,7 +496,33 @@ static int hmm_vma_handle_absent_pmd(struct mm_walk *walk, unsigned long start,
 
 #ifdef CONFIG_DEVICE_MIGRATION
 /**
- * migrate_vma_split_folio() - Helper function to split a THP folio
+ * __migrate_vma_split_folio() - split a locked folio for migration
+ * @folio: the folio to split, locked and referenced by the caller
+ * @fault_page: fault page if any
+ *
+ * The fault folio is split at @fault_page, so the caller's lock and reference
+ * stay on the folio containing @fault_page. For any other folio our lock and
+ * reference are dropped, whether or not the split succeeds.
+ *
+ * Returns 0 on success.
+ */
+static int __migrate_vma_split_folio(struct folio *folio,
+				     struct page *fault_page)
+{
+	int ret;
+
+	if (fault_page && folio == page_folio(fault_page))
+		return split_huge_page(fault_page);
+
+	/* Someone else may have split it while we waited for the lock */
+	ret = folio_test_large(folio) ? split_folio(folio) : 0;
+	folio_unlock(folio);
+	folio_put(folio);
+	return ret;
+}
+
+/**
+ * migrate_vma_split_folio() - drop the pte lock and split a THP folio
  * @folio: the folio to split
  * @fault_page: struct page associated with the fault if any
  * @hmm_vma_walk: walk in progress
@@ -511,9 +537,7 @@ static int migrate_vma_split_folio(struct folio *folio,
 				   struct hmm_vma_walk *hmm_vma_walk,
 				   pte_t *ptep)
 {
-	int ret;
 	struct folio *fault_folio = fault_page ? page_folio(fault_page) : NULL;
-	struct folio *new_fault_folio = NULL;
 
 	/*
 	 * Take the reference while still holding the PTE lock, so the folio
@@ -530,34 +554,7 @@ static int migrate_vma_split_folio(struct folio *folio,
 	if (folio != fault_folio)
 		folio_lock(folio);
 
-	ret = split_folio(folio);
-	if (ret) {
-		if (folio != fault_folio) {
-			folio_unlock(folio);
-			folio_put(folio);
-		}
-		return ret;
-	}
-
-	new_fault_folio = fault_page ? page_folio(fault_page) : NULL;
-
-	/*
-	 * Ensure the lock is held on the correct
-	 * folio after the split
-	 */
-	if (!new_fault_folio) {
-		folio_unlock(folio);
-		folio_put(folio);
-	} else if (folio != new_fault_folio) {
-		if (new_fault_folio != fault_folio) {
-			folio_get(new_fault_folio);
-			folio_lock(new_fault_folio);
-		}
-		folio_unlock(folio);
-		folio_put(folio);
-	}
-
-	return 0;
+	return __migrate_vma_split_folio(folio, fault_page);
 }
 
 static int hmm_vma_handle_migrate_prepare_pmd(const struct mm_walk *walk,
@@ -566,8 +563,127 @@ static int hmm_vma_handle_migrate_prepare_pmd(const struct mm_walk *walk,
 					      unsigned long end,
 					      unsigned long *hmm_pfn)
 {
-	// TODO: implement migration entry insertion
-	return 0;
+	struct hmm_vma_walk *hmm_vma_walk = walk->private;
+	struct hmm_range *range = hmm_vma_walk->range;
+	struct migrate_vma *migrate = range->migrate;
+	struct folio *fault_folio = NULL;
+	enum migrate_vma_info minfo;
+	struct folio *folio;
+	unsigned long i;
+	int r = 0;
+
+	// Do we want to migrate at all?
+	minfo = hmm_select_migrate(range);
+	if (!minfo)
+		return r;
+
+	WARN_ON_ONCE(!migrate);
+	HMM_ASSERT_PMD_LOCKED(hmm_vma_walk, true);
+
+	fault_folio = migrate->fault_page ?
+		page_folio(migrate->fault_page) : NULL;
+
+	if (pmd_none(*pmdp))
+		return hmm_pfns_fill(start, end, hmm_vma_walk, 0);
+
+	/* Like at the pte level, NUMA hinting (protnone) pmds are migrated */
+	if (!(hmm_pfn[0] & HMM_PFN_VALID) &&
+	    !(pmd_trans_huge(*pmdp) && pmd_protnone(*pmdp)))
+		goto out;
+
+	if (pmd_trans_huge(*pmdp)) {
+		if (!(minfo & MIGRATE_VMA_SELECT_SYSTEM))
+			goto out;
+
+		folio = pmd_folio(*pmdp);
+		if (is_huge_zero_folio(folio))
+			return hmm_pfns_fill(start, end, hmm_vma_walk, 0);
+
+	} else if (!pmd_present(*pmdp)) {
+		const softleaf_t entry = softleaf_from_pmd(*pmdp);
+
+		if (!softleaf_is_device_private(entry))
+			goto out;
+
+		if (!(minfo & MIGRATE_VMA_SELECT_DEVICE_PRIVATE))
+			goto out;
+
+		folio = softleaf_to_folio(entry);
+		if (folio->pgmap->owner != migrate->pgmap_owner)
+			goto out;
+	} else {
+		hmm_vma_walk->last = start;
+		return -EBUSY;
+	}
+
+	folio_get(folio);
+
+	/* Can't lock it: not migrated, the valid pfns stay as reported */
+	if (folio != fault_folio && unlikely(!folio_trylock(folio))) {
+		folio_put(folio);
+		return 0;
+	}
+
+	/* Swapcache folio still referenced elsewhere: see the pte level */
+	if (folio_test_swapcache(folio) && !folio_free_swap(folio)) {
+		if (folio != fault_folio)
+			folio_unlock(folio);
+		folio_put(folio);
+		return 0;
+	}
+
+	if (thp_migration_supported() &&
+	    (migrate->flags & MIGRATE_VMA_SELECT_COMPOUND) &&
+	    (IS_ALIGNED(start, HPAGE_PMD_SIZE) &&
+	     IS_ALIGNED(end, HPAGE_PMD_SIZE))) {
+		struct page_vma_mapped_walk pvmw = {
+			.ptl = hmm_vma_walk->ptl,
+			.address = start,
+			.pmd = pmdp,
+			.vma = walk->vma,
+		};
+
+		hmm_pfn[0] |= HMM_PFN_MIGRATE | HMM_PFN_COMPOUND;
+
+		r = set_pmd_migration_entry(&pvmw, folio_page(folio, 0));
+		if (r) {
+			hmm_pfn[0] &= ~(HMM_PFN_MIGRATE | HMM_PFN_COMPOUND);
+			goto split;	/* fall back to splitting the pmd */
+		}
+		/* Collected; a protnone pmd was not reported valid before */
+		hmm_pfn[0] |= HMM_PFN_VALID;
+		for (i = 1, start += PAGE_SIZE; start < end; start += PAGE_SIZE, i++)
+			hmm_pfn[i] &= HMM_PFN_INOUT_FLAGS;
+
+	} else {
+		goto split;		/* fall back to splitting the pmd */
+	}
+
+out:
+	return r;
+
+split:
+	spin_unlock(hmm_vma_walk->ptl);
+	hmm_vma_walk->pmdlocked = false;
+
+	/*
+	 * folio_get() above took an extra reference. For the fault folio the
+	 * caller still holds a reference and the lock, which is the
+	 * precondition of __migrate_vma_split_folio(), so drop the extra one.
+	 */
+	if (folio == fault_folio)
+		folio_put(folio);
+
+	/* Split failed: not migrated, the valid pfns stay as reported */
+	if (__migrate_vma_split_folio(folio, migrate->fault_page))
+		return 0;
+
+	/* Re-walked as PTEs from start: drop the pmd-level output */
+	for (i = 0; i < (end - start) >> PAGE_SHIFT; i++)
+		hmm_pfn[i] &= HMM_PFN_INOUT_FLAGS;
+
+	hmm_vma_walk->last = start;
+	return -EBUSY;
 }
 
 /*
@@ -1016,6 +1132,11 @@ again:
 			hmm_vma_walk->pmdlocked = false;
 		}
 
+		/*
+		 * hmm_vma_handle_migrate_prepare_pmd() splits the huge pmd in
+		 * place when needed and returns -EBUSY to re-walk the range as
+		 * PTEs.
+		 */
 		return r;
 	}
 
