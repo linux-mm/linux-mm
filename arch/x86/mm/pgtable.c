@@ -797,6 +797,7 @@ pmd_t pmd_mkwrite(pmd_t pmd, struct vm_area_struct *vma)
 	return pmd_clear_saveddirty(pmd);
 }
 
+#ifdef CONFIG_DEBUG_VM
 void arch_check_zapped_pte(struct vm_area_struct *vma, pte_t pte)
 {
 	/*
@@ -822,3 +823,4 @@ void arch_check_zapped_pud(struct vm_area_struct *vma, pud_t pud)
 	/* See note in arch_check_zapped_pte() */
 	VM_WARN_ON_ONCE(!(vma->vm_flags & VM_SHADOW_STACK) && pud_shstk(pud));
 }
+#endif

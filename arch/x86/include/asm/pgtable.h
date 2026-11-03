@@ -1666,6 +1666,7 @@ static inline bool arch_has_pfn_modify_check(void)
 	return boot_cpu_has_bug(X86_BUG_L1TF);
 }
 
+#ifdef CONFIG_DEBUG_VM
 #define arch_check_zapped_pte arch_check_zapped_pte
 void arch_check_zapped_pte(struct vm_area_struct *vma, pte_t pte);
 
@@ -1674,6 +1675,7 @@ void arch_check_zapped_pmd(struct vm_area_struct *vma, pmd_t pmd);
 
 #define arch_check_zapped_pud arch_check_zapped_pud
 void arch_check_zapped_pud(struct vm_area_struct *vma, pud_t pud);
+#endif
 
 #ifdef CONFIG_XEN_PV
 #define arch_has_hw_nonleaf_pmd_young arch_has_hw_nonleaf_pmd_young
