@@ -1391,6 +1391,21 @@ bool mhp_supports_memmap_on_memory(void)
 }
 EXPORT_SYMBOL_GPL(mhp_supports_memmap_on_memory);
 
+/**
+ * mhp_memmap_on_memory_nr_pages - self-hosted memmap pages per memory block
+ *
+ * Return: the number of pages at the start of each memory block that host its
+ * memmap when adding memory with MHP_MEMMAP_ON_MEMORY, including padding for
+ * "memory_hotplug.memmap_on_memory=force"; or 0 if the flag would be ignored.
+ */
+unsigned long mhp_memmap_on_memory_nr_pages(void)
+{
+	if (!mhp_supports_memmap_on_memory())
+		return 0;
+	return memory_block_memmap_on_memory_pages();
+}
+EXPORT_SYMBOL_GPL(mhp_memmap_on_memory_nr_pages);
+
 static void altmap_free(struct vmem_altmap *altmap)
 {
 	WARN_ONCE(altmap->alloc, "Altmap not fully unmapped");
