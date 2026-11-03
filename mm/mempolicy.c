@@ -78,6 +78,8 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/mempolicy.h>
+#include <linux/capability.h>
+#include <linux/bpf.h>
 #include <linux/pagewalk.h>
 #include <linux/highmem.h>
 #include <linux/hugetlb.h>
@@ -103,6 +105,7 @@
 #include <linux/proc_fs.h>
 #include <linux/memory-tiers.h>
 #include <linux/migrate.h>
+#include <linux/module.h>
 #include <linux/ksm.h>
 #include <linux/rmap.h>
 #include <linux/security.h>
@@ -245,7 +248,7 @@ static struct weighted_interleave_state *wi_task_state_rcu(void)
 	return NULL;
 }
 
-void weighted_interleave_cgroup_free(struct cgroup *cgrp)
+static void wi_cgroup_clear_weights(struct cgroup *cgrp)
 {
 	struct weighted_interleave_state *old_wi_state;
 
@@ -260,6 +263,202 @@ void weighted_interleave_cgroup_free(struct cgroup *cgrp)
 
 	wi_state_retire(old_wi_state);
 }
+
+void weighted_interleave_cgroup_free(struct cgroup *cgrp)
+{
+	wi_cgroup_clear_weights(cgrp);
+}
+
+static struct weighted_interleave_state *
+wi_effective_state_cgroup_rcu(struct cgroup *cgrp)
+{
+	struct weighted_interleave_state *state;
+
+	state = wi_cgroup_state_rcu(cgrp);
+	if (state)
+		return state;
+	return rcu_dereference(wi_state);
+}
+
+static void wi_cgroup_set_state(struct cgroup *cgrp,
+				struct weighted_interleave_state *new_wi_state,
+				u32 nid, u8 weight)
+{
+	struct weighted_interleave_state *old_wi_state;
+
+	mutex_lock(&wi_cgroup_lock);
+	old_wi_state = rcu_dereference_protected(cgrp->wi_state,
+						 lockdep_is_held(&wi_cgroup_lock));
+	rcu_read_lock();
+	wi_state_init_from(new_wi_state, wi_effective_state_cgroup_rcu(cgrp));
+	rcu_read_unlock();
+
+	new_wi_state->mode_auto = false;
+	new_wi_state->iw_table[nid] = weight;
+	rcu_assign_pointer(cgrp->wi_state, new_wi_state);
+	if (!old_wi_state)
+		static_branch_inc(&wi_cgroup_weights_set);
+	mutex_unlock(&wi_cgroup_lock);
+
+	wi_state_retire(old_wi_state);
+}
+
+static bool wi_valid_nid(u32 nid)
+{
+	return nid < nr_node_ids && node_state(nid, N_MEMORY);
+}
+
+static int wi_cgroup_get(u64 cgid, struct cgroup **cgrpp)
+{
+	struct cgroup *cgrp;
+
+	cgrp = __cgroup_get_from_id(cgid);
+	if (IS_ERR(cgrp))
+		return PTR_ERR(cgrp);
+
+	if (!cgroup_on_dfl(cgrp)) {
+		cgroup_put(cgrp);
+		return -ENOENT;
+	}
+
+	*cgrpp = cgrp;
+	return 0;
+}
+
+__bpf_kfunc_start_defs();
+
+/**
+ * bpf_wi_set_weight - Set one weighted-interleave node weight for a cgroup.
+ * @cgid: cgroup id that must name a cgroup in default cgroup-v2 hierarchy
+ * @nid: memory NUMA node id to update
+ * @weight: new weight in range [1, 255]
+ *
+ * The first update creates an explicit override for @cgid by copying the
+ * nearest ancestor override, or the system-wide weighted-interleave weights
+ * if no ancestor has one. Nodes not named by the first update become local
+ * values in that table and do not keep tracking ancestor changes. Later
+ * updates modify the cgroup-local table. The override affects new
+ * MPOL_WEIGHTED_INTERLEAVE allocations made by tasks in the cgroup and
+ * descendants that do not have a nearer override.
+ *
+ * Return: 0 on success, -EINVAL for an invalid node or weight, -ENOENT
+ * when @cgid does not name a cgroup in the default cgroup-v2 hierarchy,
+ * -EPERM for insufficient privilege, or -ENOMEM when the override table
+ * cannot be allocated.
+ */
+__bpf_kfunc int bpf_wi_set_weight(u64 cgid, u32 nid, u32 weight)
+{
+	struct weighted_interleave_state *new_wi_state;
+	struct cgroup *cgrp;
+	int ret;
+
+	if (!wi_valid_nid(nid) || weight == 0 || weight > U8_MAX)
+		return -EINVAL;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	new_wi_state = wi_state_alloc();
+	if (!new_wi_state)
+		return -ENOMEM;
+
+	ret = wi_cgroup_get(cgid, &cgrp);
+	if (ret) {
+		kfree(new_wi_state);
+		return ret;
+	}
+
+	wi_cgroup_set_state(cgrp, new_wi_state, nid, weight);
+	cgroup_put(cgrp);
+	return 0;
+}
+
+/**
+ * bpf_wi_clear_weights - Remove a cgroup weighted-interleave override.
+ * @cgid: cgroup id that must name a cgroup in default cgroup-v2 hierarchy
+ *
+ * After clearing, the cgroup inherits the nearest ancestor override, or the
+ * system-wide weighted-interleave weights if no ancestor has an override.
+ *
+ * Return: 0 on success, -ENOENT when @cgid does not name a cgroup in
+ * the default cgroup-v2 hierarchy, or -EPERM for insufficient
+ * privilege.
+ */
+__bpf_kfunc int bpf_wi_clear_weights(u64 cgid)
+{
+	struct cgroup *cgrp;
+	int ret;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	ret = wi_cgroup_get(cgid, &cgrp);
+	if (ret)
+		return ret;
+
+	wi_cgroup_clear_weights(cgrp);
+	cgroup_put(cgrp);
+	return 0;
+}
+
+/**
+ * bpf_wi_get_weight - Read the effective weighted-interleave node weight.
+ * @cgid: cgroup id that must name a cgroup in default cgroup-v2 hierarchy
+ * @nid: memory NUMA node id to query
+ *
+ * Return: the effective weight, -EINVAL for an invalid node, -ENOENT when
+ * @cgid does not name a cgroup in the default cgroup-v2 hierarchy, or
+ * -EPERM for insufficient privilege.
+ */
+__bpf_kfunc s64 bpf_wi_get_weight(u64 cgid, u32 nid)
+{
+	struct weighted_interleave_state *state;
+	struct cgroup *cgrp;
+	s64 weight;
+	int ret;
+
+	if (!wi_valid_nid(nid))
+		return -EINVAL;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	ret = wi_cgroup_get(cgid, &cgrp);
+	if (ret)
+		return ret;
+
+	rcu_read_lock();
+	state = wi_effective_state_cgroup_rcu(cgrp);
+	weight = wi_state_weight(state, nid);
+	rcu_read_unlock();
+
+	cgroup_put(cgrp);
+	return weight;
+}
+
+__bpf_kfunc_end_defs();
+
+__ADDRESSABLE(bpf_wi_set_weight)
+__ADDRESSABLE(bpf_wi_clear_weights)
+__ADDRESSABLE(bpf_wi_get_weight)
+
+BTF_KFUNCS_START(wi_kfunc_ids)
+BTF_ID_FLAGS(func, bpf_wi_set_weight, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_wi_clear_weights, KF_SLEEPABLE)
+BTF_ID_FLAGS(func, bpf_wi_get_weight, KF_SLEEPABLE)
+BTF_KFUNCS_END(wi_kfunc_ids)
+
+static const struct btf_kfunc_id_set wi_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set = &wi_kfunc_ids,
+};
+
+static int __init wi_kfunc_init(void)
+{
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
+					 &wi_kfunc_set);
+}
+late_initcall(wi_kfunc_init);
 #else
 static struct weighted_interleave_state *wi_task_state_rcu(void)
 {
