@@ -26,17 +26,27 @@ int main(int argc, char **argv)
 	int event_control = -1;
 	char event_control_path[PATH_MAX];
 	char line[LINE_MAX];
+	char *path;
 	int ret;
 
 	if (argc != 3)
 		errx(1, "%s", USAGE_STR);
 
-	cfd = open(argv[1], O_RDONLY);
+	/*
+	 * dirname(3) may modify its argument in place; work on a copy so
+	 * argv[1] still refers to the monitored file when events are
+	 * reported.
+	 */
+	path = strdup(argv[1]);
+	if (!path)
+		err(1, "Cannot duplicate %s", argv[1]);
+
+	cfd = open(path, O_RDONLY);
 	if (cfd == -1)
-		err(1, "Cannot open %s", argv[1]);
+		err(1, "Cannot open %s", path);
 
 	ret = snprintf(event_control_path, PATH_MAX, "%s/cgroup.event_control",
-			dirname(argv[1]));
+			dirname(path));
 	if (ret >= PATH_MAX)
 		errx(1, "Path to cgroup.event_control is too long");
 
@@ -76,7 +86,7 @@ int main(int argc, char **argv)
 		if (ret == -1)
 			err(1, "cgroup.event_control is not accessible any more");
 
-		printf("%s %s: crossed\n", argv[1], argv[2]);
+		printf("%s %s: crossed\n", path, argv[2]);
 	}
 
 	return 0;

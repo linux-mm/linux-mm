@@ -199,7 +199,7 @@ exit:
 	return ret;
 }
 
-static void process_memcg_events(struct memcg_events *events,
+static bool process_memcg_events(struct memcg_events *events,
 				 struct inotify_event *event)
 {
 	int ret;
@@ -207,19 +207,27 @@ static void process_memcg_events(struct memcg_events *events,
 	if (events->inotify_wd != event->wd) {
 		warnx("Unknown inotify event %d, should be %d", event->wd,
 		      events->inotify_wd);
-		return;
+		return true;
+	}
+
+	if (event->mask & (IN_DELETE_SELF | IN_IGNORED)) {
+		printf("The monitored file %s was removed, exiting\n",
+		       events->path);
+		return false;
 	}
 
 	printf("Received event in %s:\n", events->path);
 
 	if (!(event->mask & IN_MODIFY)) {
 		warnx("No IN_MODIFY event, skip it");
-		return;
+		return true;
 	}
 
 	ret = read_memcg_events(events, /* show_diff = */true);
 	if (ret)
 		warnx("Can't read memcg events");
+
+	return true;
 }
 
 static void monitor_events(struct memcg_events *events)
@@ -234,8 +242,11 @@ static void monitor_events(struct memcg_events *events)
 
 	for (;;) {
 		ret = poll(fds, ARRAY_SIZE(fds), -1);
-		if (ret < 0 && errno != EAGAIN)
-			err(EXIT_FAILURE, "Can't poll memcg events (%d)", ret);
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			err(EXIT_FAILURE, "Can't poll memcg events");
+		}
 
 		if (fds[0].revents & POLLERR)
 			err(EXIT_FAILURE, "Got POLLERR during monitor events");
@@ -244,6 +255,7 @@ static void monitor_events(struct memcg_events *events)
 			struct inotify_event *event;
 			char buffer[INOTIFY_BUFFER_SIZE];
 			ssize_t length;
+			bool keep_going = true;
 
 			length = read(fds[0].fd, buffer, INOTIFY_BUFFER_SIZE);
 			if (length <= 0)
@@ -251,9 +263,15 @@ static void monitor_events(struct memcg_events *events)
 
 			event = (struct inotify_event *)buffer;
 			while (INOTIFY_EVENT_OK(event, length)) {
-				process_memcg_events(events, event);
+				keep_going = process_memcg_events(events,
+								  event);
+				if (!keep_going)
+					break;
 				event = INOTIFY_EVENT_NEXT(event, length);
 			}
+
+			if (!keep_going)
+				return;
 		}
 	}
 }
@@ -275,12 +293,6 @@ static int initialize_memcg_events(struct memcg_events *events,
 		return ret;
 	}
 
-	ret = read_memcg_events(events, /* show_diff = */false);
-	if (ret) {
-		warnx("Failed to read initial memcg events state (%d)", ret);
-		return ret;
-	}
-
 	events->inotify_fd = inotify_init();
 	if (events->inotify_fd < 0) {
 		warn("Failed to setup new inotify device");
@@ -288,10 +300,22 @@ static int initialize_memcg_events(struct memcg_events *events,
 	}
 
 	events->inotify_wd = inotify_add_watch(events->inotify_fd,
-					       events->path, IN_MODIFY);
+					       events->path,
+					       IN_MODIFY | IN_DELETE_SELF);
 	if (events->inotify_wd < 0) {
 		warn("Couldn't add monitor in dir %s", events->path);
 		return -EIO;
+	}
+
+	/*
+	 * Read the initial state only after the watch is armed, so no
+	 * event can slip through the window between the baseline read and
+	 * the watch creation.
+	 */
+	ret = read_memcg_events(events, /* show_diff = */false);
+	if (ret) {
+		warnx("Failed to read initial memcg events state (%d)", ret);
+		return ret;
 	}
 
 	printf("Initialized MEMCG events with counters:\n");
