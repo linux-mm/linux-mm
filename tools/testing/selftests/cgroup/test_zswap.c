@@ -597,6 +597,7 @@ static int test_no_kmem_bypass(const char *root)
 	size_t trigger_allocation_size;
 	int wait_child_iteration = 0;
 	long stored_pages_threshold;
+	unsigned long long totalram;
 	struct sysinfo sys_info;
 	int ret = KSFT_FAIL;
 	int child_status;
@@ -606,10 +607,11 @@ static int test_no_kmem_bypass(const char *root)
 	/* Read sys info and compute test values accordingly */
 	if (sysinfo(&sys_info) != 0)
 		return KSFT_FAIL;
-	if (sys_info.totalram > GB(4)) {
+	totalram = (unsigned long long)sys_info.totalram * sys_info.mem_unit;
+	if (totalram > GB(4)) {
 		ksft_print_msg(
-			"requires less than 4GB total ram, sys_info.totalram: %.1fGB\n",
-			(double)sys_info.totalram / GB(1));
+			"requires less than 4GB total ram, total ram: %.1fGB\n",
+			(double)totalram / GB(1));
 		return KSFT_SKIP;
 	}
 	if (access(PATH_ZSWAP_STORED_PAGES, R_OK)) {
@@ -622,12 +624,12 @@ static int test_no_kmem_bypass(const char *root)
 		return KSFT_FAIL;
 	if (read_min_free_kb(&min_free_kb_original))
 		return KSFT_FAIL;
-	min_free_kb_high = sys_info.totalram / 2000;
-	min_free_kb_low = sys_info.totalram / 500000;
-	values->target_alloc_bytes = (sys_info.totalram - min_free_kb_high * 1000) +
-		sys_info.totalram * 5 / 100;
-	stored_pages_threshold = sys_info.totalram / 5 / page_size;
-	trigger_allocation_size = sys_info.totalram / 20;
+	min_free_kb_high = totalram / 2000;
+	min_free_kb_low = totalram / 500000;
+	values->target_alloc_bytes = (totalram - min_free_kb_high * 1000) +
+		totalram * 5 / 100;
+	stored_pages_threshold = totalram / 5 / page_size;
+	trigger_allocation_size = totalram / 20;
 
 	/* Set up test memcg */
 	test_group = cg_name(root, "kmem_bypass_test");
