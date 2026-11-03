@@ -3482,7 +3482,16 @@ ssize_t cpuset_write_resmask(struct kernfs_open_file *of,
 	free_cpuset(trialcs);
 out_unlock:
 	cpuset_update_sd_hk_unlock();
-	if (of_cft(of)->private == FILE_MEMLIST)
+	/*
+	 * Memory migration runs on cpuset_migrate_mm_wq and the writer
+	 * normally waits for it before returning to userspace, so that the
+	 * write appears synchronous. A writer that opened the file with
+	 * O_NONBLOCK asks not to wait: let the migration finish in the
+	 * background, like memory.max and memory.high skip synchronous
+	 * reclaim for non-blocking writers.
+	 */
+	if (of_cft(of)->private == FILE_MEMLIST &&
+	    !(of->file->f_flags & O_NONBLOCK))
 		schedule_flush_migrate_mm();
 	return retval ?: nbytes;
 }
