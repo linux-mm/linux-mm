@@ -3433,6 +3433,63 @@ long pin_user_pages_unlocked(unsigned long start, unsigned long nr_pages,
 EXPORT_SYMBOL(pin_user_pages_unlocked);
 
 /**
+ * memfd_pin_folios_begin - authorize a lifetime of direct memfd pinning
+ * @file: file whose folios will be pinned
+ * @writable: whether the pinned folios may be written
+ *
+ * Check file access and seals before establishing a source of direct pins.
+ * A writable source prevents F_SEAL_WRITE until memfd_pin_folios_end(),
+ * including intervals when it has no pins. F_SEAL_FUTURE_WRITE prevents
+ * new writable sources but leaves existing ones usable.
+ *
+ * The caller must retain a reference to @file until the matching end call.
+ * Each successful begin must have exactly one end with the same @writable.
+ *
+ * Context: May sleep. Do not hold the inode lock.
+ * Return: 0 on success, or a negative error code.
+ */
+int memfd_pin_folios_begin(struct file *file, bool writable)
+{
+	int seals, ret = 0;
+
+	if (!shmem_file(file) && !is_file_hugepages(file))
+		return -EINVAL;
+
+	if (!(file->f_mode & FMODE_READ) ||
+	    (writable && !(file->f_mode & FMODE_WRITE)))
+		return -EACCES;
+
+	inode_lock_shared(file_inode(file));
+	seals = IS_ENABLED(CONFIG_MEMFD_CREATE) ? memfd_get_seals(file) : 0;
+	if (seals < 0) {
+		ret = seals;
+	} else if (writable) {
+		if (seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE))
+			ret = -EPERM;
+		else
+			ret = mapping_map_writable(file->f_mapping);
+	}
+	inode_unlock_shared(file_inode(file));
+	return ret;
+}
+EXPORT_SYMBOL_GPL(memfd_pin_folios_begin);
+
+/**
+ * memfd_pin_folios_end - release an authorization for direct memfd pinning
+ * @file: file passed to memfd_pin_folios_begin()
+ * @writable: value passed to memfd_pin_folios_begin()
+ *
+ * All pins from this authorization must have been released, and no further
+ * pins may be acquired using it. The caller still owns its file reference.
+ */
+void memfd_pin_folios_end(struct file *file, bool writable)
+{
+	if (writable)
+		mapping_unmap_writable(file->f_mapping);
+}
+EXPORT_SYMBOL_GPL(memfd_pin_folios_end);
+
+/**
  * memfd_pin_folios() - pin folios associated with a memfd
  * @memfd:      the memfd whose folios are to be pinned
  * @start:      the first memfd offset

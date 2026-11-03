@@ -1627,6 +1627,123 @@ TEST_F(iommufd_ioas, dmabuf_revoke)
 	close(dfd);
 }
 
+/* These also run without a domain, before MAP_FILE pins any pages. */
+TEST_F(iommufd_ioas, map_file_seals)
+{
+	static const unsigned int seals[] = {
+		F_SEAL_WRITE,
+		F_SEAL_FUTURE_WRITE,
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(seals); i++) {
+		__u64 iova;
+		int fd;
+
+		fd = memfd_create("sealed", MFD_ALLOW_SEALING);
+		ASSERT_NE(-1, fd);
+		ASSERT_EQ(0, ftruncate(fd, PAGE_SIZE));
+		ASSERT_EQ(0, fcntl(fd, F_ADD_SEALS, seals[i]));
+
+		test_err_ioctl_ioas_map_file(EPERM, fd, 0, PAGE_SIZE, &iova);
+		/* Write seals do not prohibit device reads. */
+		ASSERT_EQ(0, _test_ioctl_ioas_map_file(
+			self->fd, self->ioas_id, fd, 0, PAGE_SIZE, &iova,
+			IOMMU_IOAS_MAP_READABLE));
+		test_ioctl_ioas_unmap(iova, PAGE_SIZE);
+		ASSERT_EQ(0, close(fd));
+	}
+}
+
+TEST_F(iommufd_ioas, map_file_fd_access)
+{
+	char path[64];
+	__u64 iova;
+	int fd, read_fd, write_fd;
+
+	fd = memfd_create("sealed", MFD_ALLOW_SEALING);
+	ASSERT_NE(-1, fd);
+	ASSERT_EQ(0, ftruncate(fd, PAGE_SIZE));
+	snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+	read_fd = open(path, O_RDONLY);
+	ASSERT_NE(-1, read_fd);
+	write_fd = open(path, O_WRONLY);
+	ASSERT_NE(-1, write_fd);
+
+	test_err_ioctl_ioas_map_file(EACCES, read_fd, 0, PAGE_SIZE, &iova);
+	ASSERT_EQ(0, _test_ioctl_ioas_map_file(
+		self->fd, self->ioas_id, read_fd, 0, PAGE_SIZE, &iova,
+		IOMMU_IOAS_MAP_READABLE));
+	test_ioctl_ioas_unmap(iova, PAGE_SIZE);
+
+	/* Like mmap(), all direct file mappings require read access. */
+	test_err_ioctl_ioas_map_file(EACCES, write_fd, 0, PAGE_SIZE, &iova);
+	EXPECT_ERRNO(EACCES, _test_ioctl_ioas_map_file(
+		self->fd, self->ioas_id, write_fd, 0, PAGE_SIZE, &iova,
+		IOMMU_IOAS_MAP_READABLE));
+	ASSERT_EQ(0, close(write_fd));
+	ASSERT_EQ(0, close(read_fd));
+	ASSERT_EQ(0, close(fd));
+}
+
+TEST_F(iommufd_ioas, map_file_seal_lifetime)
+{
+	struct iommu_ioas_copy copy_cmd = {
+		.size = sizeof(copy_cmd),
+		.flags = IOMMU_IOAS_MAP_READABLE | IOMMU_IOAS_MAP_WRITEABLE,
+		.src_ioas_id = self->ioas_id,
+		.length = PAGE_SIZE,
+	};
+	__u64 iova;
+	int fd;
+
+	fd = memfd_create("sealed", MFD_ALLOW_SEALING);
+	ASSERT_NE(-1, fd);
+	ASSERT_EQ(0, ftruncate(fd, PAGE_SIZE));
+	test_ioctl_ioas_map_file(fd, 0, PAGE_SIZE, &iova);
+	EXPECT_ERRNO(EBUSY, fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE));
+
+	/* A failed map must undo its writable-mapping reference. */
+	EXPECT_ERRNO(EEXIST, _test_ioctl_ioas_map_file(
+		self->fd, self->ioas_id, fd, 0, PAGE_SIZE, &iova,
+		IOMMU_IOAS_MAP_FIXED_IOVA | IOMMU_IOAS_MAP_READABLE |
+		IOMMU_IOAS_MAP_WRITEABLE));
+
+	test_ioctl_ioas_alloc(&copy_cmd.dst_ioas_id);
+	copy_cmd.src_iova = iova;
+	ASSERT_EQ(0, ioctl(self->fd, IOMMU_IOAS_COPY, &copy_cmd));
+	test_ioctl_ioas_unmap(iova, PAGE_SIZE);
+	/* The copied mapping has no domain, but still permits later writes. */
+	EXPECT_ERRNO(EBUSY, fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE));
+
+	test_ioctl_destroy(copy_cmd.dst_ioas_id);
+	ASSERT_EQ(0, fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE));
+	ASSERT_EQ(0, close(fd));
+}
+
+TEST_F(iommufd_ioas, map_file_future_write)
+{
+	__u64 iova, new_iova;
+	int fd;
+
+	fd = memfd_create("sealed", MFD_ALLOW_SEALING);
+	ASSERT_NE(-1, fd);
+	ASSERT_EQ(0, ftruncate(fd, PAGE_SIZE));
+	iova = MOCK_APERTURE_START;
+	test_ioctl_ioas_map_fixed_file(fd, 0, PAGE_SIZE, iova);
+	ASSERT_EQ(0, fcntl(fd, F_ADD_SEALS, F_SEAL_FUTURE_WRITE));
+
+	/* A preexisting mapping can still acquire its deferred pins. */
+	if (!variant->mock_domains)
+		test_cmd_mock_domain(self->ioas_id, &self->stdev_id,
+				     &self->hwpt_id, &self->device_id);
+	test_err_ioctl_ioas_map_file(EPERM, fd, 0, PAGE_SIZE, &new_iova);
+	EXPECT_ERRNO(EBUSY, fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE));
+	test_ioctl_ioas_unmap(iova, PAGE_SIZE);
+	ASSERT_EQ(0, fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE));
+	ASSERT_EQ(0, close(fd));
+}
+
 FIXTURE(iommufd_mock_domain)
 {
 	int fd;
