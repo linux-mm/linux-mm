@@ -16,6 +16,7 @@
 #include <linux/pagemap.h>
 #include <uapi/linux/mempolicy.h>
 
+struct cgroup;
 struct mm_struct;
 
 #define NO_INTERLEAVE_INDEX (-1UL)	/* use task il_prev for interleaving */
@@ -304,4 +305,13 @@ static inline bool mpol_is_preferred_many(struct mempolicy *pol)
 }
 
 #endif /* CONFIG_NUMA */
+
+#ifdef CONFIG_BPF_WEIGHTED_INTERLEAVE
+void weighted_interleave_cgroup_free(struct cgroup *cgrp);
+#else
+static inline void weighted_interleave_cgroup_free(struct cgroup *cgrp)
+{
+}
+#endif
+
 #endif

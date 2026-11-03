@@ -96,6 +96,7 @@
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/compat.h>
+#include <linux/cgroup.h>
 #include <linux/ptrace.h>
 #include <linux/swap.h>
 #include <linux/seq_file.h>
@@ -112,6 +113,7 @@
 #include <linux/printk.h>
 #include <linux/leafops.h>
 #include <linux/gcd.h>
+#include <linux/jump_label.h>
 #include <linux/srcu.h>
 
 #include <asm/tlbflush.h>
@@ -170,6 +172,11 @@ static unsigned int *node_bw_table;
  */
 static DEFINE_MUTEX(wi_state_lock);
 
+#ifdef CONFIG_BPF_WEIGHTED_INTERLEAVE
+static DEFINE_STATIC_KEY_FALSE(wi_cgroup_weights_set);
+static DEFINE_MUTEX(wi_cgroup_lock);
+#endif
+
 /* Readers that sleep while walking iw_table hold this instead */
 DEFINE_STATIC_SRCU_FAST(wi_srcu);
 
@@ -212,18 +219,90 @@ static void wi_state_init_from(struct weighted_interleave_state *dst,
 }
 #endif
 
-static u8 get_il_weight(int node)
+static inline u8 wi_state_weight(const struct weighted_interleave_state *state,
+				 int node)
+{
+	return state ? state->iw_table[node] : 1;
+}
+
+#ifdef CONFIG_BPF_WEIGHTED_INTERLEAVE
+static struct weighted_interleave_state *wi_cgroup_state_rcu(struct cgroup *cgrp)
 {
 	struct weighted_interleave_state *state;
-	u8 weight = 1;
+
+	for (; cgrp; cgrp = cgroup_parent(cgrp)) {
+		state = rcu_dereference(cgrp->wi_state);
+		if (state)
+			return state;
+	}
+	return NULL;
+}
+
+static struct weighted_interleave_state *wi_task_state_rcu(void)
+{
+	if (static_branch_unlikely(&wi_cgroup_weights_set) && in_task())
+		return wi_cgroup_state_rcu(task_dfl_cgroup(current));
+	return NULL;
+}
+
+void weighted_interleave_cgroup_free(struct cgroup *cgrp)
+{
+	struct weighted_interleave_state *old_wi_state;
+
+	mutex_lock(&wi_cgroup_lock);
+	old_wi_state = rcu_dereference_protected(cgrp->wi_state,
+						 lockdep_is_held(&wi_cgroup_lock));
+	if (old_wi_state) {
+		rcu_assign_pointer(cgrp->wi_state, NULL);
+		static_branch_dec(&wi_cgroup_weights_set);
+	}
+	mutex_unlock(&wi_cgroup_lock);
+
+	wi_state_retire(old_wi_state);
+}
+#else
+static struct weighted_interleave_state *wi_task_state_rcu(void)
+{
+	return NULL;
+}
+
+#endif
+
+static struct weighted_interleave_state *wi_effective_state_rcu(void)
+{
+	struct weighted_interleave_state *state;
+
+	state = wi_task_state_rcu();
+	if (state)
+		return state;
+	return rcu_dereference(wi_state);
+}
+
+static u8 get_effective_il_weight(int node)
+{
+	struct weighted_interleave_state *state;
+	u8 weight;
 
 	rcu_read_lock();
-	state = rcu_dereference(wi_state);
-	if (state)
-		weight = state->iw_table[node];
+	state = wi_effective_state_rcu();
+	weight = wi_state_weight(state, node);
 	rcu_read_unlock();
 	return weight;
 }
+
+#ifdef CONFIG_SYSFS
+static u8 get_global_il_weight(int node)
+{
+	struct weighted_interleave_state *state;
+	u8 weight;
+
+	rcu_read_lock();
+	state = rcu_dereference(wi_state);
+	weight = wi_state_weight(state, node);
+	rcu_read_unlock();
+	return weight;
+}
+#endif
 
 /*
  * Convert bandwidth values into weighted interleave weights.
@@ -2144,7 +2223,7 @@ retry:
 		if (node == MAX_NUMNODES)
 			return node;
 		current->il_prev = node;
-		current->il_weight = get_il_weight(node);
+		current->il_weight = get_effective_il_weight(node);
 	}
 	current->il_weight--;
 	return node;
@@ -2228,8 +2307,8 @@ static unsigned int weighted_interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 
 	rcu_read_lock();
 
-	state = rcu_dereference(wi_state);
-	/* Uninitialized wi_state means we should assume all weights are 1 */
+	state = wi_effective_state_rcu();
+	/* Uninitialized effective state means we should assume all weights are 1 */
 	if (state)
 		table = state->iw_table;
 
@@ -2734,10 +2813,15 @@ static unsigned long alloc_pages_bulk_weighted_interleave(gfp_t gfp,
 	me->il_weight = 0;
 	prev_node = node;
 
-	/* The page allocator may sleep, pin the weight table with SRCU */
+	/*
+	 * The page allocator may sleep. Pin the selected weight table with
+	 * SRCU, but choose the task/cgroup effective table under RCU.
+	 */
 	scp = srcu_read_lock_fast(&wi_srcu);
-	state = srcu_dereference(wi_state, &wi_srcu);
+	rcu_read_lock();
+	state = wi_effective_state_rcu();
 	table = state ? state->iw_table : NULL;
+	rcu_read_unlock();
 
 	/* calculate total, detect system default usage */
 	for_each_node_mask(node, pol->nodes)
@@ -3683,7 +3767,7 @@ static ssize_t node_show(struct kobject *kobj, struct kobj_attribute *attr,
 	u8 weight;
 
 	node_attr = container_of(attr, struct iw_node_attr, kobj_attr);
-	weight = get_il_weight(node_attr->nid);
+	weight = get_global_il_weight(node_attr->nid);
 	return sysfs_emit(buf, "%d\n", weight);
 }
 
