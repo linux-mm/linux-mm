@@ -32,9 +32,9 @@ int *expected_orders;
 #define SMAP_PATH "/proc/self/smaps"
 #define INPUT_MAX 80
 
-#define PID_FMT "%d,0x%lx,0x%lx,%d"
-#define PID_FMT_OFFSET "%d,0x%lx,0x%lx,%d,%d"
-#define PATH_FMT "%s,0x%lx,0x%lx,%d"
+#define PID_FMT "%d,0x%" PRIx64 ",0x%" PRIx64 ",%d"
+#define PID_FMT_OFFSET "%d,0x%" PRIx64 ",0x%" PRIx64 ",%d,%d"
+#define PATH_FMT "%s,0x%" PRIx64 ",0x%" PRIx64 ",%d"
 
 const char *pagemap_proc = "/proc/self/pagemap";
 const char *kpageflags_proc = "/proc/kpageflags";
@@ -70,7 +70,7 @@ static int check_after_split_folio_orders(char *vaddr_start, size_t len,
 	return status;
 }
 
-static void write_debugfs(const char *fmt, ...)
+static __printf(1, 2) void write_debugfs(const char *fmt, ...)
 {
 	char input[INPUT_MAX];
 	int ret;
@@ -132,12 +132,12 @@ static void verify_rss_anon_split_huge_page_all_zeroes(char *one_page, int nr_hp
 	disable_khugepaged(one_page, len);
 
 	/* split all THPs */
-	write_debugfs(PID_FMT, getpid(), (uint64_t)one_page,
-		      (uint64_t)one_page + len, 0);
+	write_debugfs(PID_FMT, getpid(), (uint64_t)(uintptr_t)one_page,
+		      (uint64_t)(uintptr_t)one_page + len, 0);
 
 	for (i = 0; i < len; i++)
 		if (one_page[i] != (char)0)
-			ksft_exit_fail_msg("%ld byte corrupted\n", i);
+			ksft_exit_fail_msg("%zu byte corrupted\n", i);
 
 	if (!check_huge_anon(one_page, nr_hpages * pmd_pagesize, 0, pmd_pagesize))
 		ksft_exit_fail_msg("Still AnonHugePages not split\n");
@@ -181,12 +181,12 @@ static void split_pmd_thp_to_order(int order)
 	disable_khugepaged(one_page, len);
 
 	/* split all THPs */
-	write_debugfs(PID_FMT, getpid(), (uint64_t)one_page,
-		(uint64_t)one_page + len, order);
+	write_debugfs(PID_FMT, getpid(), (uint64_t)(uintptr_t)one_page,
+		(uint64_t)(uintptr_t)one_page + len, order);
 
 	for (i = 0; i < len; i++)
 		if (one_page[i] != (char)i)
-			ksft_exit_fail_msg("%ld byte corrupted\n", i);
+			ksft_exit_fail_msg("%zu byte corrupted\n", i);
 
 	memset(expected_orders, 0, sizeof(int) * (pmd_order + 1));
 	expected_orders[order] = 4 << (pmd_order - order);
@@ -269,8 +269,8 @@ static void split_pte_mapped_thp(void)
 	}
 
 	/* Split all THPs through the remapped pages. */
-	write_debugfs(PID_FMT, getpid(), (uint64_t)page_area,
-		      (uint64_t)page_area + page_area_size, 0);
+	write_debugfs(PID_FMT, getpid(), (uint64_t)(uintptr_t)page_area,
+		      (uint64_t)(uintptr_t)page_area + page_area_size, 0);
 
 	/* Corruption during mremap or split? */
 	for (i = 0; i < page_area_size; i++) {
@@ -536,16 +536,16 @@ static void split_thp_in_pagecache_to_order_at(size_t fd_size,
 	 */
 	if (offset == -1) {
 		for (split_addr = addr; split_addr < addr + fd_size; split_addr += pmd_pagesize)
-			write_debugfs(PID_FMT, getpid(), (uint64_t)split_addr,
-				      (uint64_t)split_addr + pagesize, order);
+			write_debugfs(PID_FMT, getpid(), (uint64_t)(uintptr_t)split_addr,
+				      (uint64_t)(uintptr_t)split_addr + pagesize, order);
 
 		expected_orders[order] = fd_size / (pagesize << order);
 	} else {
 		int times = fd_size / pmd_pagesize;
 
 		for (split_addr = addr; split_addr < addr + fd_size; split_addr += pmd_pagesize)
-			write_debugfs(PID_FMT_OFFSET, getpid(), (uint64_t)split_addr,
-				      (uint64_t)split_addr + pagesize, order, offset);
+			write_debugfs(PID_FMT_OFFSET, getpid(), (uint64_t)(uintptr_t)split_addr,
+				      (uint64_t)(uintptr_t)split_addr + pagesize, order, offset);
 
 		for (i = order + 1; i < pmd_order; i++)
 			expected_orders[i] = times;
@@ -554,7 +554,7 @@ static void split_thp_in_pagecache_to_order_at(size_t fd_size,
 
 	for (i = 0; i < fd_size; i++)
 		if (*(addr + i) != (char)i) {
-			ksft_print_msg("%lu byte corrupted in the file\n", i);
+			ksft_print_msg("%zu byte corrupted in the file\n", i);
 			err = EXIT_FAILURE;
 			goto out;
 		}
