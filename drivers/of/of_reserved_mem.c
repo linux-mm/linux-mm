@@ -654,6 +654,20 @@ static void __init fdt_init_reserved_mem_node(unsigned long node, const char *un
 
 	err = __reserved_mem_init_node(rmem, node);
 	if (err != 0 && err != -ENODEV) {
+		/*
+		 * The region was reserved before its init function ran, so it
+		 * is not ours to release. -EBUSY says the init function is
+		 * declining it for a reason that outlives this node; freeing
+		 * it would hand the range to the page allocator even though
+		 * something else still owns it.
+		 */
+		if (err == -EBUSY) {
+			pr_info("node %s init failed, keeping reservation\n",
+				rmem->name);
+			rmem->name = NULL;
+			return;
+		}
+
 		pr_info("node %s compatible matching fail\n", rmem->name);
 		rmem->name = NULL;
 
