@@ -201,7 +201,8 @@ __bpf_kfunc long bpf_proactive_reclaim(struct mem_cgroup *memcg,
 	nr_reclaimed = try_to_free_mem_cgroup_pages(memcg, nr_pages, GFP_KERNEL,
 						    MEMCG_RECLAIM_MAY_SWAP |
 						    MEMCG_RECLAIM_PROACTIVE,
-						    swappiness == -1 ? NULL : &swappiness);
+						    swappiness == -1 ? NULL : &swappiness,
+						    NULL);
 
 	return nr_reclaimed * PAGE_SIZE;
 }

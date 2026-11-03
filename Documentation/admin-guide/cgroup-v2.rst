@@ -1458,6 +1458,7 @@ The following nested keys are defined.
 
 	  ==========            ================================
 	  swappiness            Swappiness value to reclaim with
+	  source                Source to apply reclaim pressure to
 	  ==========            ================================
 
 	Specifying a swappiness value instructs the kernel to perform
@@ -1467,6 +1468,14 @@ The following nested keys are defined.
 
 	The valid range for swappiness is [0-200, max], setting
 	swappiness=max exclusively reclaims anonymous memory.
+
+	Specifying a source value constrains where proactive reclaim applies
+	pressure. Currently only source=nodes:<nodelist> is supported. For
+	example::
+
+	  echo "1G source=nodes:0-1" > memory.reclaim
+
+	This reclaims memory of the target cgroup resident on nodes 0-1.
 
   memory.peak
 	A read-write single value file which exists on non-root cgroups.
