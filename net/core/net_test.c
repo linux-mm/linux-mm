@@ -515,7 +515,9 @@ static void ip_tunnel_flags_test_run(struct kunit *test)
 
 /* Netmem & SKB fragment refcounting */
 
+#include <linux/folio_queue.h>
 #include <linux/skbuff_ref.h>
+#include <linux/uio.h>
 #include <net/netmem.h>
 #include <net/netdev_rx_queue.h>
 #include <net/page_pool/helpers.h>
@@ -839,6 +841,149 @@ static void netmem_ref_test_pp_page(struct kunit *test)
 			base_pp_ref);
 
 	page_pool_put_full_page(pool, page, false);
+	page_pool_destroy(pool);
+}
+
+int zerocopy_fill_skb_from_iter(struct sk_buff *skb,
+				struct iov_iter *from, size_t length);
+
+static void netmem_ref_test_zerocopy_fill_skb_from_iter(struct kunit *test)
+{
+	struct page_pool_params pp_params = {
+		.order = 0,
+		.pool_size = 4,
+		.nid = NUMA_NO_NODE,
+	};
+	struct page *pp_page, *comp_page, *reg_page;
+	struct page_pool *pool, *comp_pool;
+	int base_ref, base_comp_ref, base_reg_ref;
+	long base_pp_ref, base_comp_pp_ref;
+	struct folio_queue folioq;
+	struct bio_vec bvec[3];
+	struct iov_iter iter;
+	struct sk_buff *skb;
+
+	pool = page_pool_create(&pp_params);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, pool);
+	pp_page = page_pool_dev_alloc_pages(pool);
+	KUNIT_ASSERT_NOT_NULL(test, pp_page);
+	base_ref = page_ref_count(pp_page);
+	base_pp_ref = atomic_long_read(&pp_page->pp_ref_count);
+
+	/* 1. Single order-0 page_pool page (simulating TCP_ZEROCOPY_RECEIVE
+	 * page forwarded into MSG_ZEROCOPY TX via zerocopy_fill_skb_from_iter).
+	 */
+	skb = alloc_skb(0, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+	bvec_set_page(&bvec[0], pp_page, 128, 0);
+	iov_iter_bvec(&iter, ITER_SOURCE, bvec, 1, 128);
+	KUNIT_ASSERT_EQ(test, zerocopy_fill_skb_from_iter(skb, &iter, 128), 0);
+	KUNIT_EXPECT_EQ(test, skb_shinfo(skb)->nr_frags, 1);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&pp_page->pp_ref_count),
+			base_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(pp_page), base_ref + 1);
+	consume_skb(skb);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&pp_page->pp_ref_count),
+			base_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(pp_page), base_ref);
+
+	/* 2. Contiguous segments on the same page_pool page coalesce into a
+	 * single skb_frag_t while a non-contiguous segment creates a second
+	 * skb_frag_t; all 3 GUP _refcounts are dropped.
+	 */
+	skb = alloc_skb(0, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+	bvec_set_page(&bvec[0], pp_page, 64, 0);
+	bvec_set_page(&bvec[1], pp_page, 64, 64);
+	bvec_set_page(&bvec[2], pp_page, 64, 256);
+	iov_iter_bvec(&iter, ITER_SOURCE, bvec, 3, 192);
+	KUNIT_ASSERT_EQ(test, zerocopy_fill_skb_from_iter(skb, &iter, 192), 0);
+	KUNIT_EXPECT_EQ(test, skb_shinfo(skb)->nr_frags, 2);
+	KUNIT_EXPECT_EQ(test, skb_frag_size(&skb_shinfo(skb)->frags[0]), 128U);
+	KUNIT_EXPECT_EQ(test, skb_frag_size(&skb_shinfo(skb)->frags[1]), 64U);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&pp_page->pp_ref_count),
+			base_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(pp_page), base_ref + 2);
+	consume_skb(skb);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&pp_page->pp_ref_count),
+			base_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(pp_page), base_ref);
+
+	/* 3. Order-1 compound page_pool page spanning 2 subpages in a single
+	 * iov_iter_get_pages2() batch coalesces into 1 skb_frag_t and drops
+	 * both GUP _refcounts via batched page_ref_sub, alongside a
+	 * non-page_pool page in the same skb.
+	 */
+	pp_params.order = 1;
+	comp_pool = page_pool_create(&pp_params);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, comp_pool);
+	comp_page = page_pool_dev_alloc_pages(comp_pool);
+	KUNIT_ASSERT_NOT_NULL(test, comp_page);
+	base_comp_ref = page_ref_count(comp_page);
+	base_comp_pp_ref = atomic_long_read(&comp_page->pp_ref_count);
+
+	reg_page = alloc_page(GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, reg_page);
+	base_reg_ref = page_ref_count(reg_page);
+
+	skb = alloc_skb(0, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+	bvec_set_page(&bvec[0], comp_page, 2 * PAGE_SIZE, 0);
+	bvec_set_page(&bvec[1], reg_page, 64, 0);
+	iov_iter_bvec(&iter, ITER_SOURCE, bvec, 2, 2 * PAGE_SIZE + 64);
+	KUNIT_ASSERT_EQ(test,
+			zerocopy_fill_skb_from_iter(skb, &iter,
+						    2 * PAGE_SIZE + 64), 0);
+	KUNIT_EXPECT_EQ(test, skb_shinfo(skb)->nr_frags, 2);
+	KUNIT_EXPECT_EQ(test, skb_frag_size(&skb_shinfo(skb)->frags[0]),
+			(unsigned int)(2 * PAGE_SIZE));
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&comp_page->pp_ref_count),
+			base_comp_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(comp_page), base_comp_ref + 1);
+	KUNIT_EXPECT_EQ(test, page_ref_count(reg_page), base_reg_ref + 1);
+	consume_skb(skb);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&comp_page->pp_ref_count),
+			base_comp_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(comp_page), base_comp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(reg_page), base_reg_ref);
+
+	/* 4. Single-batch mixed folios via ITER_FOLIOQ: order-1 compound
+	 * page_pool folio (2 subpages) + non-page_pool folio + order-0
+	 * page_pool folio returned in a single iov_iter_get_pages2() call.
+	 */
+	folioq_init(&folioq, 0);
+	folioq_append(&folioq, page_folio(comp_page));
+	folioq_append(&folioq, page_folio(reg_page));
+	folioq_append(&folioq, page_folio(pp_page));
+	iov_iter_folio_queue(&iter, ITER_SOURCE, &folioq, 0, 0,
+			     3 * PAGE_SIZE + 64);
+
+	skb = alloc_skb(0, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, skb);
+	KUNIT_ASSERT_EQ(test,
+			zerocopy_fill_skb_from_iter(skb, &iter,
+						    3 * PAGE_SIZE + 64), 0);
+	KUNIT_EXPECT_EQ(test, skb_shinfo(skb)->nr_frags, 3);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&comp_page->pp_ref_count),
+			base_comp_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(comp_page), base_comp_ref + 1);
+	KUNIT_EXPECT_EQ(test, page_ref_count(reg_page), base_reg_ref + 1);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&pp_page->pp_ref_count),
+			base_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(pp_page), base_ref + 1);
+	consume_skb(skb);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&comp_page->pp_ref_count),
+			base_comp_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(comp_page), base_comp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(reg_page), base_reg_ref);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&pp_page->pp_ref_count),
+			base_pp_ref);
+	KUNIT_EXPECT_EQ(test, page_ref_count(pp_page), base_ref);
+
+	__free_page(reg_page);
+	page_pool_put_full_page(comp_pool, comp_page, false);
+	page_pool_destroy(comp_pool);
+	page_pool_put_full_page(pool, pp_page, false);
 	page_pool_destroy(pool);
 }
 #endif
@@ -1738,6 +1883,7 @@ static struct kunit_case net_test_cases[] = {
 	KUNIT_CASE(netmem_ref_test_page),
 #ifdef CONFIG_PAGE_POOL
 	KUNIT_CASE(netmem_ref_test_pp_page),
+	KUNIT_CASE(netmem_ref_test_zerocopy_fill_skb_from_iter),
 #endif
 #if defined(CONFIG_PAGE_POOL) && defined(CONFIG_NET_DEVMEM)
 	KUNIT_CASE(netmem_ref_test_net_iov),

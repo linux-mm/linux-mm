@@ -34,6 +34,7 @@
  *
  */
 
+#include <kunit/visibility.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -696,12 +697,16 @@ int zerocopy_fill_skb_from_iter(struct sk_buff *skb,
 				refs = 0;
 			}
 			skb_fill_page_desc_noacc(skb, frag++, head, start, size);
+			netmem_inc_ref(page_to_netmem(head));
+			last_head = head;
+			refs++;
 		}
 		if (refs)
 			page_ref_sub(last_head, refs);
 	}
 	return 0;
 }
+EXPORT_SYMBOL_IF_KUNIT(zerocopy_fill_skb_from_iter);
 
 static int
 zerocopy_fill_skb_from_devmem(struct sk_buff *skb, struct iov_iter *from,
