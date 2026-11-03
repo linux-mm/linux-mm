@@ -188,6 +188,30 @@ static void wi_state_retire(struct weighted_interleave_state *state)
 		call_srcu(&wi_srcu, &state->rcu, wi_state_free_rcu);
 }
 
+static struct weighted_interleave_state *wi_state_alloc(void)
+{
+	struct weighted_interleave_state *state;
+
+	return kzalloc_flex(*state, iw_table, nr_node_ids, GFP_KERNEL);
+}
+
+static void wi_state_init(struct weighted_interleave_state *state)
+{
+	for (int i = 0; i < nr_node_ids; i++)
+		state->iw_table[i] = 1;
+}
+
+#if defined(CONFIG_SYSFS) || defined(CONFIG_BPF_WEIGHTED_INTERLEAVE)
+static void wi_state_init_from(struct weighted_interleave_state *dst,
+			       struct weighted_interleave_state *src)
+{
+	if (src)
+		memcpy(dst->iw_table, src->iw_table, nr_node_ids * sizeof(u8));
+	else
+		wi_state_init(dst);
+}
+#endif
+
 static u8 get_il_weight(int node)
 {
 	struct weighted_interleave_state *state;
@@ -243,22 +267,17 @@ int mempolicy_set_node_perf(unsigned int node, struct access_coordinate *coords)
 	struct weighted_interleave_state *new_wi_state, *old_wi_state = NULL;
 	unsigned int *old_bw, *new_bw;
 	unsigned int bw_val;
-	int i;
 
 	bw_val = min(coords->read_bandwidth, coords->write_bandwidth);
 	new_bw = kcalloc(nr_node_ids, sizeof(unsigned int), GFP_KERNEL);
 	if (!new_bw)
 		return -ENOMEM;
 
-	new_wi_state = kmalloc_flex(*new_wi_state, iw_table, nr_node_ids);
+	new_wi_state = wi_state_alloc();
 	if (!new_wi_state) {
 		kfree(new_bw);
 		return -ENOMEM;
 	}
-	new_wi_state->mode_auto = true;
-	for (i = 0; i < nr_node_ids; i++)
-		new_wi_state->iw_table[i] = 1;
-
 	/*
 	 * Update bandwidth info, even in manual mode. That way, when switching
 	 * to auto mode in the future, iw_table can be overwritten using
@@ -282,6 +301,8 @@ int mempolicy_set_node_perf(unsigned int node, struct access_coordinate *coords)
 	}
 
 	/* NULL wi_state assumes auto=true; reduce weights and update wi_state*/
+	wi_state_init(new_wi_state);
+	new_wi_state->mode_auto = true;
 	reduce_interleave_weights(new_bw, new_wi_state->iw_table);
 	rcu_assign_pointer(wi_state, new_wi_state);
 
@@ -3672,27 +3693,20 @@ static ssize_t node_store(struct kobject *kobj, struct kobj_attribute *attr,
 	struct weighted_interleave_state *new_wi_state, *old_wi_state = NULL;
 	struct iw_node_attr *node_attr;
 	u8 weight = 0;
-	int i;
 
 	node_attr = container_of(attr, struct iw_node_attr, kobj_attr);
 	if (count == 0 || sysfs_streq(buf, "") ||
 	    kstrtou8(buf, 0, &weight) || weight == 0)
 		return -EINVAL;
 
-	new_wi_state = kzalloc_flex(*new_wi_state, iw_table, nr_node_ids);
+	new_wi_state = wi_state_alloc();
 	if (!new_wi_state)
 		return -ENOMEM;
 
 	mutex_lock(&wi_state_lock);
 	old_wi_state = rcu_dereference_protected(wi_state,
 					lockdep_is_held(&wi_state_lock));
-	if (old_wi_state) {
-		memcpy(new_wi_state->iw_table, old_wi_state->iw_table,
-					nr_node_ids * sizeof(u8));
-	} else {
-		for (i = 0; i < nr_node_ids; i++)
-			new_wi_state->iw_table[i] = 1;
-	}
+	wi_state_init_from(new_wi_state, old_wi_state);
 	new_wi_state->iw_table[node_attr->nid] = weight;
 	new_wi_state->mode_auto = false;
 
@@ -3723,16 +3737,13 @@ static ssize_t weighted_interleave_auto_store(struct kobject *kobj,
 	struct weighted_interleave_state *new_wi_state, *old_wi_state = NULL;
 	unsigned int *bw;
 	bool input;
-	int i;
 
 	if (kstrtobool(buf, &input))
 		return -EINVAL;
 
-	new_wi_state = kzalloc_flex(*new_wi_state, iw_table, nr_node_ids);
+	new_wi_state = wi_state_alloc();
 	if (!new_wi_state)
 		return -ENOMEM;
-	for (i = 0; i < nr_node_ids; i++)
-		new_wi_state->iw_table[i] = 1;
 
 	mutex_lock(&wi_state_lock);
 	old_wi_state = rcu_dereference_protected(wi_state,
@@ -3745,9 +3756,7 @@ static ssize_t weighted_interleave_auto_store(struct kobject *kobj,
 	}
 
 	if (!input) {
-		if (old_wi_state)
-			memcpy(new_wi_state->iw_table, old_wi_state->iw_table,
-						       nr_node_ids * sizeof(u8));
+		wi_state_init_from(new_wi_state, old_wi_state);
 		goto update_wi_state;
 	}
 
@@ -3758,6 +3767,7 @@ static ssize_t weighted_interleave_auto_store(struct kobject *kobj,
 		return -ENODEV;
 	}
 
+	wi_state_init(new_wi_state);
 	new_wi_state->mode_auto = true;
 	reduce_interleave_weights(bw, new_wi_state->iw_table);
 
