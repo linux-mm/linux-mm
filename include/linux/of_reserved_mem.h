@@ -21,6 +21,11 @@ struct reserved_mem_ops {
 	int	(*node_validate)(unsigned long fdt_node, phys_addr_t *align);
 	int	(*node_fixup)(unsigned long fdt_node, phys_addr_t base,
 			      phys_addr_t size);
+	/*
+	 * Returns 0 on success, -ENODEV if the node is not handled by these
+	 * ops, or -EBUSY if the region cannot be used but must stay reserved.
+	 * Any other error releases the region.
+	 */
 	int	(*node_init)(unsigned long fdt_node, struct reserved_mem *rmem);
 	int	(*device_init)(struct reserved_mem *rmem,
 			       struct device *dev);
