@@ -114,7 +114,9 @@ static inline void clear_page(void *addr)
 	clear_pages(addr, 1);
 }
 
+#define __HAVE_ARCH_COPY_PAGE_NT 1
 void copy_page(void *to, void *from);
+unsigned long copy_mc_page_nt(void *to, const void *from);
 KCFI_REFERENCE(copy_page);
 
 /*
