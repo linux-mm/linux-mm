@@ -552,11 +552,6 @@ static int __init rmem_cma_setup(unsigned long node, struct reserved_mem *rmem)
 	if (ret)
 		return ret;
 
-	if (!IS_ALIGNED(rmem->base | rmem->size, CMA_MIN_ALIGNMENT_BYTES)) {
-		pr_err("Reserved memory: incorrect alignment of CMA region\n");
-		return -EINVAL;
-	}
-
 	ret = cma_init_reserved_mem(rmem->base, rmem->size, 0, rmem->name, &cma);
 	if (ret) {
 		pr_err("Reserved memory: unable to setup CMA region\n");

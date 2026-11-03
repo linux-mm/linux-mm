@@ -326,8 +326,12 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	}
 
 	/* ensure minimal alignment required by mm core */
-	if (!IS_ALIGNED(base | size, CMA_MIN_ALIGNMENT_BYTES))
+	if (!IS_ALIGNED(base | size, CMA_MIN_ALIGNMENT_BYTES)) {
+		pr_err("area %s (%pa, size %pa) is not aligned to %lu bytes\n",
+		       name ?: "(unnamed)", &base, &size,
+		       (unsigned long)CMA_MIN_ALIGNMENT_BYTES);
 		return -EINVAL;
+	}
 
 	ret = cma_new_area(name, size, order_per_bit, &cma);
 	if (ret != 0)
