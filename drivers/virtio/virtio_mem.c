@@ -40,6 +40,11 @@ module_param(bbm_block_size, ulong, 0444);
 MODULE_PARM_DESC(bbm_block_size,
 		 "Big Block size in bytes. Default is 0 (auto-detection).");
 
+static bool memmap_on_memory;
+module_param(memmap_on_memory, bool, 0444);
+MODULE_PARM_DESC(memmap_on_memory,
+		 "Allocate the memmap from hotplugged memory itself if memory_hotplug.memmap_on_memory is enabled. Default is 0.");
+
 /*
  * virtio-mem currently supports the following modes of operation:
  *
@@ -639,6 +644,7 @@ static bool virtio_mem_could_add_memory(struct virtio_mem *vm, uint64_t size)
 static int virtio_mem_add_memory(struct virtio_mem *vm, uint64_t addr,
 				 uint64_t size)
 {
+	mhp_t mhp_flags = MHP_MERGE_RESOURCE | MHP_NID_IS_MGID;
 	int rc;
 
 	/*
@@ -654,10 +660,13 @@ static int virtio_mem_add_memory(struct virtio_mem *vm, uint64_t addr,
 
 	dev_dbg(&vm->vdev->dev, "adding memory: 0x%llx - 0x%llx\n", addr,
 		addr + size - 1);
+	if (vm->memmap_pages)
+		mhp_flags |= MHP_MEMMAP_ON_MEMORY;
+
 	/* Memory might get onlined immediately. */
 	atomic64_add(size, &vm->offline_size);
 	rc = add_memory_driver_managed(vm->mgid, addr, size, vm->resource_name,
-				       MHP_MERGE_RESOURCE | MHP_NID_IS_MGID);
+				       mhp_flags);
 	if (rc) {
 		atomic64_sub(size, &vm->offline_size);
 		dev_warn(&vm->vdev->dev, "adding memory failed: %d\n", rc);
@@ -2155,6 +2164,20 @@ out_unlock:
 }
 
 /*
+ * A self-hosted memmap is not managed by the buddy and must not get
+ * fake-offlined. Returns the first pfn to process in the memory section
+ * starting at @pfn, which is beyond the section if the memmap covers it.
+ */
+static unsigned long virtio_mem_bbm_section_skip_memmap(struct virtio_mem *vm,
+							unsigned long pfn)
+{
+	const unsigned long mb_pfn = ALIGN_DOWN(pfn,
+						PHYS_PFN(memory_block_size_bytes()));
+
+	return max(pfn, mb_pfn + vm->memmap_pages);
+}
+
+/*
  * Try to offline and remove a big block from Linux and unplug it. Will fail
  * with -EBUSY if some memory is busy and cannot get unplugged.
  *
@@ -2167,7 +2190,7 @@ static int virtio_mem_bbm_offline_remove_and_unplug_bb(struct virtio_mem *vm,
 	const unsigned long start_pfn = PFN_DOWN(virtio_mem_bb_id_to_phys(vm, bb_id));
 	const unsigned long nr_pages = PFN_DOWN(vm->bbm.bb_size);
 	unsigned long end_pfn = start_pfn + nr_pages;
-	unsigned long pfn;
+	unsigned long pfn, first_pfn, next_pfn;
 	struct page *page;
 	int rc;
 
@@ -2184,12 +2207,17 @@ static int virtio_mem_bbm_offline_remove_and_unplug_bb(struct virtio_mem *vm,
 	mutex_lock(&vm->hotplug_mutex);
 	virtio_mem_bbm_set_bb_state(vm, bb_id, VIRTIO_MEM_BBM_BB_FAKE_OFFLINE);
 
-	for (pfn = start_pfn; pfn < end_pfn; pfn += PAGES_PER_SECTION) {
-		page = pfn_to_online_page(pfn);
+	for (pfn = start_pfn; pfn < end_pfn; pfn = next_pfn) {
+		next_pfn = pfn + PAGES_PER_SECTION;
+		first_pfn = virtio_mem_bbm_section_skip_memmap(vm, pfn);
+		if (first_pfn >= next_pfn)
+			continue;
+		page = pfn_to_online_page(first_pfn);
 		if (!page)
 			continue;
 
-		rc = virtio_mem_fake_offline(vm, pfn, PAGES_PER_SECTION);
+		rc = virtio_mem_fake_offline(vm, first_pfn,
+					     next_pfn - first_pfn);
 		if (rc) {
 			end_pfn = pfn;
 			goto rollback;
@@ -2213,11 +2241,15 @@ static int virtio_mem_bbm_offline_remove_and_unplug_bb(struct virtio_mem *vm,
 	return rc;
 
 rollback:
-	for (pfn = start_pfn; pfn < end_pfn; pfn += PAGES_PER_SECTION) {
-		page = pfn_to_online_page(pfn);
+	for (pfn = start_pfn; pfn < end_pfn; pfn = next_pfn) {
+		next_pfn = pfn + PAGES_PER_SECTION;
+		first_pfn = virtio_mem_bbm_section_skip_memmap(vm, pfn);
+		if (first_pfn >= next_pfn)
+			continue;
+		page = pfn_to_online_page(first_pfn);
 		if (!page)
 			continue;
-		virtio_mem_fake_online(pfn, PAGES_PER_SECTION);
+		virtio_mem_fake_online(first_pfn, next_pfn - first_pfn);
 	}
 	virtio_mem_bbm_set_bb_state(vm, bb_id, VIRTIO_MEM_BBM_BB_ADDED);
 	mutex_unlock(&vm->hotplug_mutex);
@@ -2607,6 +2639,19 @@ static int virtio_mem_init_hotplug(struct virtio_mem *vm)
 					      vm->offline_threshold);
 	}
 
+	/* All memory blocks of a device must agree, decide once. */
+	if (memmap_on_memory) {
+		vm->memmap_pages = mhp_memmap_on_memory_nr_pages();
+		if (!vm->memmap_pages) {
+			dev_warn(&vm->vdev->dev,
+				 "memmap_on_memory is disabled or not supported by the core, ignoring\n");
+		} else if (vm->in_sbm) {
+			dev_warn(&vm->vdev->dev,
+				 "memmap_on_memory is only supported in BBM, ignoring\n");
+			vm->memmap_pages = 0;
+		}
+	}
+
 	dev_info(&vm->vdev->dev, "memory block size: 0x%lx",
 		 memory_block_size_bytes());
 	if (vm->in_sbm)
@@ -2615,6 +2660,9 @@ static int virtio_mem_init_hotplug(struct virtio_mem *vm)
 	else
 		dev_info(&vm->vdev->dev, "big block size: 0x%llx",
 			 (unsigned long long)vm->bbm.bb_size);
+	if (vm->memmap_pages)
+		dev_info(&vm->vdev->dev, "memmap on memory: 0x%llx bytes per memory block",
+			 (unsigned long long)PFN_PHYS(vm->memmap_pages));
 
 	/* create the parent resource for all memory */
 	rc = virtio_mem_create_resource(vm);
