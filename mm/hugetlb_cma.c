@@ -60,6 +60,9 @@ struct folio *hugetlb_cma_alloc_frozen_folio(int order, gfp_t gfp_mask,
 	if (!hugetlb_cma_size)
 		return NULL;
 
+	if (current->flags & PF_MEMALLOC_PIN)
+		return NULL;
+
 retry_cpuset:
 	if (!nodemask) {
 		cpuset_mems_cookie = read_mems_allowed_begin();
