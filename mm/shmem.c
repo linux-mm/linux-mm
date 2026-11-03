@@ -853,7 +853,8 @@ struct shmem_unused_huge_scan {
 };
 
 static enum lru_status shmem_unused_huge_isolate(struct list_head *item,
-						 struct list_lru_one *lru,
+						 struct list_lru_node *node,
+						 struct list_lru_one *list,
 						 void *arg)
 {
 	struct shmem_unused_huge_scan *scan = arg;
@@ -874,14 +875,14 @@ static enum lru_status shmem_unused_huge_isolate(struct list_head *item,
 	inode = igrab(&info->vfs_inode);
 	/* inode is about to be evicted */
 	if (!inode) {
-		list_lru_isolate(lru, item);
+		list_lru_isolate(node, list, item);
 		objcg = shmem_get_and_clear_objcg(info);
 		spin_unlock(&info->lock);
 		obj_cgroup_put(objcg);
 		return LRU_REMOVED;
 	}
 
-	list_lru_isolate(lru, item);
+	list_lru_isolate(node, list, item);
 	objcg = shmem_get_and_clear_objcg(info);
 	set_shmem_unused_huge_isolated(info);
 	list_add_tail(&info->shrinklist, &scan->list);

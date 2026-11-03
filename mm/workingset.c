@@ -707,6 +707,7 @@ static unsigned long count_shadow_nodes(struct shrinker *shrinker,
 }
 
 static enum lru_status shadow_lru_isolate(struct list_head *item,
+					  struct list_lru_node *nlru,
 					  struct list_lru_one *lru,
 					  void *arg) __must_hold(lru->lock)
 {
@@ -745,7 +746,7 @@ static enum lru_status shadow_lru_isolate(struct list_head *item,
 		}
 	}
 
-	list_lru_isolate(lru, item);
+	list_lru_isolate(nlru, lru, item);
 	__dec_node_page_state(virt_to_page(node), WORKINGSET_NODES);
 
 	spin_unlock(&lru->lock);

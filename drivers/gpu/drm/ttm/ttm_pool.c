@@ -346,12 +346,13 @@ static void ttm_pool_type_give(struct ttm_pool_type *pt, struct page *p)
 }
 
 static enum lru_status take_one_from_lru(struct list_head *item,
+					 struct list_lru_node *node,
 					 struct list_lru_one *list,
 					 void *cb_arg)
 {
 	struct page **out_page = cb_arg;
 	struct page *p = container_of(item, struct page, lru);
-	list_lru_isolate(list, item);
+	list_lru_isolate(node, list, item);
 
 	*out_page = p;
 	return LRU_REMOVED;
@@ -388,12 +389,13 @@ static void ttm_pool_type_init(struct ttm_pool_type *pt, struct ttm_pool *pool,
 }
 
 static enum lru_status pool_move_to_dispose_list(struct list_head *item,
+						 struct list_lru_node *node,
 						 struct list_lru_one *list,
 						 void *cb_arg)
 {
 	struct list_head *dispose = cb_arg;
 
-	list_lru_isolate_move(list, item, dispose);
+	list_lru_isolate_move(node, list, item, dispose);
 
 	return LRU_REMOVED;
 }

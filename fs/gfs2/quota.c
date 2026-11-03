@@ -149,7 +149,7 @@ static void gfs2_qd_list_dispose(struct list_head *list)
 
 
 static enum lru_status gfs2_qd_isolate(struct list_head *item,
-		struct list_lru_one *lru, void *arg)
+		struct list_lru_node *node, struct list_lru_one *list, void *arg)
 {
 	struct list_head *dispose = arg;
 	struct gfs2_quota_data *qd =
@@ -162,7 +162,7 @@ static enum lru_status gfs2_qd_isolate(struct list_head *item,
 	status = LRU_SKIP;
 	if (qd->qd_lockref.count == 0) {
 		lockref_mark_dead(&qd->qd_lockref);
-		list_lru_isolate_move(lru, &qd->qd_lru, dispose);
+		list_lru_isolate_move(node, list, &qd->qd_lru, dispose);
 		status = LRU_REMOVED;
 	}
 

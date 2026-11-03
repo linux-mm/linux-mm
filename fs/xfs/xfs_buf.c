@@ -1468,7 +1468,8 @@ __xfs_buf_mark_corrupt(
 static enum lru_status
 xfs_buftarg_drain_rele(
 	struct list_head	*item,
-	struct list_lru_one	*lru,
+	struct list_lru_node	*node,
+	struct list_lru_one	*list,
 	void			*arg)
 
 {
@@ -1485,7 +1486,7 @@ xfs_buftarg_drain_rele(
 	}
 
 	xfs_buf_kill(bp);
-	list_lru_isolate_move(lru, item, dispose);
+	list_lru_isolate_move(node, list, item, dispose);
 	spin_unlock(&bp->b_lockref.lock);
 	return LRU_REMOVED;
 }
@@ -1561,7 +1562,8 @@ xfs_buftarg_drain(
 static enum lru_status
 xfs_buftarg_isolate(
 	struct list_head	*item,
-	struct list_lru_one	*lru,
+	struct list_lru_node	*node,
+	struct list_lru_one	*list,
 	void			*arg)
 {
 	struct xfs_buf		*bp = container_of(item, struct xfs_buf, b_lru);
@@ -1581,7 +1583,7 @@ xfs_buftarg_isolate(
 	 * yet.
 	 */
 	if (bp->b_lockref.count > 0) {
-		list_lru_isolate(lru, &bp->b_lru);
+		list_lru_isolate(node, list, &bp->b_lru);
 		spin_unlock(&bp->b_lockref.lock);
 		return LRU_REMOVED;
 	}
@@ -1597,7 +1599,7 @@ xfs_buftarg_isolate(
 	}
 
 	xfs_buf_kill(bp);
-	list_lru_isolate_move(lru, item, dispose);
+	list_lru_isolate_move(node, list, item, dispose);
 	spin_unlock(&bp->b_lockref.lock);
 	return LRU_REMOVED;
 }

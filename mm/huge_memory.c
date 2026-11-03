@@ -4639,7 +4639,8 @@ static bool thp_underused(struct folio *folio)
 }
 
 static enum lru_status deferred_split_isolate(struct list_head *item,
-					      struct list_lru_one *lru,
+					      struct list_lru_node *node,
+					      struct list_lru_one *list,
 					      void *cb_arg)
 {
 	struct folio *folio = container_of(item, struct folio, _deferred_list);
@@ -4649,7 +4650,7 @@ static enum lru_status deferred_split_isolate(struct list_head *item,
 	if (!folio_try_get(folio))
 		return LRU_SKIP;
 
-	list_lru_isolate_move(lru, item, freeable);
+	list_lru_isolate_move(node, list, item, freeable);
 	return LRU_REMOVED;
 }
 

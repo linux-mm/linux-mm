@@ -510,7 +510,8 @@ void nfsd_file_net_dispose(struct nfsd_net *nn)
 /**
  * nfsd_file_lru_cb - Examine an entry on the LRU list
  * @item: LRU entry to examine
- * @lru: controlling LRU
+ * @node: LRU node that accounts for @item
+ * @list: locked sublist that holds @item
  * @arg: dispose list
  *
  * Return values:
@@ -519,8 +520,8 @@ void nfsd_file_net_dispose(struct nfsd_net *nn)
  *   %LRU_SKIP: @item cannot be evicted
  */
 static enum lru_status
-nfsd_file_lru_cb(struct list_head *item, struct list_lru_one *lru,
-		 void *arg)
+nfsd_file_lru_cb(struct list_head *item, struct list_lru_node *node,
+		 struct list_lru_one *list, void *arg)
 {
 	struct list_head *head = arg;
 	struct nfsd_file *nf = list_entry(item, struct nfsd_file, nf_lru);
@@ -554,7 +555,7 @@ nfsd_file_lru_cb(struct list_head *item, struct list_lru_one *lru,
 
 	/* Refcount went to zero. Unhash it and queue it to the dispose list */
 	nfsd_file_unhash(nf);
-	list_lru_isolate(lru, &nf->nf_lru);
+	list_lru_isolate(node, list, &nf->nf_lru);
 	list_add(&nf->nf_gc, head);
 	this_cpu_inc(nfsd_file_evictions);
 	trace_nfsd_file_gc_disposed(nf);
@@ -562,8 +563,8 @@ nfsd_file_lru_cb(struct list_head *item, struct list_lru_one *lru,
 }
 
 static enum lru_status
-nfsd_file_gc_cb(struct list_head *item, struct list_lru_one *lru,
-		 void *arg)
+nfsd_file_gc_cb(struct list_head *item, struct list_lru_node *node,
+		struct list_lru_one *list, void *arg)
 {
 	struct nfsd_file *nf = list_entry(item, struct nfsd_file, nf_lru);
 
@@ -576,7 +577,7 @@ nfsd_file_gc_cb(struct list_head *item, struct list_lru_one *lru,
 		trace_nfsd_file_gc_aged(nf);
 		return LRU_ROTATE;
 	}
-	return nfsd_file_lru_cb(item, lru, arg);
+	return nfsd_file_lru_cb(item, node, list, arg);
 }
 
 static void

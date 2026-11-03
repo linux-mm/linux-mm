@@ -412,9 +412,10 @@ struct xfs_qm_isolate {
 static enum lru_status
 xfs_qm_dquot_isolate(
 	struct list_head	*item,
-	struct list_lru_one	*lru,
+	struct list_lru_node	*node,
+	struct list_lru_one	*list,
 	void			*arg)
-		__releases(&lru->lock) __acquires(&lru->lock)
+		__releases(&list->lock) __acquires(&list->lock)
 {
 	struct xfs_dquot	*dqp = container_of(item,
 						struct xfs_dquot, q_lru);
@@ -450,7 +451,7 @@ xfs_qm_dquot_isolate(
 		XFS_STATS_INC(dqp->q_mount, xs_qm_dqwants);
 
 		trace_xfs_dqreclaim_want(dqp);
-		list_lru_isolate(lru, &dqp->q_lru);
+		list_lru_isolate(node, list, &dqp->q_lru);
 		XFS_STATS_DEC(dqp->q_mount, xs_qm_dquot_unused);
 		return LRU_REMOVED;
 	}
@@ -473,7 +474,7 @@ xfs_qm_dquot_isolate(
 	lockref_mark_dead(&dqp->q_lockref);
 	spin_unlock(&dqp->q_lockref.lock);
 
-	list_lru_isolate_move(lru, &dqp->q_lru, &isol->dispose);
+	list_lru_isolate_move(node, list, &dqp->q_lru, &isol->dispose);
 	XFS_STATS_DEC(dqp->q_mount, xs_qm_dquot_unused);
 	trace_xfs_dqreclaim_done(dqp);
 	XFS_STATS_INC(dqp->q_mount, xs_qm_dqreclaims);
