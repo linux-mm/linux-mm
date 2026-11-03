@@ -259,8 +259,6 @@ static struct sk_buff *wx_build_skb(struct wx_ring *rx_ring,
 			return skb;
 		}
 
-		skb_mark_for_recycle(skb);
-
 		if (!wx_test_staterr(rx_desc, WX_RXD_STAT_EOP))
 			WX_CB(skb)->dma = rx_buffer->dma;
 

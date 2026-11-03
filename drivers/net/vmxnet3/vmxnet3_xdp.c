@@ -325,7 +325,6 @@ vmxnet3_build_skb(struct vmxnet3_rx_queue *rq, struct page *page,
 	/* bpf prog might change len and data position. */
 	skb_reserve(skb, xdp->data - xdp->data_hard_start);
 	skb_put(skb, xdp->data_end - xdp->data);
-	skb_mark_for_recycle(skb);
 
 	return skb;
 }

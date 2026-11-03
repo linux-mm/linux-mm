@@ -42,8 +42,7 @@
  * The API keeps track of in-flight pages, in order to let API users know when
  * it is safe to free a page_pool object, the API users must call
  * page_pool_put_page() or page_pool_free_va() to free the page_pool object, or
- * attach the page_pool object to a page_pool-aware object like skbs marked with
- * skb_mark_for_recycle().
+ * attach the page_pool object to a page_pool-aware object like an skb.
  *
  * page_pool_put_page() may be called multiple times on the same page if a page
  * is split into multiple fragments. For the last fragment, it will either
@@ -260,7 +259,7 @@ static inline void page_pool_fragment_netmem(netmem_ref netmem, long nr)
  * pp_ref_count represents the number of outstanding references to the page,
  * which will be freed using page_pool APIs (rather than page allocator APIs
  * like put_page()). Such references are usually held by page_pool-aware
- * objects like skbs marked for page pool recycling.
+ * objects like skbs.
  *
  * This helper allows the caller to take (set) multiple references to a
  * freshly allocated page. The page must be freshly allocated (have a

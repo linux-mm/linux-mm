@@ -1614,7 +1614,6 @@ mlx5e_skb_from_cqe_linear(struct mlx5e_rq *rq, struct mlx5e_wqe_frag_info *wi,
 		return NULL;
 
 	/* queue up for recycling/reuse */
-	skb_mark_for_recycle(skb);
 	frag_page->frags++;
 
 	return skb;
@@ -1701,7 +1700,6 @@ mlx5e_skb_from_cqe_nonlinear(struct mlx5e_rq *rq, struct mlx5e_wqe_frag_info *wi
 	if (unlikely(!skb))
 		return NULL;
 
-	skb_mark_for_recycle(skb);
 	head_wi->frag_page->frags++;
 
 	if (xdp_buff_has_frags(&mxbuf->xdp)) {
@@ -1966,7 +1964,6 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 			rq->stats->buff_alloc_err++;
 			return NULL;
 		}
-		skb_mark_for_recycle(skb);
 		va = skb->head;
 		net_prefetchw(va); /* xdp_frame data area */
 		net_prefetchw(skb->data);
@@ -2046,7 +2043,6 @@ mlx5e_skb_from_cqe_mpwrq_nonlinear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *w
 		if (unlikely(!skb))
 			return NULL;
 
-		skb_mark_for_recycle(skb);
 		linear_page->frags++;
 
 		if (xdp_buff_has_frags(&mxbuf->xdp)) {
@@ -2146,7 +2142,6 @@ mlx5e_skb_from_cqe_mpwrq_linear(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 		return NULL;
 
 	/* queue up for recycling/reuse */
-	skb_mark_for_recycle(skb);
 	frag_page->frags++;
 
 	return skb;
@@ -2175,9 +2170,6 @@ mlx5e_skb_from_cqe_shampo(struct mlx5e_rq *rq, struct mlx5e_mpw_info *wi,
 	mlx5e_copy_skb_header(rq, skb, page_to_netmem(di->page), di->addr,
 			      head_offset, head_offset, len);
 	__skb_put(skb, head_size);
-
-	/* queue up for recycling/reuse */
-	skb_mark_for_recycle(skb);
 
 	return skb;
 }

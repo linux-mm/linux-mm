@@ -91,7 +91,6 @@ static struct sk_buff *mt76_npu_dequeue(struct mt76_dev *dev,
 
 			__skb_put(skb, len);
 			skb_reset_mac_header(skb);
-			skb_mark_for_recycle(skb);
 		} else {
 			struct skb_shared_info *shinfo = skb_shinfo(skb);
 			struct page *page = virt_to_head_page(e->buf);

@@ -166,7 +166,6 @@ NAPI poller
             if XDP_DROP:
                 page_pool_recycle_direct(page_pool, page);
         } else (packet_is_skb) {
-            skb_mark_for_recycle(skb);
             new_page = page_pool_dev_alloc_pages(page_pool);
         }
     }

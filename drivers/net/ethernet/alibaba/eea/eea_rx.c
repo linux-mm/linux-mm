@@ -319,8 +319,6 @@ static struct sk_buff *eea_rx_build_split_hdr_skb(struct eea_net_rx *rx,
 		skb_add_rx_frag(skb, 0, page, offset, ctx->len, truesize);
 	}
 
-	skb_mark_for_recycle(skb);
-
 	return skb;
 }
 
@@ -345,7 +343,6 @@ static struct sk_buff *eea_rx_build_skb(struct eea_net_rx *rx,
 		return NULL;
 
 	truesize = eea_consume_rx_buffer(rx, meta, bufsize);
-	skb_mark_for_recycle(skb);
 
 	skb->truesize += truesize - bufsize;
 

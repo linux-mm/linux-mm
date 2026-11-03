@@ -332,7 +332,6 @@ static struct sk_buff *rnpgbe_build_skb(struct mucse_rx_buffer *rx_buffer,
 	/* update pointers within the skb to store the data */
 	skb_reserve(skb, RNPGBE_SKB_PAD);
 	__skb_put(skb, size);
-	skb_mark_for_recycle(skb);
 
 	return skb;
 }

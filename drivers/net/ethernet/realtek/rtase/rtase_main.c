@@ -562,7 +562,6 @@ process_pkt:
 			rtase_rx_csum(tp, skb, desc);
 
 		skb_put(skb, pkt_size);
-		skb_mark_for_recycle(skb);
 		skb->protocol = eth_type_trans(skb, dev);
 
 		if (skb->pkt_type == PACKET_MULTICAST)

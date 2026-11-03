@@ -234,7 +234,6 @@ static void hinic3_add_rx_frag(struct hinic3_rxq *rxq,
 
 	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
 			rx_info->page_offset, size, rxq->buf_len);
-	skb_mark_for_recycle(skb);
 }
 
 static void packaging_skb(struct hinic3_rxq *rxq, struct sk_buff *skb,
