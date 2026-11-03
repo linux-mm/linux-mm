@@ -24,6 +24,7 @@
 #include <linux/page-flags.h>
 #include <linux/shrinker.h>
 #include <linux/irq_work_types.h>
+#include <linux/xarray.h>
 
 struct mem_cgroup;
 struct obj_cgroup;
@@ -83,14 +84,14 @@ struct mem_cgroup_reclaim_iter {
  * per-node information in memory controller.
  */
 struct mem_cgroup_per_node {
-	/* Set when the memcg is created, then only read. */
+	/* Set when the memcg is created, then mostly read. */
 	__cacheline_group_begin_aligned(memcg_pn_read_mostly);
 	struct mem_cgroup	*memcg;		/* Back pointer, we cannot */
 						/* use container_of	   */
 
 	struct lruvec_stats_percpu __percpu	*lruvec_stats_percpu;
 	struct lruvec_stats			*lruvec_stats;
-	struct shrinker_info __rcu	*shrinker_info;
+	struct xarray			shrinker_units;
 	struct obj_cgroup __rcu		*objcg;
 
 	__cacheline_group_end_aligned(memcg_pn_read_mostly);
@@ -1694,6 +1695,8 @@ static inline u64 mem_cgroup_get_socket_pressure(const struct mem_cgroup *memcg)
 
 void shrinker_unit_cache_init(void);
 int alloc_shrinker_info(struct mem_cgroup *memcg);
+int memcg_shrinker_unit_alloc(struct mem_cgroup *memcg, int shrinker_id,
+			      gfp_t gfp);
 void free_shrinker_info(struct mem_cgroup *memcg);
 void set_shrinker_bit(struct mem_cgroup *memcg, int nid, int shrinker_id);
 void reparent_shrinker_deferred(struct mem_cgroup *memcg);
