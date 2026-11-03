@@ -13,8 +13,14 @@
 
 #ifdef __NR_userfaultfd
 
-/* The unit test doesn't need a large or random size, make it 32MB for now */
-#define  UFFD_TEST_MEM_SIZE               (32UL << 20)
+/*
+ * The unit test does not need a large or random size, but the allocation size
+ * needs to scale with base page size per architecture otherwise pmd alignment
+ * tests will fail for architectures like aarch64+64k.  For standard 4k pages, 
+ * this will allocate 64MiB, while allocating 1GiB for 64k page sizes.
+ */
+#define  PAGE_SIZE                        sysconf(_SC_PAGESIZE)
+#define  UFFD_TEST_MEM_SIZE               (PAGE_SIZE * (16 << 10))
 
 #define  MEM_ANON                         BIT_ULL(0)
 #define  MEM_SHMEM                        BIT_ULL(1)
