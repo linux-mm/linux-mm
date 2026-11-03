@@ -792,34 +792,6 @@ static int virtio_mem_sbm_offline_and_remove_mb(struct virtio_mem *vm,
 }
 
 /*
- * Try (offlining and) removing memory from Linux in case all subblocks are
- * unplugged. Can be called on online and offline memory blocks.
- *
- * May modify the state of memory blocks in virtio-mem.
- */
-static int virtio_mem_sbm_try_remove_unplugged_mb(struct virtio_mem *vm,
-						  unsigned long mb_id)
-{
-	int rc;
-
-	/*
-	 * Once all subblocks of a memory block were unplugged, offline and
-	 * remove it.
-	 */
-	if (!virtio_mem_sbm_test_sb_unplugged(vm, mb_id, 0, vm->sbm.sbs_per_mb))
-		return 0;
-
-	/* offline_and_remove_memory() works for online and offline memory. */
-	mutex_unlock(&vm->hotplug_mutex);
-	rc = virtio_mem_sbm_offline_and_remove_mb(vm, mb_id);
-	mutex_lock(&vm->hotplug_mutex);
-	if (!rc)
-		virtio_mem_sbm_set_mb_state(vm, mb_id,
-					    VIRTIO_MEM_SBM_MB_UNUSED);
-	return rc;
-}
-
-/*
  * See virtio_mem_offline_and_remove_memory(): Try to offline and remove a
  * all Linux memory blocks covered by the big block.
  */
@@ -1646,6 +1618,34 @@ static int virtio_mem_sbm_unplug_mb(struct virtio_mem *vm, unsigned long mb_id)
 	uint64_t nb_sb = vm->sbm.sbs_per_mb;
 
 	return virtio_mem_sbm_unplug_any_sb_raw(vm, mb_id, &nb_sb);
+}
+
+/*
+ * Try (offlining and) removing memory from Linux in case all subblocks are
+ * unplugged. Can be called on online and offline memory blocks.
+ *
+ * May modify the state of memory blocks in virtio-mem.
+ */
+static int virtio_mem_sbm_try_remove_unplugged_mb(struct virtio_mem *vm,
+						  unsigned long mb_id)
+{
+	int rc;
+
+	/*
+	 * Once all subblocks of a memory block were unplugged, offline and
+	 * remove it.
+	 */
+	if (!virtio_mem_sbm_test_sb_unplugged(vm, mb_id, 0, vm->sbm.sbs_per_mb))
+		return 0;
+
+	/* offline_and_remove_memory() works for online and offline memory. */
+	mutex_unlock(&vm->hotplug_mutex);
+	rc = virtio_mem_sbm_offline_and_remove_mb(vm, mb_id);
+	mutex_lock(&vm->hotplug_mutex);
+	if (!rc)
+		virtio_mem_sbm_set_mb_state(vm, mb_id,
+					    VIRTIO_MEM_SBM_MB_UNUSED);
+	return rc;
 }
 
 /*
