@@ -95,6 +95,11 @@ enum {
 			      HMM_PFN_P2PDMA_BUS,
 };
 
+static void hmm_vma_handle_migrate_prepare_rollback(const struct hmm_vma_walk *hmm_vma_walk,
+						    unsigned long start,
+						    unsigned long end,
+						    unsigned long *hmm_pfn);
+
 static int hmm_pfns_fill(unsigned long addr, unsigned long end,
 			 struct hmm_vma_walk *hmm_vma_walk, unsigned long cpu_flags)
 {
@@ -110,6 +115,8 @@ static int hmm_pfns_fill(unsigned long addr, unsigned long end,
 			migrate = true;
 		}
 	}
+
+	hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk, addr, end, &range->hmm_pfns[i]);
 
 	if (migrate && thp_migration_supported() &&
 	    (minfo & MIGRATE_VMA_SELECT_COMPOUND) &&
@@ -239,6 +246,9 @@ static int hmm_vma_walk_hole(unsigned long addr, unsigned long end,
 			spin_unlock(hmm_vma_walk->ptl);
 			hmm_vma_walk->pmdlocked = false;
 		}
+		/* Entries collected from a vanished page table are gone */
+		hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk, addr, end,
+							hmm_pfns);
 		return hmm_record_fault(addr, end, required_fault, walk);
 	}
 	return hmm_pfns_fill(addr, end, hmm_vma_walk, 0);
@@ -274,6 +284,9 @@ static int hmm_vma_handle_pmd(struct mm_walk *walk, unsigned long addr,
 	cpu_flags = pmd_to_hmm_pfn_flags(range, pmd);
 	required_fault =
 		hmm_range_need_fault(hmm_vma_walk, hmm_pfns, npages, cpu_flags);
+	/* Entries collected from a vanished page table are gone */
+	hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk, addr,
+						end, hmm_pfns);
 	if (required_fault) {
 		if (hmm_vma_walk->pmdlocked) {
 			spin_unlock(hmm_vma_walk->ptl);
@@ -330,6 +343,15 @@ static int hmm_vma_handle_pte(struct mm_walk *walk, unsigned long addr,
 
 	if (!pte_present(pte)) {
 		const softleaf_t entry = softleaf_from_pte(pte);
+
+		/*
+		 * Our own migration entry, collected earlier in this walk:
+		 * keep the collected pfn, don't fault or roll it back.
+		 */
+		if (softleaf_is_migration(entry) && hmm_select_migrate(range) &&
+		    hmm_pfn_collected(*hmm_pfn) &&
+		    hmm_pfn_to_page(*hmm_pfn) == softleaf_to_page(entry))
+			return 0;
 
 		/*
 		 * Don't fault in device private pages owned by the caller,
@@ -416,6 +438,9 @@ static int hmm_vma_handle_pte(struct mm_walk *walk, unsigned long addr,
 
 	new_pfn_flags = pte_pfn(pte) | cpu_flags;
 out:
+	hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk, addr,
+						addr + PAGE_SIZE,
+						hmm_pfn);
 	*hmm_pfn = (*hmm_pfn & HMM_PFN_INOUT_FLAGS) | new_pfn_flags;
 	return 0;
 
@@ -427,7 +452,19 @@ fault:
 	} else {
 		pte_unmap(ptep);
 	}
-	/* Fault any virtual address we were asked to fault */
+	/*
+	 * This pte needs a fault, so it is not our migration entry: a pfn
+	 * collected here earlier is gone, roll it back before faulting.
+	 */
+	hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk, addr,
+						addr + PAGE_SIZE, hmm_pfn);
+	/*
+	 * Fault any virtual address we were asked to fault. When migrating,
+	 * only this page: later ptes may be our own migration entries or
+	 * caller owned device private pages, which must not be faulted.
+	 */
+	if (hmm_select_migrate(range))
+		end = addr + PAGE_SIZE;
 	return hmm_record_fault(addr, end, required_fault, walk);
 }
 
@@ -454,6 +491,9 @@ static int hmm_vma_handle_absent_pmd(struct mm_walk *walk, unsigned long start,
 		if (softleaf_is_device_private_write(entry))
 			cpu_flags |= HMM_PFN_WRITE;
 
+		hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk,
+							start, end,
+							hmm_pfns);
 		/*
 		 * Fully populate the PFN list though subsequent PFNs could be
 		 * inferred, because drivers which are not yet aware of large
@@ -475,6 +515,10 @@ static int hmm_vma_handle_absent_pmd(struct mm_walk *walk, unsigned long start,
 				spin_unlock(hmm_vma_walk->ptl);
 				hmm_vma_walk->pmdlocked = false;
 			}
+			/* Entries collected from a vanished page table are gone */
+			hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk,
+								addr, end,
+								hmm_pfns);
 			return hmm_record_fault(addr, end, required_fault, walk);
 		}
 		else
@@ -559,6 +603,51 @@ static int migrate_vma_split_folio(struct folio *folio,
 		folio_lock(folio);
 
 	return __migrate_vma_split_folio(folio, fault_page);
+}
+
+/*
+ * Due to dropping ptl locks for splitting for instance, would we
+ * overwrite already collected pfns? This could happen when pmd
+ * pointing to a page table has vanished and been replaced with
+ * a leaf pmd, or another page table. In that case unref and unlock
+ * the folios, the pfns of which were collected from the disappeared
+ * page tables.
+ *
+ * Migrate mode drives fault/migration requests only via range->default_flags.
+ * (HMM_PFN_VALID | HMM_PFN_MIGRATE) denotes a collected entry and can safely
+ * be cleared from hmm_pfn[].
+ */
+static void hmm_vma_handle_migrate_prepare_rollback(const struct hmm_vma_walk *hmm_vma_walk,
+						    unsigned long start,
+						    unsigned long end,
+						    unsigned long *hmm_pfn)
+{
+	struct hmm_range *range = hmm_vma_walk->range;
+	struct migrate_vma *migrate = range->migrate;
+	struct folio *fault_folio = NULL;
+	enum migrate_vma_info minfo;
+	struct folio *folio;
+	unsigned long i;
+
+	minfo = hmm_select_migrate(range);
+	if (!minfo)
+		return;
+
+	WARN_ON_ONCE(!migrate);
+
+	fault_folio = migrate->fault_page ?
+		page_folio(migrate->fault_page) : NULL;
+
+	for (i = 0; start < end; start += PAGE_SIZE, i++) {
+		if (hmm_pfn_collected(hmm_pfn[i])) {
+			folio = page_folio(hmm_pfn_to_page(hmm_pfn[i]));
+			if (folio != fault_folio)
+				folio_unlock(folio);
+			folio_put(folio);
+			hmm_pfn[i] = hmm_pfn_rollback_collected(hmm_pfn[i]);
+
+		}
+	}
 }
 
 static int hmm_vma_handle_migrate_prepare_pmd(const struct mm_walk *walk,
@@ -731,6 +820,11 @@ static int hmm_vma_handle_migrate_prepare(const struct mm_walk *walk,
 	pte = ptep_get(ptep);
 
 	if (pte_none(pte)) {
+		hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk,
+							addr,
+							addr + PAGE_SIZE,
+							hmm_pfn);
+
 		if (vma_is_anonymous(walk->vma)) {
 			*hmm_pfn &= HMM_PFN_INOUT_FLAGS;
 			*hmm_pfn |= HMM_PFN_MIGRATE;
@@ -783,6 +877,10 @@ static int hmm_vma_handle_migrate_prepare(const struct mm_walk *walk,
 		pfn = pte_pfn(pte);
 		if (is_zero_pfn(pfn) &&
 		    (minfo & MIGRATE_VMA_SELECT_SYSTEM)) {
+			hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk,
+								addr,
+								addr + PAGE_SIZE,
+								hmm_pfn);
 			/* Like pte_none(): only anonymous memory can be populated */
 			if (!vma_is_anonymous(walk->vma))
 				goto out;
@@ -929,6 +1027,13 @@ out_error:
 }
 
 #else
+static void hmm_vma_handle_migrate_prepare_rollback(const struct hmm_vma_walk *hmm_vma_walk,
+						    unsigned long start,
+						    unsigned long end,
+						    unsigned long *hmm_pfn)
+{
+}
+
 static int hmm_vma_handle_migrate_prepare_pmd(const struct mm_walk *walk,
 					      pmd_t *pmdp,
 					      unsigned long start,
@@ -1068,6 +1173,16 @@ again:
 			hmm_vma_walk->pmdlocked = false;
 		}
 
+		/* Our own migration entry, collected earlier in this walk */
+		if (minfo && hmm_pfn_collected(hmm_pfns_start[0]) &&
+		    hmm_pfn_to_page(hmm_pfns_start[0]) ==
+		    softleaf_to_page(softleaf_from_pmd(pmd)))
+			return 0;
+
+		/* Not ours: entries collected from a vanished page table are gone */
+		hmm_vma_handle_migrate_prepare_rollback(hmm_vma_walk, start, end,
+							hmm_pfns_start);
+
 		if (required_fault) {
 			/*
 			 * Someone else's migration: when migrating, wait in
@@ -1171,6 +1286,10 @@ again:
 		ptep = pte_offset_map(pmdp, addr);
 	}
 	if (!ptep) {
+		/*
+		 * The pte table is gone: re-walk from start, entries collected
+		 * from the old table are rolled back as they are revisited.
+		 */
 		addr = start;
 		goto again;
 	}
@@ -1192,6 +1311,12 @@ again:
 				flush_tlb_range(walk->vma, start, addr);
 				unmapped = false;
 			}
+			/*
+			 * The pte lock was dropped and the pte table may have
+			 * changed: re-walk from start. Our own migration entries
+			 * are kept, anything else collected is rolled back.
+			 */
+			addr = start;
 			goto again;
 		}
 		if (r) {
