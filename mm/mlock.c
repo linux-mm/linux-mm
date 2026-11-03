@@ -209,6 +209,16 @@ static void mlock_folio_batch(struct folio_batch *fbatch)
 	folios_put(fbatch);
 }
 
+/* Handle a single folio right away, without touching the per-CPU batch. */
+static void mlock_folio_now(struct folio *folio)
+{
+	struct folio_batch fbatch;
+
+	folio_batch_init(&fbatch);
+	folio_batch_add(&fbatch, folio);
+	mlock_folio_batch(&fbatch);
+}
+
 void mlock_drain_local(void)
 {
 	struct folio_batch *fbatch;
@@ -254,8 +264,10 @@ void mlock_folio(struct folio *folio)
 	}
 
 	folio_get(folio);
-	if (!folio_batch_add(fbatch, mlock_lru(folio)) ||
-	    !folio_may_be_lru_cached(folio) || lru_cache_disabled())
+	if (lru_batching_bypassed())
+		mlock_folio_now(mlock_lru(folio));
+	else if (!folio_batch_add(fbatch, mlock_lru(folio)) ||
+		 !folio_may_be_lru_cached(folio) || lru_cache_disabled())
 		mlock_folio_batch(fbatch);
 	local_unlock(&mlock_fbatch.lock);
 }
@@ -277,8 +289,10 @@ void mlock_new_folio(struct folio *folio)
 	__count_vm_events(UNEVICTABLE_PGMLOCKED, nr_pages);
 
 	folio_get(folio);
-	if (!folio_batch_add(fbatch, mlock_new(folio)) ||
-	    !folio_may_be_lru_cached(folio) || lru_cache_disabled())
+	if (lru_batching_bypassed())
+		mlock_folio_now(mlock_new(folio));
+	else if (!folio_batch_add(fbatch, mlock_new(folio)) ||
+		 !folio_may_be_lru_cached(folio) || lru_cache_disabled())
 		mlock_folio_batch(fbatch);
 	local_unlock(&mlock_fbatch.lock);
 }
@@ -298,8 +312,10 @@ void munlock_folio(struct folio *folio)
 	 * which will check whether the folio is multiply mlocked.
 	 */
 	folio_get(folio);
-	if (!folio_batch_add(fbatch, folio) ||
-	    !folio_may_be_lru_cached(folio) || lru_cache_disabled())
+	if (lru_batching_bypassed())
+		mlock_folio_now(folio);
+	else if (!folio_batch_add(fbatch, folio) ||
+		 !folio_may_be_lru_cached(folio) || lru_cache_disabled())
 		mlock_folio_batch(fbatch);
 	local_unlock(&mlock_fbatch.lock);
 }

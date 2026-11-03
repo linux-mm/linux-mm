@@ -17,6 +17,7 @@
 #include <linux/pagewalk.h>
 #include <linux/rmap.h>
 #include <linux/swap.h>
+#include <linux/sched/isolation.h>
 #include <linux/leafops.h>
 #include <linux/tracepoint-defs.h>
 
@@ -1010,6 +1011,33 @@ void mlock_new_folio(struct folio *folio);
 bool need_mlock_drain(int cpu);
 void mlock_drain_local(void);
 void mlock_drain_remote(int cpu);
+
+/*
+ * Folios are normally parked in per-CPU batches (cpu_fbatches and
+ * mlock_fbatch) before they are moved to the LRU lists. A remote CPU can
+ * only empty such a batch by queueing lru_add_drain_per_cpu() on the owning
+ * CPU and waiting for it, see __lru_add_drain_all(). On an isolated CPU that
+ * kworker may not get to run for a long time, e.g. because a SCHED_FIFO task
+ * busy-loops there, and every lru_add_drain_all() or lru_cache_disable()
+ * caller in the system then blocks behind it.
+ *
+ * Isolated CPUs therefore bypass the per-CPU batches entirely and move
+ * folios to the LRU lists right away, through an on-stack batch. The folio
+ * must not even transiently sit in the per-CPU batch: __lru_add_drain_all()
+ * samples the batch counters without the owning CPU's lock, so the few
+ * instructions between folio_batch_add() and an immediate drain are enough
+ * to get work queued on the isolated CPU. The per-CPU buffer_head LRU
+ * (bh_lru_install()) and the memcg stock drain (schedule_drain_work())
+ * already stay away from isolated CPUs the same way.
+ *
+ * Callers hold the batch's local_lock, so smp_processor_id() is stable. The
+ * housekeeping cpumask consulted by cpu_is_isolated() is RCU protected.
+ */
+static inline bool lru_batching_bypassed(void)
+{
+	guard(rcu)();
+	return cpu_is_isolated(smp_processor_id());
+}
 
 extern pmd_t maybe_pmd_mkwrite(pmd_t pmd, struct vm_area_struct *vma);
 
