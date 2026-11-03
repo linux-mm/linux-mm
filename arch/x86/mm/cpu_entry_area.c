@@ -30,7 +30,11 @@ static __init void init_cea_offsets(void)
 	unsigned int max_cea;
 	unsigned int i, j;
 
-	if (!kaslr_enabled()) {
+	/*
+	 * KMSAN works out the CPU of a CPU entry area address from its offset,
+	 * see arch_kmsan_get_meta_or_null(), so keep the areas in CPU order.
+	 */
+	if (!kaslr_enabled() || IS_ENABLED(CONFIG_KMSAN)) {
 		for_each_possible_cpu(i)
 			per_cpu(_cea_offset, i) = i;
 		return;
