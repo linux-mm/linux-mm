@@ -373,6 +373,12 @@ typedef int __bitwise fpb_t;
  */
 #define FPB_MERGE_YOUNG_DIRTY		((__force fpb_t)BIT(4))
 
+/*
+ * Read the page table entries with ptep_get_lockless(): the caller does not
+ * hold the page table lock (e.g, GUP-fast).
+ */
+#define FPB_LOCKLESS			((__force fpb_t)BIT(5))
+
 static inline pte_t __pte_batch_clear_ignored(pte_t pte, fpb_t flags)
 {
 	if (!(flags & FPB_RESPECT_DIRTY))
@@ -418,7 +424,7 @@ static inline unsigned int folio_pte_batch_flags(struct folio *folio,
 		struct vm_area_struct *vma, pte_t *ptep, pte_t *ptentp,
 		unsigned int max_nr, fpb_t flags)
 {
-	bool any_writable = false, any_young = false, any_dirty = false;
+	bool any_writable = false, any_young = false, any_dirty = false, writable;
 	pte_t expected_pte, pte = *ptentp;
 	unsigned int nr, cur_nr;
 
@@ -438,12 +444,23 @@ static inline unsigned int folio_pte_batch_flags(struct folio *folio,
 
 	nr = pte_batch_hint(ptep, pte);
 	expected_pte = __pte_batch_clear_ignored(pte_advance_pfn(pte, nr), flags);
+	writable = !!pte_write(pte);
 	ptep = ptep + nr;
 
 	while (nr < max_nr) {
-		pte = ptep_get(ptep);
+		pte = (flags & FPB_LOCKLESS) ? ptep_get_lockless(ptep) : ptep_get(ptep);
 
 		if (!pte_same(__pte_batch_clear_ignored(pte, flags), expected_pte))
+			break;
+
+		/*
+		 * x86 shadow-stack PTEs encode writability as RW=0, DIRTY=1.
+		 * Without FPB_RESPECT_DIRTY, __pte_batch_clear_ignored()
+		 * considers shadow-stack PTE as the same with subsequent
+		 * ordinary read-only PTEs. Therefore, check whether pte writable.
+		 */
+		if (unlikely((flags & (FPB_RESPECT_WRITE | FPB_RESPECT_DIRTY)) == FPB_RESPECT_WRITE &&
+			     writable != !!pte_write(pte)))
 			break;
 
 		if (flags & FPB_MERGE_WRITE)
@@ -1283,6 +1300,10 @@ int migrate_device_coherent_folio(struct folio *folio);
 int __must_check try_grab_folio(struct folio *folio, int refs,
 				unsigned int flags);
 
+unsigned long gup_unshared_pages(struct vm_area_struct *vma, unsigned int flags,
+				 struct folio *folio, struct page *page,
+				 unsigned long nr_pages);
+
 /*
  * mm/huge_memory.c
  */
@@ -1355,50 +1376,11 @@ enum {
  * to fallback to the slow path just to lookup the vma.
  */
 static inline bool gup_must_unshare(struct vm_area_struct *vma,
-				    unsigned int flags, struct page *page)
+				    unsigned int flags,
+				    struct folio *folio, struct page *page)
 {
-	/*
-	 * FOLL_WRITE is implicitly handled correctly as the page table entry
-	 * has to be writable -- and if it references (part of) an anonymous
-	 * folio, that part is required to be marked exclusive.
-	 */
-	if ((flags & (FOLL_WRITE | FOLL_PIN)) != FOLL_PIN)
-		return false;
-	/*
-	 * Note: PageAnon(page) is stable until the page is actually getting
-	 * freed.
-	 */
-	if (!PageAnon(page)) {
-		/*
-		 * We only care about R/O long-term pining: R/O short-term
-		 * pinning does not have the semantics to observe successive
-		 * changes through the process page tables.
-		 */
-		if (!(flags & FOLL_LONGTERM))
-			return false;
-
-		/* We really need the vma ... */
-		if (!vma)
-			return true;
-
-		/*
-		 * ... because we only care about writable private ("COW")
-		 * mappings where we have to break COW early.
-		 */
-		return vma_is_cow_mapping(vma);
-	}
-
-	/* Paired with a memory barrier in folio_try_share_anon_rmap_*(). */
-	if (IS_ENABLED(CONFIG_HAVE_GUP_FAST))
-		smp_rmb();
-
-	/*
-	 * Note that KSM pages cannot be exclusive, and consequently,
-	 * cannot get pinned.
-	 */
-	return !PageAnonExclusive(page);
+	return gup_unshared_pages(vma, flags, folio, page, 1) != 1;
 }
-
 
 static inline bool vma_soft_dirty_enabled(struct vm_area_struct *vma)
 {
