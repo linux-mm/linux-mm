@@ -54,6 +54,11 @@ MODULE_PARM_DESC(memmap_on_memory,
  *   Subblocks within a Linux memory block might either be plugged or unplugged.
  *   Memory is added/removed to Linux MM in Linux memory block granularity.
  *
+ *   With memmap_on_memory, the first subblock(s) of a Linux memory block
+ *   host its memmap ("memmap subblocks"). They stay plugged while the Linux
+ *   memory block is added to Linux, which requires at least one other plugged
+ *   subblock. "Fully plugged" and "partially plugged" below include them.
+ *
  * * Big Block Mode (BBM): A Big Block (BB) spans 1..X Linux memory blocks.
  *   Memory is added/removed to Linux MM in Big Block granularity.
  *
@@ -72,7 +77,10 @@ MODULE_PARM_DESC(memmap_on_memory,
 enum virtio_mem_sbm_mb_state {
 	/* Unplugged, not added to Linux. Can be reused later. */
 	VIRTIO_MEM_SBM_MB_UNUSED = 0,
-	/* (Partially) plugged, not added to Linux. Error on add_memory(). */
+	/*
+	 * (Partially) plugged, not added to Linux. Error on add_memory() or on
+	 * unplugging the memmap subblocks after removing it.
+	 */
 	VIRTIO_MEM_SBM_MB_PLUGGED,
 	/* Fully plugged, fully added to Linux, offline. */
 	VIRTIO_MEM_SBM_MB_OFFLINE,
@@ -179,6 +187,8 @@ struct virtio_mem {
 			uint64_t sb_size;
 			/* The number of subblocks per Linux memory block. */
 			uint32_t sbs_per_mb;
+			/* The number of memmap subblocks per memory block. */
+			u32 memmap_sbs;
 
 			/*
 			 * Some of the Linux memory blocks tracked as "partially
@@ -1567,15 +1577,16 @@ static int virtio_mem_bbm_plug_bb(struct virtio_mem *vm, unsigned long bb_id)
 
 /*
  * Unplug the desired number of plugged subblocks of a offline or not-added
- * memory block. Will fail if any subblock cannot get unplugged (instead of
- * skipping it).
+ * memory block, ignoring the subblocks below @first_sb. Will fail if any
+ * subblock cannot get unplugged (instead of skipping it).
  *
  * Will not modify the state of the memory block.
  *
  * Note: can fail after some subblocks were unplugged.
  */
 static int virtio_mem_sbm_unplug_any_sb_raw(struct virtio_mem *vm,
-					    unsigned long mb_id, uint64_t *nb_sb)
+					    unsigned long mb_id, int first_sb,
+					    uint64_t *nb_sb)
 {
 	int sb_id, count;
 	int rc;
@@ -1583,14 +1594,14 @@ static int virtio_mem_sbm_unplug_any_sb_raw(struct virtio_mem *vm,
 	sb_id = vm->sbm.sbs_per_mb - 1;
 	while (*nb_sb) {
 		/* Find the next candidate subblock */
-		while (sb_id >= 0 &&
+		while (sb_id >= first_sb &&
 		       virtio_mem_sbm_test_sb_unplugged(vm, mb_id, sb_id, 1))
 			sb_id--;
-		if (sb_id < 0)
+		if (sb_id < first_sb)
 			break;
 		/* Try to unplug multiple subblocks at a time */
 		count = 1;
-		while (count < *nb_sb && sb_id > 0 &&
+		while (count < *nb_sb && sb_id > first_sb &&
 		       virtio_mem_sbm_test_sb_plugged(vm, mb_id, sb_id - 1, 1)) {
 			count++;
 			sb_id--;
@@ -1607,7 +1618,7 @@ static int virtio_mem_sbm_unplug_any_sb_raw(struct virtio_mem *vm,
 }
 
 /*
- * Unplug all plugged subblocks of an offline or not-added memory block.
+ * Unplug all plugged subblocks of a not-added memory block.
  *
  * Will not modify the state of the memory block.
  *
@@ -1617,35 +1628,65 @@ static int virtio_mem_sbm_unplug_mb(struct virtio_mem *vm, unsigned long mb_id)
 {
 	uint64_t nb_sb = vm->sbm.sbs_per_mb;
 
-	return virtio_mem_sbm_unplug_any_sb_raw(vm, mb_id, &nb_sb);
+	return virtio_mem_sbm_unplug_any_sb_raw(vm, mb_id, 0, &nb_sb);
 }
 
 /*
- * Try (offlining and) removing memory from Linux in case all subblocks are
- * unplugged. Can be called on online and offline memory blocks.
+ * Unplug the memmap subblocks of a memory block removed from Linux and mark it
+ * unused. The memmap subblocks are deducted from @nb_sb (clamped), even if
+ * unplugging them fails. On error, the memory block stays
+ * VIRTIO_MEM_SBM_MB_PLUGGED and virtio_mem_cleanup_pending_mb() retries.
+ *
+ * Will modify the state of the memory block.
+ */
+static int virtio_mem_sbm_finish_remove_mb(struct virtio_mem *vm,
+					   unsigned long mb_id, uint64_t *nb_sb)
+{
+	const int count = vm->sbm.memmap_sbs;
+	int rc;
+
+	if (count) {
+		if (nb_sb)
+			*nb_sb -= min_t(uint64_t, *nb_sb, count);
+		virtio_mem_sbm_set_mb_state(vm, mb_id,
+					    VIRTIO_MEM_SBM_MB_PLUGGED);
+		rc = virtio_mem_sbm_unplug_sb(vm, mb_id, 0, count);
+		if (rc)
+			return rc;
+	}
+	virtio_mem_sbm_set_mb_state(vm, mb_id, VIRTIO_MEM_SBM_MB_UNUSED);
+	return 0;
+}
+
+/*
+ * Try (offlining and) removing memory from Linux in case all subblocks except
+ * the memmap subblocks are unplugged. Can be called on online and offline
+ * memory blocks.
  *
  * May modify the state of memory blocks in virtio-mem.
  */
 static int virtio_mem_sbm_try_remove_unplugged_mb(struct virtio_mem *vm,
-						  unsigned long mb_id)
+						  unsigned long mb_id,
+						  uint64_t *nb_sb)
 {
+	const int first_sb = vm->sbm.memmap_sbs;
 	int rc;
 
 	/*
 	 * Once all subblocks of a memory block were unplugged, offline and
-	 * remove it.
+	 * remove it. The memmap subblocks alone provide no memory to Linux.
 	 */
-	if (!virtio_mem_sbm_test_sb_unplugged(vm, mb_id, 0, vm->sbm.sbs_per_mb))
+	if (!virtio_mem_sbm_test_sb_unplugged(vm, mb_id, first_sb,
+					      vm->sbm.sbs_per_mb - first_sb))
 		return 0;
 
 	/* offline_and_remove_memory() works for online and offline memory. */
 	mutex_unlock(&vm->hotplug_mutex);
 	rc = virtio_mem_sbm_offline_and_remove_mb(vm, mb_id);
 	mutex_lock(&vm->hotplug_mutex);
-	if (!rc)
-		virtio_mem_sbm_set_mb_state(vm, mb_id,
-					    VIRTIO_MEM_SBM_MB_UNUSED);
-	return rc;
+	if (rc)
+		return rc;
+	return virtio_mem_sbm_finish_remove_mb(vm, mb_id, nb_sb);
 }
 
 /*
@@ -1686,7 +1727,7 @@ static int virtio_mem_sbm_plug_and_add_mb(struct virtio_mem *vm,
 	const int count = min_t(int, *nb_sb, vm->sbm.sbs_per_mb);
 	int rc;
 
-	if (WARN_ON_ONCE(!count))
+	if (WARN_ON_ONCE(count <= vm->sbm.memmap_sbs))
 		return -EINVAL;
 
 	/*
@@ -1806,6 +1847,9 @@ static int virtio_mem_sbm_plug_request(struct virtio_mem *vm, uint64_t diff)
 
 	/* Try to plug and add unused blocks */
 	virtio_mem_sbm_for_each_mb(vm, mb_id, VIRTIO_MEM_SBM_MB_UNUSED) {
+		/* Don't add a memory block just for its memmap subblocks. */
+		if (nb_sb <= vm->sbm.memmap_sbs)
+			return 0;
 		if (!virtio_mem_could_add_memory(vm, memory_block_size_bytes()))
 			return -ENOSPC;
 
@@ -1817,6 +1861,8 @@ static int virtio_mem_sbm_plug_request(struct virtio_mem *vm, uint64_t diff)
 
 	/* Try to prepare, plug and add new blocks */
 	while (nb_sb) {
+		if (nb_sb <= vm->sbm.memmap_sbs)
+			return 0;
 		if (!virtio_mem_could_add_memory(vm, memory_block_size_bytes()))
 			return -ENOSPC;
 
@@ -1954,9 +2000,10 @@ static int virtio_mem_sbm_unplug_any_sb_offline(struct virtio_mem *vm,
 						unsigned long mb_id,
 						uint64_t *nb_sb)
 {
+	const int first_sb = vm->sbm.memmap_sbs;
 	int rc;
 
-	rc = virtio_mem_sbm_unplug_any_sb_raw(vm, mb_id, nb_sb);
+	rc = virtio_mem_sbm_unplug_any_sb_raw(vm, mb_id, first_sb, nb_sb);
 
 	/* some subblocks might have been unplugged even on failure */
 	if (!virtio_mem_sbm_test_sb_plugged(vm, mb_id, 0, vm->sbm.sbs_per_mb))
@@ -1965,20 +2012,25 @@ static int virtio_mem_sbm_unplug_any_sb_offline(struct virtio_mem *vm,
 	if (rc)
 		return rc;
 
-	if (virtio_mem_sbm_test_sb_unplugged(vm, mb_id, 0, vm->sbm.sbs_per_mb)) {
+	if (virtio_mem_sbm_test_sb_unplugged(vm, mb_id, first_sb,
+					     vm->sbm.sbs_per_mb - first_sb)) {
 		/*
 		 * Remove the block from Linux - this should never fail.
 		 * Hinder the block from getting onlined by marking it
-		 * unplugged. Temporarily drop the mutex, so
-		 * any pending GOING_ONLINE requests can be serviced/rejected.
+		 * unplugged (or plugged, if memmap subblocks remain).
+		 * Temporarily drop the mutex, so any pending GOING_ONLINE
+		 * requests can be serviced/rejected.
 		 */
-		virtio_mem_sbm_set_mb_state(vm, mb_id,
+		virtio_mem_sbm_set_mb_state(vm, mb_id, first_sb ?
+					    VIRTIO_MEM_SBM_MB_PLUGGED :
 					    VIRTIO_MEM_SBM_MB_UNUSED);
 
 		mutex_unlock(&vm->hotplug_mutex);
 		rc = virtio_mem_sbm_remove_mb(vm, mb_id);
 		BUG_ON(rc);
 		mutex_lock(&vm->hotplug_mutex);
+
+		return virtio_mem_sbm_finish_remove_mb(vm, mb_id, nb_sb);
 	}
 	return 0;
 }
@@ -2040,27 +2092,33 @@ static int virtio_mem_sbm_unplug_any_sb_online(struct virtio_mem *vm,
 					       unsigned long mb_id,
 					       uint64_t *nb_sb)
 {
+	const int first_sb = vm->sbm.memmap_sbs;
+	const int count = vm->sbm.sbs_per_mb - first_sb;
 	int rc, sb_id;
 
-	/* If possible, try to unplug the complete block in one shot. */
-	if (*nb_sb >= vm->sbm.sbs_per_mb &&
-	    virtio_mem_sbm_test_sb_plugged(vm, mb_id, 0, vm->sbm.sbs_per_mb)) {
-		rc = virtio_mem_sbm_unplug_sb_online(vm, mb_id, 0,
-						     vm->sbm.sbs_per_mb);
+	/*
+	 * If possible, try to unplug the complete block (except the memmap
+	 * subblocks) in one shot.
+	 */
+	if (*nb_sb >= count &&
+	    virtio_mem_sbm_test_sb_plugged(vm, mb_id, first_sb, count)) {
+		rc = virtio_mem_sbm_unplug_sb_online(vm, mb_id, first_sb,
+						     count);
 		if (!rc) {
-			*nb_sb -= vm->sbm.sbs_per_mb;
+			*nb_sb -= count;
 			goto unplugged;
 		} else if (rc != -EBUSY)
 			return rc;
 	}
 
 	/* Fallback to single subblocks. */
-	for (sb_id = vm->sbm.sbs_per_mb - 1; sb_id >= 0 && *nb_sb; sb_id--) {
+	for (sb_id = vm->sbm.sbs_per_mb - 1; sb_id >= first_sb && *nb_sb;
+	     sb_id--) {
 		/* Find the next candidate subblock */
-		while (sb_id >= 0 &&
+		while (sb_id >= first_sb &&
 		       !virtio_mem_sbm_test_sb_plugged(vm, mb_id, sb_id, 1))
 			sb_id--;
-		if (sb_id < 0)
+		if (sb_id < first_sb)
 			break;
 
 		rc = virtio_mem_sbm_unplug_sb_online(vm, mb_id, sb_id, 1);
@@ -2072,7 +2130,7 @@ static int virtio_mem_sbm_unplug_any_sb_online(struct virtio_mem *vm,
 	}
 
 unplugged:
-	rc = virtio_mem_sbm_try_remove_unplugged_mb(vm, mb_id);
+	rc = virtio_mem_sbm_try_remove_unplugged_mb(vm, mb_id, nb_sb);
 	if (rc)
 		vm->sbm.have_unplugged_mb = 1;
 	/* Ignore errors, this is not critical. We'll retry later. */
@@ -2389,11 +2447,11 @@ static int virtio_mem_cleanup_pending_mb(struct virtio_mem *vm)
 
 	mutex_lock(&vm->hotplug_mutex);
 	virtio_mem_sbm_for_each_mb(vm, id, VIRTIO_MEM_SBM_MB_MOVABLE_PARTIAL)
-		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id);
+		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id, NULL);
 	virtio_mem_sbm_for_each_mb(vm, id, VIRTIO_MEM_SBM_MB_KERNEL_PARTIAL)
-		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id);
+		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id, NULL);
 	virtio_mem_sbm_for_each_mb(vm, id, VIRTIO_MEM_SBM_MB_OFFLINE_PARTIAL)
-		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id);
+		rc |= virtio_mem_sbm_try_remove_unplugged_mb(vm, id, NULL);
 	mutex_unlock(&vm->hotplug_mutex);
 
 	if (rc)
@@ -2642,12 +2700,23 @@ static int virtio_mem_init_hotplug(struct virtio_mem *vm)
 	/* All memory blocks of a device must agree, decide once. */
 	if (memmap_on_memory) {
 		vm->memmap_pages = mhp_memmap_on_memory_nr_pages();
-		if (!vm->memmap_pages) {
+		if (!vm->memmap_pages)
 			dev_warn(&vm->vdev->dev,
 				 "memmap_on_memory is disabled or not supported by the core, ignoring\n");
-		} else if (vm->in_sbm) {
+	}
+	/*
+	 * In SBM, only support a memmap that spans complete subblocks: the
+	 * memmap subblocks then never provide memory to Linux. As the core
+	 * keeps at least one pageblock of each memory block for the buddy,
+	 * at least one other subblock remains.
+	 */
+	if (vm->memmap_pages && vm->in_sbm) {
+		if (IS_ALIGNED(PFN_PHYS(vm->memmap_pages), vm->sbm.sb_size)) {
+			vm->sbm.memmap_sbs = PFN_PHYS(vm->memmap_pages) /
+					     vm->sbm.sb_size;
+		} else {
 			dev_warn(&vm->vdev->dev,
-				 "memmap_on_memory is only supported in BBM, ignoring\n");
+				 "memmap_on_memory requires the memmap to span complete subblocks, ignoring; consider force_bbm\n");
 			vm->memmap_pages = 0;
 		}
 	}
@@ -2663,6 +2732,9 @@ static int virtio_mem_init_hotplug(struct virtio_mem *vm)
 	if (vm->memmap_pages)
 		dev_info(&vm->vdev->dev, "memmap on memory: 0x%llx bytes per memory block",
 			 (unsigned long long)PFN_PHYS(vm->memmap_pages));
+	if (vm->in_sbm && vm->sbm.memmap_sbs)
+		dev_info(&vm->vdev->dev, "memmap subblocks per memory block: %u",
+			 vm->sbm.memmap_sbs);
 
 	/* create the parent resource for all memory */
 	rc = virtio_mem_create_resource(vm);
