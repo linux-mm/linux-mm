@@ -84,9 +84,17 @@ static inline bool housekeeping_cpu(int cpu, enum hk_type type)
 	return true;
 }
 
+/*
+ * A CPU is isolated if it has been taken out of the scheduler domains
+ * (isolcpus=domain or a cpuset isolated partition) or out of kernel noise
+ * (nohz_full= or isolcpus=nohz). The latter does not imply the former:
+ * the kernel accepts nohz_full CPUs that are still part of the scheduler
+ * domains, and deferred per-CPU work must not target those CPUs either.
+ */
 static inline bool cpu_is_isolated(int cpu)
 {
-	return !housekeeping_test_cpu(cpu, HK_TYPE_DOMAIN);
+	return !housekeeping_cpu(cpu, HK_TYPE_DOMAIN) ||
+	       !housekeeping_cpu(cpu, HK_TYPE_KERNEL_NOISE);
 }
 
 #endif /* _LINUX_SCHED_ISOLATION_H */
