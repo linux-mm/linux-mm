@@ -7294,8 +7294,22 @@ restart:
 		if (nr_boost_reclaim && !nr_reclaimed)
 			break;
 
-		if (raise_priority || !nr_reclaimed)
+		if (raise_priority || !nr_reclaimed) {
+			/*
+			 * Similarly to when direct reclaim is retrying, try to
+			 * unreserve highatomic pageblocks on the node. Convert
+			 * them to movable ones as kswapd doesn't have a target
+			 * migratetype, and passing unmovable should lead to
+			 * least permanent fragmentation.
+			 */
+			for (int i = 0; i <= highest_zoneidx; i++) {
+				struct zone *zone = pgdat->node_zones + i;
+
+				unreserve_highatomic_pageblock_zone(zone,
+						MIGRATE_UNMOVABLE, false);
+			}
 			sc.priority--;
+		}
 	} while (sc.priority >= 1);
 
 	/*
