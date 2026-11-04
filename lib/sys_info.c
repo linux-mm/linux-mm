@@ -7,6 +7,7 @@
 #include <linux/kernel.h>
 #include <linux/ftrace.h>
 #include <linux/nmi.h>
+#include <linux/panic.h>
 #include <linux/sched/debug.h>
 #include <linux/string.h>
 #include <linux/sysctl.h>
@@ -138,29 +139,39 @@ subsys_initcall(sys_info_sysctl_init);
 
 static void __sys_info(unsigned long si_mask)
 {
-	if (si_mask & SYS_INFO_TASKS)
-		show_state();
-
 	if (si_mask & SYS_INFO_MEM)
 		show_mem();
-
-	if (si_mask & SYS_INFO_TIMERS)
-		sysrq_timer_list_show();
 
 	if (si_mask & SYS_INFO_LOCKS)
 		debug_show_all_locks();
 
-	if (si_mask & SYS_INFO_FTRACE)
-		ftrace_dump(DUMP_ALL);
-
-	if (si_mask & SYS_INFO_ALL_BT)
-		trigger_all_cpu_backtrace();
+	if (si_mask & SYS_INFO_TIMERS)
+		sysrq_timer_list_show();
 
 	if (si_mask & SYS_INFO_BLOCKED_TASKS)
 		show_state_filter(TASK_UNINTERRUPTIBLE);
+
+	if (si_mask & SYS_INFO_ALL_BT) {
+		if (panic_on_this_cpu())
+			panic_trigger_all_cpu_backtrace();
+		else if (!panic_in_progress())
+			trigger_all_cpu_backtrace();
+	}
+
+	if (si_mask & SYS_INFO_TASKS)
+		show_state();
+
+	if (si_mask & SYS_INFO_FTRACE)
+		ftrace_dump(DUMP_ALL);
+}
+
+unsigned long sys_info_get_mask(unsigned long si_mask)
+{
+	return (si_mask & ~SYS_INFO_PANIC_CONSOLE_REPLAY) ? :
+		READ_ONCE(kernel_si_mask);
 }
 
 void sys_info(unsigned long si_mask)
 {
-	__sys_info(si_mask ? : kernel_si_mask);
+	__sys_info(sys_info_get_mask(si_mask));
 }
