@@ -158,6 +158,7 @@ static void page_counter_drain_stock(struct page_counter_stock_pcp *stock,
  * Consume the cached charge if enough nr_pages are present, otherwise return
  * failure. Also return failure for charge requests larger than
  * PAGE_COUNTER_STOCK_BATCH or if the local lock is already taken.
+ * Drain disabled cached counters while looking up the requested counter.
  */
 static bool page_counter_consume_stock(struct page_counter *counter,
 				       unsigned long nr_pages)
@@ -176,12 +177,17 @@ static bool page_counter_consume_stock(struct page_counter *counter,
 	for (i = 0; i < NR_PAGE_COUNTER_STOCK; i++) {
 		struct page_counter *cached = pcp_stock->cached[i];
 
+		/* Drain any stock that is disabled but hasn't drained yet */
+		if (cached && !READ_ONCE(cached->stock)) {
+			page_counter_drain_stock(pcp_stock, i);
+			continue;
+		}
 		if (counter != cached)
 			continue;
 
 		stock_pages = pcp_stock->nr_pages[i];
 		if (unlikely(stock_pages < nr_pages))
-			break;
+			continue;
 
 		stock_pages -= nr_pages;
 		WRITE_ONCE(pcp_stock->nr_pages[i], stock_pages);
