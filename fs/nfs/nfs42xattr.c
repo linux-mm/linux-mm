@@ -801,8 +801,8 @@ static struct shrinker *nfs4_xattr_entry_shrinker;
 static struct shrinker *nfs4_xattr_large_entry_shrinker;
 
 static enum lru_status
-cache_lru_isolate(struct list_head *item,
-	struct list_lru_one *lru, void *arg)
+cache_lru_isolate(struct list_head *item, struct list_lru_node *node,
+		  struct list_lru_one *list, void *arg)
 {
 	struct list_head *dispose = arg;
 	struct inode *inode;
@@ -827,7 +827,7 @@ cache_lru_isolate(struct list_head *item,
 	cache->inode = NULL;
 	NFS_I(inode)->xattr_cache = NULL;
 	NFS_I(inode)->cache_validity &= ~NFS_INO_INVALID_XATTR;
-	list_lru_isolate(lru, &cache->lru);
+	list_lru_isolate(node, list, &cache->lru);
 
 	spin_unlock(&inode->i_lock);
 
@@ -866,8 +866,8 @@ nfs4_xattr_cache_count(struct shrinker *shrink, struct shrink_control *sc)
 }
 
 static enum lru_status
-entry_lru_isolate(struct list_head *item,
-	struct list_lru_one *lru, void *arg)
+entry_lru_isolate(struct list_head *item, struct list_lru_node *node,
+		  struct list_lru_one *list, void *arg)
 {
 	struct list_head *dispose = arg;
 	struct nfs4_xattr_bucket *bucket;
@@ -896,7 +896,7 @@ entry_lru_isolate(struct list_head *item,
 
 		hlist_del_init(&entry->hnode);
 		atomic_long_dec(&cache->nent);
-		list_lru_isolate(lru, &entry->lru);
+		list_lru_isolate(node, list, &entry->lru);
 
 		spin_unlock(&bucket->lock);
 	} else {
@@ -907,7 +907,7 @@ entry_lru_isolate(struct list_head *item,
 		kref_get(&entry->ref);
 
 		cache->listxattr = NULL;
-		list_lru_isolate(lru, &entry->lru);
+		list_lru_isolate(node, list, &entry->lru);
 
 		spin_unlock(&cache->listxattr_lock);
 	}

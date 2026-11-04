@@ -211,9 +211,7 @@ bool __list_lru_del(struct list_lru *lru, struct list_lru_one *l,
 		    struct list_head *item, int nid)
 {
 	if (!list_empty(item)) {
-		list_del_init(item);
-		l->nr_items--;
-		atomic_long_dec(&lru->node[nid].nr_items);
+		list_lru_isolate(&lru->node[nid], l, item);
 		return true;
 	}
 	return false;
@@ -291,18 +289,21 @@ bool list_lru_del_obj(struct list_lru *lru, struct list_head *item)
 }
 EXPORT_SYMBOL_GPL(list_lru_del_obj);
 
-void list_lru_isolate(struct list_lru_one *list, struct list_head *item)
+void list_lru_isolate(struct list_lru_node *node, struct list_lru_one *list,
+		      struct list_head *item)
 {
 	list_del_init(item);
 	list->nr_items--;
+	atomic_long_dec(&node->nr_items);
 }
 EXPORT_SYMBOL_GPL(list_lru_isolate);
 
-void list_lru_isolate_move(struct list_lru_one *list, struct list_head *item,
-			   struct list_head *head)
+void list_lru_isolate_move(struct list_lru_node *node, struct list_lru_one *list,
+			   struct list_head *item, struct list_head *head)
 {
 	list_move(item, head);
 	list->nr_items--;
+	atomic_long_dec(&node->nr_items);
 }
 EXPORT_SYMBOL_GPL(list_lru_isolate_move);
 
@@ -359,7 +360,7 @@ restart:
 			break;
 		--*nr_to_walk;
 
-		ret = isolate(item, l, cb_arg);
+		ret = isolate(item, nlru, l, cb_arg);
 		switch (ret) {
 		/*
 		 * LRU_RETRY, LRU_REMOVED_RETRY and LRU_STOP will drop the lru
@@ -371,7 +372,6 @@ restart:
 			fallthrough;
 		case LRU_REMOVED:
 			isolated++;
-			atomic_long_dec(&nlru->nr_items);
 			if (ret == LRU_REMOVED_RETRY)
 				goto restart;
 			break;

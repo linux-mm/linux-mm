@@ -685,7 +685,8 @@ const LRU_REMOVED_ENTRY: bindings::lru_status = bindings::lru_status::LRU_REMOVE
 #[no_mangle]
 unsafe extern "C" fn rust_shrink_free_page(
     item: *mut bindings::list_head,
-    lru: *mut bindings::list_lru_one,
+    node: *mut bindings::list_lru_node,
+    list: *mut bindings::list_lru_one,
     _cb_arg: *mut c_void,
 ) -> bindings::lru_status {
     // Fields that should survive after unlocking the lru lock.
@@ -728,7 +729,7 @@ unsafe extern "C" fn rust_shrink_free_page(
         };
 
         // SAFETY: The item is in this lru list, so it's okay to remove it.
-        unsafe { bindings::list_lru_isolate(lru, item) };
+        unsafe { bindings::list_lru_isolate(node, list, item) };
 
         // SAFETY: Both pointers are in bounds of the same allocation.
         page_index = unsafe { info.offset_from(inner.pages) } as usize;
@@ -746,7 +747,7 @@ unsafe extern "C" fn rust_shrink_free_page(
     }
 
     // SAFETY: The lru lock is locked when this method is called.
-    unsafe { bindings::spin_unlock(&raw mut (*lru).lock) };
+    unsafe { bindings::spin_unlock(&raw mut (*list).lock) };
 
     if let Some(vma) = check_vma(&vma_read, range_ptr) {
         let user_page_addr = vma_addr + (page_index << PAGE_SHIFT);

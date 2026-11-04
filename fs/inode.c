@@ -929,7 +929,7 @@ EXPORT_SYMBOL_GPL(evict_inodes);
  * with this flag set because they are the inodes that are out of order.
  */
 static enum lru_status inode_lru_isolate(struct list_head *item,
-		struct list_lru_one *lru, void *arg)
+		struct list_lru_node *node, struct list_lru_one *list, void *arg)
 {
 	struct list_head *freeable = arg;
 	struct inode	*inode = container_of(item, struct inode, i_lru);
@@ -956,7 +956,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
 	if (icount_read(inode) ||
 	    (inode_state_read(inode) & ~I_REFERENCED) ||
 	    !mapping_shrinkable(&inode->i_data)) {
-		list_lru_isolate(lru, &inode->i_lru);
+		list_lru_isolate(node, list, &inode->i_lru);
 		spin_unlock(&inode->i_lock);
 		this_cpu_dec(nr_unused);
 		return LRU_REMOVED;
@@ -979,7 +979,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
 
 		inode_pin_lru_isolating(inode);
 		spin_unlock(&inode->i_lock);
-		spin_unlock(&lru->lock);
+		spin_unlock(&list->lock);
 		reap = invalidate_mapping_pages(&inode->i_data, 0, -1);
 		if (current_is_kswapd())
 			__count_vm_events(KSWAPD_INODESTEAL, reap);
@@ -998,7 +998,7 @@ static enum lru_status inode_lru_isolate(struct list_head *item,
 
 	WARN_ON(inode_state_read(inode) & I_NEW);
 	inode_state_set(inode, I_FREEING);
-	list_lru_isolate_move(lru, &inode->i_lru, freeable);
+	list_lru_isolate_move(node, list, &inode->i_lru, freeable);
 	spin_unlock(&inode->i_lock);
 
 	this_cpu_dec(nr_unused);
