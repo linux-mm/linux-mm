@@ -35,6 +35,7 @@
 #include <linux/magic.h>
 #include <linux/mutex.h>
 #include <linux/mount.h>
+#include <linux/mempolicy.h>
 #include <linux/pagemap.h>
 #include <linux/proc_fs.h>
 #include <linux/rcupdate.h>
@@ -5733,6 +5734,7 @@ static void css_free_rwork_fn(struct work_struct *work)
 			cgroup1_pidlist_destroy_all(cgrp);
 		cancel_work_sync(&cgrp->release_agent_work);
 		bpf_cgrp_storage_free(cgrp);
+		weighted_interleave_cgroup_free(cgrp);
 
 		if (cgroup_parent(cgrp)) {
 			/*

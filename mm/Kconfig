@@ -1530,6 +1530,12 @@ config ARCH_HAS_PTDUMP
 config PTDUMP
 	bool
 
+config BPF_WEIGHTED_INTERLEAVE
+	def_bool y
+	depends on NUMA
+	depends on CGROUPS
+	depends on BPF_SYSCALL
+	depends on DEBUG_INFO_BTF
 
 source "mm/damon/Kconfig"
 

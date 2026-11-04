@@ -29,6 +29,7 @@ struct cgroup;
 struct cgroup_root;
 struct cgroup_subsys;
 struct cgroup_taskset;
+struct weighted_interleave_state;
 struct kernfs_node;
 struct kernfs_ops;
 struct kernfs_open_file;
@@ -646,6 +647,10 @@ struct cgroup {
 #endif
 #ifdef CONFIG_EXT_SUB_SCHED
 	struct scx_sched __rcu *scx_sched;
+#endif
+#ifdef CONFIG_BPF_WEIGHTED_INTERLEAVE
+	/* Explicit weighted-interleave override for this cgroup. */
+	struct weighted_interleave_state __rcu *wi_state;
 #endif
 
 	/* All ancestors including self */
