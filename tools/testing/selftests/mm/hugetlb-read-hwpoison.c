@@ -29,15 +29,15 @@ static void report_status(enum test_status status, const char *test_name,
 {
 	switch (status) {
 	case TEST_PASSED:
-		ksft_test_result_pass("%s chunk_size=0x%lx\n",
+		ksft_test_result_pass("%s chunk_size=0x%zx\n",
 				      test_name, chunk_size);
 		break;
 	case TEST_FAILED:
-		ksft_test_result_fail("%s chunk_size=0x%lx\n",
+		ksft_test_result_fail("%s chunk_size=0x%zx\n",
 				      test_name, chunk_size);
 		break;
 	case TEST_SKIPPED:
-		ksft_test_result_skip("%s chunk_size=0x%lx\n",
+		ksft_test_result_skip("%s chunk_size=0x%zx\n",
 				      test_name, chunk_size);
 		break;
 	}
@@ -62,7 +62,7 @@ static bool verify_chunk(char *buf, size_t len, char val)
 
 	for (i = 0; i < len; ++i) {
 		if (buf[i] != val) {
-			ksft_print_msg("check fail: buf[%lu] = %u != %u\n",
+			ksft_print_msg("check fail: buf[%zu] = %u != %u\n",
 				       i, buf[i], val);
 			return false;
 		}
@@ -79,8 +79,9 @@ static bool seek_read_hugepage_filemap(int fd, size_t len, size_t wr_chunk_size,
 	ssize_t total_ret_count = 0;
 	char val = offset / wr_chunk_size + offset % wr_chunk_size;
 
-	ksft_print_msg("init val=%u with offset=0x%lx\n", val, offset);
-	ksft_print_msg("expect to read 0x%lx bytes of data in total\n",
+	ksft_print_msg("init val=%u with offset=0x%llx\n", val,
+		       (unsigned long long)offset);
+	ksft_print_msg("expect to read 0x%zx bytes of data in total\n",
 		       expected);
 	if (lseek(fd, offset, SEEK_SET) < 0) {
 		ksft_perror("seek failed");
@@ -102,8 +103,8 @@ static bool seek_read_hugepage_filemap(int fd, size_t len, size_t wr_chunk_size,
 
 		total_ret_count += ret_count;
 	}
-	ksft_print_msg("actually read 0x%lx bytes of data in total\n",
-		       total_ret_count);
+	ksft_print_msg("actually read 0x%zx bytes of data in total\n",
+		       (size_t)total_ret_count);
 
 	return total_ret_count == expected;
 }
@@ -116,7 +117,7 @@ static bool read_hugepage_filemap(int fd, size_t len,
 	ssize_t total_ret_count = 0;
 	char val = 0;
 
-	ksft_print_msg("expect to read 0x%lx bytes of data in total\n",
+	ksft_print_msg("expect to read 0x%zx bytes of data in total\n",
 		       expected);
 	while (total_ret_count < len) {
 		ret_count = read(fd, buf, wr_chunk_size);
@@ -133,8 +134,8 @@ static bool read_hugepage_filemap(int fd, size_t len,
 
 		total_ret_count += ret_count;
 	}
-	ksft_print_msg("actually read 0x%lx bytes of data in total\n",
-		       total_ret_count);
+	ksft_print_msg("actually read 0x%zx bytes of data in total\n",
+		       (size_t)total_ret_count);
 
 	return total_ret_count == expected;
 }
@@ -293,7 +294,7 @@ int main(void)
 
 	signal(SIGBUS, sigbus_handler);
 	for (i = 0; i < ARRAY_SIZE(wr_chunk_sizes); ++i) {
-		ksft_print_msg("Write/read chunk size=0x%lx\n",
+		ksft_print_msg("Write/read chunk size=0x%zx\n",
 			       wr_chunk_sizes[i]);
 
 		fd = create_hugetlbfs_file(&file_stat);
