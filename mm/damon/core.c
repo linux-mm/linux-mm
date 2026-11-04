@@ -1561,9 +1561,28 @@ static struct damos *damon_nth_scheme(int n, struct damon_ctx *ctx)
 	return NULL;
 }
 
+static int damos_validate_scheme(struct damos *s)
+{
+	struct damos_access_pattern *p = &s->pattern;
+	struct damos_watermarks *wmarks = &s->wmarks;
+
+	if (p->min_sz_region > p->max_sz_region ||
+	    p->min_nr_accesses > p->max_nr_accesses ||
+	    p->min_age_region > p->max_age_region)
+		return -EINVAL;
+	if (wmarks->metric != DAMOS_WMARK_NONE &&
+	    (wmarks->low > wmarks->mid || wmarks->mid > wmarks->high))
+		return -EINVAL;
+	return 0;
+}
+
 static int damos_commit(struct damos *dst, struct damos *src)
 {
 	int err;
+
+	err = damos_validate_scheme(src);
+	if (err)
+		return err;
 
 	dst->pattern = src->pattern;
 	dst->action = src->action;
