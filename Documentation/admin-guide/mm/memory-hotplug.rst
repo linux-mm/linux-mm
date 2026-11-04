@@ -454,6 +454,10 @@ The following module parameters are currently defined:
 				 architecture does not support the forced mode
 				 in all configurations.
 
+				 virtio-mem additionally requires
+				 ``virtio_mem.memmap_on_memory=1``. See
+				 `ZONE_MOVABLE Sizing Considerations`_.
+
 ``online_policy``		 read-write: Set the basic policy used for
 				 automatic zone selection when onlining memory
 				 blocks without specifying a target zone.
@@ -627,6 +631,20 @@ ZONE_MOVABLE, especially when fine-tuning zone ratios:
 
 - In certain DAX configurations the memory map for the device memory will be
   allocated from the kernel zones.
+
+- The memory map of hotplugged memory is allocated from the kernel zones,
+  unless ``memory_hotplug.memmap_on_memory`` is used (for virtio-mem, together
+  with ``virtio_mem.memmap_on_memory=1``).
+
+  With virtio-mem in Sub Block Mode, the subblocks containing the memory map of
+  a memory block stay plugged until the memory block is removed. They count
+  towards the plugged size of the device but are not available to Linux:
+  plugging 128 MiB into an empty 128 MiB memory block makes 126 MiB available.
+  The plugged size can stay below the requested size by up to these subblocks
+  of one memory block. Sub Block Mode only uses the self-hosted memory map if
+  it spans complete subblocks, for example with 128 MiB memory blocks and a
+  2 MiB device block size; otherwise, virtio-mem continues without it.
+  ``virtio_mem.force_bbm=1`` can be used instead.
 
 - KASAN can have a significant memory overhead, for example, consuming 1/8th of
   the total system memory size as (unmovable) tracking metadata.

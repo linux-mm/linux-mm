@@ -74,6 +74,7 @@ struct mhp_params {
 bool mhp_range_allowed(u64 start, u64 size, bool need_mapping);
 struct range mhp_get_pluggable_range(bool need_mapping);
 bool mhp_supports_memmap_on_memory(void);
+unsigned long mhp_memmap_on_memory_nr_pages(void);
 
 /*
  * Zone resizing functions
@@ -218,6 +219,11 @@ static inline bool movable_node_is_enabled(void)
 static inline bool mhp_supports_memmap_on_memory(void)
 {
 	return false;
+}
+
+static inline unsigned long mhp_memmap_on_memory_nr_pages(void)
+{
+	return 0;
 }
 
 static inline void pgdat_kswapd_lock(pg_data_t *pgdat) {}
