@@ -4030,8 +4030,6 @@ static int mvpp2_rx(struct mvpp2_port *port, struct napi_struct *napi,
 			}
 			goto err_drop_frame_retired;
 		}
-		if (pp)
-			skb_mark_for_recycle(skb);
 
 		/* If we have RX hardware timestamping enabled, grab the
 		 * timestamp from the queue and convert.

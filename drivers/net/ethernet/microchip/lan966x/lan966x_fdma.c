@@ -439,8 +439,6 @@ static struct sk_buff *lan966x_fdma_rx_get_frame(struct lan966x_rx *rx,
 	if (unlikely(!skb))
 		goto free_page;
 
-	skb_mark_for_recycle(skb);
-
 	skb_reserve(skb, XDP_PACKET_HEADROOM);
 	skb_put(skb, fdma_db_len_get(db));
 

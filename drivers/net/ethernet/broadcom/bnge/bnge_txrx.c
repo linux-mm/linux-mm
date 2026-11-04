@@ -240,7 +240,6 @@ static struct sk_buff *bnge_rx_agg_netmems_skb(struct bnge_net *bn,
 	total_frag_len = __bnge_rx_agg_netmems(bn, cpr, idx, agg_bufs,
 					       tpa, skb);
 	if (!total_frag_len) {
-		skb_mark_for_recycle(skb);
 		dev_kfree_skb(skb);
 		return NULL;
 	}
@@ -468,7 +467,6 @@ void bnge_reuse_rx_data(struct bnge_rx_ring_info *rxr, u16 cons, void *data)
 static void bnge_deliver_skb(struct bnge_net *bn, struct bnge_napi *bnapi,
 			     struct sk_buff *skb)
 {
-	skb_mark_for_recycle(skb);
 	skb_record_rx_queue(skb, bnapi->index);
 	napi_gro_receive(&bnapi->napi, skb);
 }
@@ -659,7 +657,6 @@ static struct sk_buff *bnge_tpa_end(struct bnge_net *bn,
 			bnge_abort_tpa(cpr, idx, agg_bufs);
 			return NULL;
 		}
-		skb_mark_for_recycle(skb);
 		skb_reserve(skb, bn->rx_offset);
 		skb_put(skb, len);
 	}
@@ -761,7 +758,6 @@ static struct sk_buff *bnge_rx_vlan(struct sk_buff *skb, u8 cmp_type,
 	return skb;
 
 vlan_err:
-	skb_mark_for_recycle(skb);
 	dev_kfree_skb(skb);
 	return NULL;
 }
@@ -790,7 +786,6 @@ static struct sk_buff *bnge_rx_skb(struct bnge_net *bn,
 		return NULL;
 	}
 
-	skb_mark_for_recycle(skb);
 	skb_reserve(skb, bn->rx_offset);
 	skb_put(skb, len);
 	return skb;

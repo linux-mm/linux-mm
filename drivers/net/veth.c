@@ -27,7 +27,6 @@
 #include <linux/ptr_ring.h>
 #include <linux/bpf_trace.h>
 #include <linux/net_tstamp.h>
-#include <linux/skbuff_ref.h>
 #include <net/page_pool/helpers.h>
 
 #define DRV_NAME	"veth"
@@ -746,7 +745,7 @@ static void veth_xdp_get(struct xdp_buff *xdp)
 	struct skb_shared_info *sinfo = xdp_get_shared_info_from_buff(xdp);
 	int i;
 
-	get_page(virt_to_page(xdp->data));
+	netmem_inc_ref(page_to_netmem(virt_to_page(xdp->data)));
 	if (likely(!xdp_buff_has_frags(xdp)))
 		return;
 

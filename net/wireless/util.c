@@ -10,6 +10,7 @@
 #include <linux/export.h>
 #include <linux/bitops.h>
 #include <linux/etherdevice.h>
+#include <linux/skbuff_ref.h>
 #include <linux/slab.h>
 #include <linux/ieee80211.h>
 #include <net/cfg80211.h>
@@ -768,19 +769,25 @@ int ieee80211_data_to_8023_exthdr(struct sk_buff *skb, struct ethhdr *ehdr,
 }
 EXPORT_SYMBOL(ieee80211_data_to_8023_exthdr);
 
-static void
+static bool
 __frame_add_frag(struct sk_buff *skb, struct page *page,
 		 void *ptr, int len, int size)
 {
 	struct skb_shared_info *sh = skb_shinfo(skb);
+	int i = sh->nr_frags;
 	int page_offset;
 
-	get_page(page);
+	if (i >= MAX_SKB_FRAGS)
+		return false;
+
 	page_offset = ptr - page_address(page);
-	skb_add_rx_frag(skb, sh->nr_frags, page, page_offset, len, size);
+	skb_add_rx_frag(skb, i, page, page_offset, len, size);
+	skb_frag_ref(skb, i);
+
+	return true;
 }
 
-static void
+static bool
 __ieee80211_amsdu_copy_frag(struct sk_buff *skb, struct sk_buff *frame,
 			    int offset, int len)
 {
@@ -809,17 +816,22 @@ __ieee80211_amsdu_copy_frag(struct sk_buff *skb, struct sk_buff *frame,
 
 	cur_len = min(len, frag_len);
 
-	__frame_add_frag(frame, frag_page, frag_ptr, cur_len, frag_size);
+	if (!__frame_add_frag(frame, frag_page, frag_ptr, cur_len, frag_size))
+		return false;
 	len -= cur_len;
 
 	while (len > 0) {
 		frag_len = skb_frag_size(frag);
 		cur_len = min(len, frag_len);
-		__frame_add_frag(frame, skb_frag_page(frag),
-				 skb_frag_address(frag), cur_len, frag_len);
+		if (!__frame_add_frag(frame, skb_frag_page(frag),
+				      skb_frag_address(frag), cur_len,
+				      frag_len))
+			return false;
 		len -= cur_len;
 		frag++;
 	}
+
+	return true;
 }
 
 static struct sk_buff *
@@ -858,7 +870,10 @@ __ieee80211_amsdu_copy(struct sk_buff *skb, unsigned int hlen,
 		return frame;
 
 	offset += cur_len;
-	__ieee80211_amsdu_copy_frag(skb, frame, offset, len);
+	if (!__ieee80211_amsdu_copy_frag(skb, frame, offset, len)) {
+		kfree_skb(frame);
+		return NULL;
+	}
 
 	return frame;
 }

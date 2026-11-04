@@ -856,7 +856,6 @@ xdp_drop_no_cnt:
 		skb = napi_get_frags(&cq->napi);
 		if (unlikely(!skb))
 			goto next;
-		skb_mark_for_recycle(skb);
 
 		if (unlikely(ring->hwtstamp_rx_filter == HWTSTAMP_FILTER_ALL)) {
 			u64 timestamp = mlx4_en_get_cqe_ts(cqe);

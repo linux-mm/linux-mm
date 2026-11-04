@@ -165,6 +165,7 @@ static void tls_tcp_clean_acked(struct sock *sk, u32 acked_seq)
 	struct tls_record_info *info, *temp;
 	struct tls_offload_context_tx *ctx;
 	u64 deleted_records = 0;
+	LIST_HEAD(to_free);
 	unsigned long flags;
 
 	if (!tls_ctx)
@@ -180,14 +181,15 @@ static void tls_tcp_clean_acked(struct sock *sk, u32 acked_seq)
 	list_for_each_entry_safe(info, temp, &ctx->records_list, list) {
 		if (before(acked_seq, info->end_seq))
 			break;
-		list_del(&info->list);
-
-		destroy_record(info);
+		list_move_tail(&info->list, &to_free);
 		deleted_records++;
 	}
 
 	ctx->unacked_record_sn += deleted_records;
 	spin_unlock_irqrestore(&ctx->lock, flags);
+
+	list_for_each_entry_safe(info, temp, &to_free, list)
+		destroy_record(info);
 }
 
 /* At this point, there should be no references on this
@@ -269,7 +271,7 @@ static void tls_append_frag(struct tls_record_info *record,
 		skb_frag_fill_page_desc(frag, pfrag->page, pfrag->offset,
 					size);
 		++record->num_frags;
-		get_page(pfrag->page);
+		netmem_inc_ref(page_to_netmem(pfrag->page));
 	}
 
 	pfrag->offset += size;
@@ -302,7 +304,7 @@ static int tls_push_record(struct sock *sk,
 		sg_set_page(&offload_ctx->sg_tx_data[i], skb_frag_page(frag),
 			    skb_frag_size(frag), skb_frag_off(frag));
 		sk_mem_charge(sk, skb_frag_size(frag));
-		get_page(skb_frag_page(frag));
+		netmem_inc_ref(skb_frag_netmem(frag));
 	}
 	sg_mark_end(&offload_ctx->sg_tx_data[record->num_frags - 1]);
 
@@ -354,7 +356,7 @@ static int tls_create_new_record(struct tls_offload_context_tx *offload_ctx,
 	skb_frag_fill_page_desc(frag, pfrag->page, pfrag->offset,
 				prepend_size);
 
-	get_page(pfrag->page);
+	netmem_inc_ref(page_to_netmem(pfrag->page));
 	pfrag->offset += prepend_size;
 
 	record->num_frags = 1;

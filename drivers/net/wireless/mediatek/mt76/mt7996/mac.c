@@ -2041,7 +2041,6 @@ void mt7996_rro_rx_process(struct mt76_dev *mdev, void *data)
 				goto next_page;
 
 			skb_reserve(skb, q->buf_offset);
-			skb_mark_for_recycle(skb);
 			__skb_put(skb, len);
 
 			if (ind_reason == 1 || ind_reason == 2) {

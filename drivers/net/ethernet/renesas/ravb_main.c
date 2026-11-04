@@ -877,7 +877,6 @@ static int ravb_rx_gbeth(struct net_device *ndev, int budget, int q)
 							   true);
 					goto refill;
 				}
-				skb_mark_for_recycle(skb);
 				skb_put(skb, desc_len);
 
 				/* Save this skb if the packet spans multiple
@@ -1041,7 +1040,6 @@ static int ravb_rx_rcar(struct net_device *ndev, int budget, int q)
 						   rx_buff->page, 0, true);
 				break;
 			}
-			skb_mark_for_recycle(skb);
 
 			ravb_rx_rcar_hwstamp(priv, q, desc, skb);
 

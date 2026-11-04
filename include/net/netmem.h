@@ -298,7 +298,7 @@ static inline struct page_pool *__netmem_get_pp(netmem_ref netmem)
 
 static inline struct page_pool *netmem_get_pp(netmem_ref netmem)
 {
-	return netmem_to_nmdesc(netmem)->pp;
+	return READ_ONCE(netmem_to_nmdesc(netmem)->pp);
 }
 
 static inline atomic_long_t *netmem_get_pp_ref_count_ref(netmem_ref netmem)
@@ -412,16 +412,34 @@ static inline bool net_is_devmem_iov(const struct net_iov *niov)
 void net_iov_inc_ref(struct net_iov *niov);
 void net_iov_dec_ref(struct net_iov *niov);
 
+#if IS_ENABLED(CONFIG_PAGE_POOL)
+bool napi_pp_get_page(netmem_ref netmem);
+bool napi_pp_put_page(netmem_ref netmem);
+#else
+static inline bool napi_pp_get_page(netmem_ref netmem)
+{
+	return false;
+}
+
+static inline bool napi_pp_put_page(netmem_ref netmem)
+{
+	return false;
+}
+#endif
+
 /**
- * netmem_inc_ref - acquire a non-page_pool reference on a netmem
+ * netmem_inc_ref - acquire a reference on a netmem
  * @netmem: netmem to reference
  *
- * Acquires a non-pp backing reference (page._refcount via get_page() or
- * binding->ref via net_iov_inc_ref()) regardless of page_pool membership.
- * Counterpart to netmem_dec_ref().
+ * Acquires pp_ref_count via napi_pp_get_page() if @netmem belongs to a
+ * page_pool; otherwise acquires a non-pp backing reference (binding->ref via
+ * net_iov_inc_ref() or page._refcount via get_page()). Counterpart to
+ * netmem_dec_ref().
  */
 static __always_inline void netmem_inc_ref(netmem_ref netmem)
 {
+	if (napi_pp_get_page(netmem))
+		return;
 	if (netmem_is_net_iov(netmem))
 		net_iov_inc_ref(netmem_to_net_iov(netmem));
 	else
@@ -429,15 +447,18 @@ static __always_inline void netmem_inc_ref(netmem_ref netmem)
 }
 
 /**
- * netmem_dec_ref - release a non-page_pool reference on a netmem
+ * netmem_dec_ref - release a reference on a netmem
  * @netmem: netmem to unreference
  *
- * Drops a non-pp backing reference (page._refcount via put_page() or
- * binding->ref via net_iov_dec_ref()) regardless of page_pool membership.
- * Counterpart to netmem_inc_ref().
+ * Drops pp_ref_count via napi_pp_put_page() if @netmem belongs to a
+ * page_pool; otherwise drops a non-pp backing reference (binding->ref via
+ * net_iov_dec_ref() or page._refcount via put_page()). Counterpart to
+ * netmem_inc_ref().
  */
 static __always_inline void netmem_dec_ref(netmem_ref netmem)
 {
+	if (napi_pp_put_page(netmem))
+		return;
 	if (netmem_is_net_iov(netmem))
 		net_iov_dec_ref(netmem_to_net_iov(netmem));
 	else

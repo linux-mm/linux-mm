@@ -42,8 +42,7 @@
  * The API keeps track of in-flight pages, in order to let API users know when
  * it is safe to free a page_pool object, the API users must call
  * page_pool_put_page() or page_pool_free_va() to free the page_pool object, or
- * attach the page_pool object to a page_pool-aware object like skbs marked with
- * skb_mark_for_recycle().
+ * attach the page_pool object to a page_pool-aware object like an skb.
  *
  * page_pool_put_page() may be called multiple times on the same page if a page
  * is split into multiple fragments. For the last fragment, it will either
@@ -242,6 +241,11 @@ page_pool_get_dma_dir(const struct page_pool *pool)
 	return pool->p.dma_dir;
 }
 
+static inline long page_pool_ref_count(netmem_ref netmem)
+{
+	return atomic_long_read(netmem_get_pp_ref_count_ref(netmem));
+}
+
 static inline void page_pool_fragment_netmem(netmem_ref netmem, long nr)
 {
 	atomic_long_set(netmem_get_pp_ref_count_ref(netmem), nr);
@@ -255,7 +259,7 @@ static inline void page_pool_fragment_netmem(netmem_ref netmem, long nr)
  * pp_ref_count represents the number of outstanding references to the page,
  * which will be freed using page_pool APIs (rather than page allocator APIs
  * like put_page()). Such references are usually held by page_pool-aware
- * objects like skbs marked for page pool recycling.
+ * objects like skbs.
  *
  * This helper allows the caller to take (set) multiple references to a
  * freshly allocated page. The page must be freshly allocated (have a
@@ -270,13 +274,22 @@ static inline void page_pool_fragment_page(struct page *page, long nr)
 	page_pool_fragment_netmem(page_to_netmem(page), nr);
 }
 
+static inline bool page_pool_netmem_is_exclusively_owned(netmem_ref netmem)
+{
+	if (netmem_is_net_iov(netmem))
+		return true;
+
+	return page_ref_count(__netmem_to_page(netmem)) == 1;
+}
+
 static inline long page_pool_unref_netmem(netmem_ref netmem, long nr)
 {
 	atomic_long_t *pp_ref_count = netmem_get_pp_ref_count_ref(netmem);
 	long ret;
 
-	/* If nr == pp_ref_count then we have cleared all remaining
-	 * references to the page:
+	/* If nr == pp_ref_count and the page_pool holds the sole page
+	 * reference, then we have cleared all remaining references to the
+	 * page:
 	 * 1. 'n == 1': no need to actually overwrite it.
 	 * 2. 'n != 1': overwrite it with one, which is the rare case
 	 *              for pp_ref_count draining.
@@ -288,8 +301,15 @@ static inline long page_pool_unref_netmem(netmem_ref netmem, long nr)
 	 * handling by ensuring all pages have partitioned into only 1 piece
 	 * initially, and only overwrite it when the page is partitioned into
 	 * more than one piece.
+	 *
+	 * If an external page reference exists (page_ref_count > 1), a
+	 * concurrent napi_pp_get_page() caller holding only a page reference
+	 * may attempt atomic_long_inc_not_zero(pp_ref_count), so we must
+	 * perform an atomic RMW subtraction to 0 and leave pp_ref_count at 0
+	 * while the page is released from the pool.
 	 */
-	if (atomic_long_read(pp_ref_count) == nr) {
+	if (atomic_long_read(pp_ref_count) == nr &&
+	    likely(page_pool_netmem_is_exclusively_owned(netmem))) {
 		/* As we have ensured nr is always one for constant case using
 		 * the BUILD_BUG_ON(), only need to handle the non-constant case
 		 * here for pp_ref_count draining, which is a rare case.
@@ -304,12 +324,16 @@ static inline long page_pool_unref_netmem(netmem_ref netmem, long nr)
 	ret = atomic_long_sub_return(nr, pp_ref_count);
 	WARN_ON(ret < 0);
 
-	/* We are the last user here too, reset pp_ref_count back to 1 to
-	 * ensure all pages have been partitioned into 1 piece initially,
-	 * this should be the rare case when the last two fragment users call
-	 * page_pool_unref_page() currently.
+	/* We are the last user here too. If the page_pool holds the sole
+	 * page reference, reset pp_ref_count back to 1 to ensure all pages
+	 * have been partitioned into 1 piece initially; otherwise leave
+	 * pp_ref_count at 0 so concurrent napi_pp_get_page() callers fail
+	 * atomic_long_inc_not_zero() while page_pool_return_netmem() releases
+	 * the page (__page_pool_put_page() restores pp_ref_count to 1 if the
+	 * external page reference is dropped before recycling).
 	 */
-	if (unlikely(!ret))
+	if (unlikely(!ret) &&
+	    likely(page_pool_netmem_is_exclusively_owned(netmem)))
 		atomic_long_set(pp_ref_count, 1);
 
 	return ret;

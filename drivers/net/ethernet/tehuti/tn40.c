@@ -384,7 +384,6 @@ static int tn40_rx_receive(struct tn40_priv *priv, int budget)
 			tn40_recycle_rx_buffer(priv, rxdd);
 			break;
 		}
-		skb_mark_for_recycle(skb);
 		skb_put(skb, len);
 		skb->protocol = eth_type_trans(skb, priv->ndev);
 		skb->ip_summed =

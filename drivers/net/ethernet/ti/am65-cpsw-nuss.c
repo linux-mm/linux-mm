@@ -1353,7 +1353,6 @@ static int am65_cpsw_nuss_rx_packets(struct am65_cpsw_rx_flow *flow,
 	skb_put(skb, pkt_len);
 	if (port->rx_ts_filter)
 		am65_cpts_rx_timestamp(common->cpts, port_id, skb);
-	skb_mark_for_recycle(skb);
 	skb->protocol = eth_type_trans(skb, ndev);
 	am65_cpsw_nuss_rx_csum(skb, csum_info);
 	napi_gro_receive(&flow->napi_rx, skb);

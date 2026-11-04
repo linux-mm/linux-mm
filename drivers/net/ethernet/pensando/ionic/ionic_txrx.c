@@ -198,7 +198,6 @@ static struct sk_buff *ionic_rx_build_skb(struct ionic_queue *q,
 		q_to_rx_stats(q)->alloc_err++;
 		return NULL;
 	}
-	skb_mark_for_recycle(skb);
 
 	if (headroom)
 		frag_len = min_t(u16, len,
@@ -249,7 +248,6 @@ static struct sk_buff *ionic_rx_copybreak(struct net_device *netdev,
 		q_to_rx_stats(q)->alloc_err++;
 		return NULL;
 	}
-	skb_mark_for_recycle(skb);
 
 	if (!synced)
 		page_pool_dma_sync_for_cpu(q->page_pool,

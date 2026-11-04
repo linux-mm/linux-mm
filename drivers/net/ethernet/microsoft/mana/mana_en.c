@@ -2170,9 +2170,6 @@ static void mana_rx_skb(void *buf_va, bool from_pool,
 	if (!skb)
 		goto drop;
 
-	if (from_pool)
-		skb_mark_for_recycle(skb);
-
 	skb->dev = napi->dev;
 
 	skb->protocol = eth_type_trans(skb, ndev);
