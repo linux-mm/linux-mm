@@ -40,6 +40,9 @@
 #include <linux/hmm.h>
 #include <linux/memremap.h>
 #include <linux/migrate.h>
+#include <linux/jiffies.h>
+#include <linux/delay.h>
+#include <linux/mmu_notifier.h>
 
 /*
  * FIXME: this is ugly right now we are using TTM to allocate vram and we pin
@@ -76,6 +79,14 @@ struct nouveau_dmem_migrate {
 	nouveau_migrate_copy_t copy_func;
 	nouveau_clear_page_t clear_func;
 	struct nouveau_channel *chan;
+	/*
+	 * Serializes the dmem users of chan (CPU faults in migrate_to_ram(),
+	 * migrate on fault, bulk migration, eviction): the copy and clear
+	 * commands they write to its push buffer and the fences they emit.
+	 * Held only around those writes, never across page allocation.
+	 * TTM serializes its own use of the channel with cli->mutex.
+	 */
+	struct mutex lock;
 };
 
 struct nouveau_dmem {
@@ -92,6 +103,41 @@ struct nouveau_dmem_dma_info {
 	dma_addr_t dma_addr;
 	size_t size;
 };
+
+static int nouveau_dmem_copy(struct nouveau_drm *drm, u64 npages,
+			     enum nouveau_aper dst_aper, u64 dst_addr,
+			     enum nouveau_aper src_aper, u64 src_addr)
+{
+	int ret;
+
+	mutex_lock(&drm->dmem->migrate.lock);
+	ret = drm->dmem->migrate.copy_func(drm, npages, dst_aper, dst_addr,
+					   src_aper, src_addr);
+	mutex_unlock(&drm->dmem->migrate.lock);
+	return ret;
+}
+
+static int nouveau_dmem_clear(struct nouveau_drm *drm, u32 length,
+			      enum nouveau_aper dst_aper, u64 dst_addr)
+{
+	int ret;
+
+	mutex_lock(&drm->dmem->migrate.lock);
+	ret = drm->dmem->migrate.clear_func(drm, length, dst_aper, dst_addr);
+	mutex_unlock(&drm->dmem->migrate.lock);
+	return ret;
+}
+
+static int nouveau_dmem_fence_new(struct nouveau_drm *drm,
+				  struct nouveau_fence **fence)
+{
+	int ret;
+
+	mutex_lock(&drm->dmem->migrate.lock);
+	ret = nouveau_fence_new(fence, drm->dmem->migrate.chan);
+	mutex_unlock(&drm->dmem->migrate.lock);
+	return ret;
+}
 
 static struct nouveau_dmem_chunk *nouveau_page_to_chunk(struct page *page)
 {
@@ -139,10 +185,12 @@ static void nouveau_dmem_folio_free(struct folio *folio)
 	spin_unlock(&dmem->lock);
 }
 
-static void nouveau_dmem_fence_done(struct nouveau_fence **fence)
+static int nouveau_dmem_fence_done(struct nouveau_fence **fence)
 {
+	int ret = 0;
+
 	if (fence) {
-		nouveau_fence_wait(*fence, true, false);
+		ret = nouveau_fence_wait(*fence, true, false);
 		nouveau_fence_unref(fence);
 	} else {
 		/*
@@ -150,6 +198,54 @@ static void nouveau_dmem_fence_done(struct nouveau_fence **fence)
 		 * the hmem object.
 		 */
 	}
+
+	/* 0 on completion, -EBUSY on timeout, or other errno; propagated. */
+	return ret;
+}
+
+/*
+ * Poll the copy fence instead of the lazy (interrupt-driven) wait since
+ * completion IRQ is randomly missed, hitting the timeout.
+ *
+ * Returns 0 on completion, -EBUSY on timeout. Consumes the fence reference.
+ */
+static int nouveau_dmem_fence_poll(struct nouveau_fence **fence)
+{
+	unsigned long deadline = jiffies + 30 * HZ;
+	int ret = 0;
+
+	while (!nouveau_fence_done(*fence)) {
+		if (time_after(jiffies, deadline)) {
+			ret = -EBUSY;
+			break;
+		}
+		schedule_timeout_uninterruptible(msecs_to_jiffies(1));
+	}
+	nouveau_fence_unref(fence);
+
+	return ret;
+}
+
+/*
+ * The copy could not be confirmed (fence timeout or no fence): don't migrate,
+ * so finalize restores the original ptes and the source stays valid. The copy
+ * engine may still be using the pages, so keep the destination folios (an
+ * extra reference that finalize won't drop) and let the caller skip the DMA
+ * unmap: leaking is safer than freeing memory a wedged engine might write.
+ */
+static void nouveau_dmem_migrate_abort(struct nouveau_drm *drm,
+				       struct migrate_vma *args)
+{
+	unsigned long i;
+
+	for (i = 0; i < args->npages; i++) {
+		struct page *dpage = migrate_pfn_to_page(args->dst[i]);
+
+		args->src[i] &= ~MIGRATE_PFN_MIGRATE;
+		if (dpage)
+			folio_get(page_folio(dpage));
+	}
+	NV_ERROR(drm, "svm: copy not confirmed, migration aborted, pages leaked\n");
 }
 
 static int nouveau_dmem_copy_folio(struct nouveau_drm *drm,
@@ -168,10 +264,10 @@ static int nouveau_dmem_copy_folio(struct nouveau_drm *drm,
 	if (dma_mapping_error(dev, dma_info->dma_addr))
 		return -EIO;
 
-	if (drm->dmem->migrate.copy_func(drm, folio_nr_pages(sfolio),
-					 NOUVEAU_APER_HOST, dma_info->dma_addr,
-					 NOUVEAU_APER_VRAM,
-					 nouveau_dmem_page_addr(spage))) {
+	if (nouveau_dmem_copy(drm, folio_nr_pages(sfolio),
+			      NOUVEAU_APER_HOST, dma_info->dma_addr,
+			      NOUVEAU_APER_VRAM,
+			      nouveau_dmem_page_addr(spage))) {
 		dma_unmap_page(dev, dma_info->dma_addr, page_size(dpage),
 					DMA_BIDIRECTIONAL);
 		return -EIO;
@@ -183,12 +279,11 @@ static int nouveau_dmem_copy_folio(struct nouveau_drm *drm,
 static vm_fault_t nouveau_dmem_migrate_to_ram(struct vm_fault *vmf)
 {
 	struct nouveau_drm *drm = page_to_drm(vmf->page);
-	struct nouveau_dmem *dmem = drm->dmem;
-	struct nouveau_fence *fence;
+	struct nouveau_fence *fence = NULL;
 	struct nouveau_svmm *svmm;
 	struct page *dpage;
 	vm_fault_t ret = 0;
-	int err;
+	int err, fret = 0;
 	struct migrate_vma args = {
 		.vma		= vmf->vma,
 		.pgmap_owner	= drm->dev,
@@ -233,10 +328,12 @@ static vm_fault_t nouveau_dmem_migrate_to_ram(struct vm_fault *vmf)
 	 * than just one page on CPU fault. When such fault happens it is very
 	 * likely that more surrounding page will CPU fault too.
 	 */
-	if (migrate_vma_setup(&args) < 0)
-		return VM_FAULT_SIGBUS;
+	if (migrate_vma_setup(&args) < 0) {
+		ret = VM_FAULT_SIGBUS;
+		goto err;
+	}
 	if (!args.cpages)
-		return 0;
+		goto done;
 
 	if (order)
 		dpage = folio_page(vma_alloc_folio(GFP_HIGHUSER | __GFP_ZERO,
@@ -264,11 +361,21 @@ static vm_fault_t nouveau_dmem_migrate_to_ram(struct vm_fault *vmf)
 		goto done;
 	}
 
-	nouveau_fence_new(&fence, dmem->migrate.chan);
+	/*
+	 * Commit the migration only once the copy is confirmed. Without a
+	 * fence the copy can't be confirmed: treat it as failed.
+	 */
+	fret = nouveau_dmem_fence_new(drm, &fence);
+	if (!fret)
+		fret = nouveau_dmem_fence_poll(&fence);
+	if (fret) {
+		nouveau_dmem_migrate_abort(drm, &args);
+		ret = VM_FAULT_SIGBUS;
+	} else {
+		dma_unmap_page(drm->dev->dev, dma_info.dma_addr, dma_info.size,
+			       DMA_BIDIRECTIONAL);
+	}
 	migrate_vma_pages(&args);
-	nouveau_dmem_fence_done(&fence);
-	dma_unmap_page(drm->dev->dev, dma_info.dma_addr, dma_info.size,
-				DMA_BIDIRECTIONAL);
 done:
 	migrate_vma_finalize(&args);
 err:
@@ -528,7 +635,7 @@ nouveau_dmem_evict_chunk(struct nouveau_dmem_chunk *chunk)
 		}
 	}
 
-	nouveau_fence_new(&fence, chunk->drm->dmem->migrate.chan);
+	nouveau_dmem_fence_new(chunk->drm, &fence);
 	migrate_device_pages(src_pfns, dst_pfns, npages);
 	nouveau_dmem_fence_done(&fence);
 	migrate_device_finalize(src_pfns, dst_pfns, npages);
@@ -729,6 +836,7 @@ nouveau_dmem_init(struct nouveau_drm *drm)
 	INIT_LIST_HEAD(&drm->dmem->chunks);
 	mutex_init(&drm->dmem->mutex);
 	spin_lock_init(&drm->dmem->lock);
+	mutex_init(&drm->dmem->migrate.lock);
 
 	/* Initialize migration dma helpers before registering memory */
 	ret = nouveau_dmem_migrate_init(drm);
@@ -764,13 +872,13 @@ static unsigned long nouveau_dmem_migrate_copy_one(struct nouveau_drm *drm,
 		dma_info->size = page_size(spage);
 		if (dma_mapping_error(dev, dma_info->dma_addr))
 			goto out_free_page;
-		if (drm->dmem->migrate.copy_func(drm, folio_nr_pages(page_folio(spage)),
+		if (nouveau_dmem_copy(drm, folio_nr_pages(page_folio(spage)),
 			NOUVEAU_APER_VRAM, paddr, NOUVEAU_APER_HOST,
 			dma_info->dma_addr))
 			goto out_dma_unmap;
 	} else {
 		dma_info->dma_addr = DMA_MAPPING_ERROR;
-		if (drm->dmem->migrate.clear_func(drm, page_size(dpage),
+		if (nouveau_dmem_clear(drm, page_size(dpage),
 			NOUVEAU_APER_VRAM, paddr))
 			goto out_free_page;
 	}
@@ -794,11 +902,12 @@ out:
 	return 0;
 }
 
-static void nouveau_dmem_migrate_chunk(struct nouveau_drm *drm,
+static unsigned long
+nouveau_dmem_migrate_alloc_and_copy(struct nouveau_drm *drm,
 		struct nouveau_svmm *svmm, struct migrate_vma *args,
-		struct nouveau_dmem_dma_info *dma_info, u64 *pfns)
+		struct nouveau_dmem_dma_info *dma_info, u64 *pfns,
+		unsigned long *nr_dma_out, unsigned long *order_out)
 {
-	struct nouveau_fence *fence;
 	unsigned long addr = args->start, nr_dma = 0, i;
 	unsigned long order = 0;
 
@@ -820,7 +929,22 @@ static void nouveau_dmem_migrate_chunk(struct nouveau_drm *drm,
 		addr += (1 << order) * PAGE_SIZE;
 	}
 
-	nouveau_fence_new(&fence, drm->dmem->migrate.chan);
+	*nr_dma_out = nr_dma;
+	*order_out = order;
+	return i;
+}
+
+static void nouveau_dmem_migrate_chunk(struct nouveau_drm *drm,
+		struct nouveau_svmm *svmm, struct migrate_vma *args,
+		struct nouveau_dmem_dma_info *dma_info, u64 *pfns)
+{
+	struct nouveau_fence *fence;
+	unsigned long nr_dma, order, i;
+
+	i = nouveau_dmem_migrate_alloc_and_copy(drm, svmm, args, dma_info, pfns,
+						&nr_dma, &order);
+
+	nouveau_dmem_fence_new(drm, &fence);
 	migrate_vma_pages(args);
 	nouveau_dmem_fence_done(&fence);
 	nouveau_pfns_map(svmm, args->vma->vm_mm, args->start, pfns, i, order);
@@ -830,6 +954,238 @@ static void nouveau_dmem_migrate_chunk(struct nouveau_drm *drm,
 				dma_info[nr_dma].size, DMA_BIDIRECTIONAL);
 	}
 	migrate_vma_finalize(args);
+}
+
+/*
+ * Encode an hmm_range_fault() pfn for @start into the nouveau PFNMAP format,
+ * shared by nouveau_hmm_convert_pfn() and the in-place map in
+ * nouveau_dmem_migrate_fault().
+ */
+u64 nouveau_dmem_hmm_pfn_to_map(unsigned long hmm_pfn, unsigned long start,
+				unsigned long *map_addr, unsigned int *page_shift)
+{
+	unsigned long order;
+	struct page *page;
+	u64 pfn;
+
+	*map_addr = start;
+	*page_shift = PAGE_SHIFT;
+
+	if (!(hmm_pfn & HMM_PFN_VALID))
+		return NVIF_VMM_PFNMAP_V0_NONE;
+
+	page = hmm_pfn_to_page(hmm_pfn);
+
+	order = hmm_pfn_to_map_order(hmm_pfn);
+	if (order) {
+		*page_shift = order + PAGE_SHIFT;
+		*map_addr = start & ~((1UL << *page_shift) - 1);
+		page -= (start - *map_addr) >> PAGE_SHIFT;
+	}
+
+	if (is_device_private_page(page))
+		pfn = nouveau_dmem_page_addr(page) |
+			NVIF_VMM_PFNMAP_V0_V | NVIF_VMM_PFNMAP_V0_VRAM;
+	else
+		pfn = page_to_phys(page) |
+			NVIF_VMM_PFNMAP_V0_V | NVIF_VMM_PFNMAP_V0_HOST;
+	if (hmm_pfn & HMM_PFN_WRITE)
+		pfn |= NVIF_VMM_PFNMAP_V0_W;
+
+	return pfn;
+}
+
+/*
+ * Fault a range in and migrate it to VRAM.
+ * Returns 0 on success, or an error (so the caller
+ * falls back to nouveau_range_fault()) if nothing could be mapped.
+ */
+int
+nouveau_dmem_migrate_fault(struct nouveau_drm *drm, struct nouveau_svmm *svmm,
+			   struct mmu_interval_notifier *notifier,
+			   unsigned long start, unsigned long end,
+			   unsigned long hmm_flags,
+			   u64 *out_pfn0, unsigned long *out_addr,
+			   unsigned int *out_shift)
+{
+	unsigned long timeout =
+		jiffies + msecs_to_jiffies(HMM_RANGE_DEFAULT_TIMEOUT);
+	unsigned long npages = (end - start) >> PAGE_SHIFT;
+	struct mm_struct *mm = notifier->mm;
+	struct nouveau_dmem_dma_info *dma_info;
+	struct nouveau_fence *fence = NULL;
+	struct migrate_vma migrate = {
+		.start		= start,
+		.end		= end,
+		.pgmap_owner	= drm->dev,
+		.flags		= MIGRATE_VMA_SELECT_SYSTEM,
+	};
+	struct hmm_range range = {
+		.notifier		= notifier,
+		.start			= start,
+		.end			= end,
+		.dev_private_owner	= drm->dev,
+		.migrate		= &migrate,
+		.default_flags		= hmm_flags | HMM_PFN_REQ_MIGRATE,
+	};
+	unsigned long nr_dma, order, n, i;
+	unsigned long hmm_pfn0 = 0;
+	bool migrated;
+	u64 *pfns;
+	int ret, fret = 0;
+
+	if (!drm->dmem)
+		return -ENODEV;
+
+	migrate.src = kcalloc(npages, sizeof(*migrate.src), GFP_KERNEL);
+	if (!migrate.src)
+		return -ENOMEM;
+	migrate.dst = kcalloc(npages, sizeof(*migrate.dst), GFP_KERNEL);
+	if (!migrate.dst) {
+		ret = -ENOMEM;
+		goto out_free_src;
+	}
+	dma_info = kmalloc_objs(*dma_info, npages);
+	if (!dma_info) {
+		ret = -ENOMEM;
+		goto out_free_dst;
+	}
+	pfns = nouveau_pfns_alloc(npages);
+	if (!pfns) {
+		ret = -ENOMEM;
+		goto out_free_dma;
+	}
+
+	/* hmm_range_fault() shares the source pfn array with migrate_vma. */
+	range.hmm_pfns = migrate.src;
+
+	do {
+		mmap_read_lock(mm);
+		range.notifier_seq = mmu_interval_read_begin(notifier);
+
+		ret = hmm_range_fault(&range);
+		/*
+		 * Snapshot the pfn before migrate_hmm_range_setup() overwrites the
+		 * shared array; used to map in place if nothing migrates.
+		 */
+		if (!ret)
+			hmm_pfn0 = range.hmm_pfns[0];
+		migrate_hmm_range_setup(&range);
+		if (ret) {
+			migrate_vma_pages(&migrate);
+			migrate_vma_finalize(&migrate);
+			goto unlock;
+		}
+
+		n = nouveau_dmem_migrate_alloc_and_copy(drm, svmm, &migrate,
+							dma_info, pfns,
+							&nr_dma, &order);
+
+		/* Only a migrated page has an in-flight CE copy to unblock below. */
+		for (i = 0, migrated = false; i < npages; i++) {
+			if (migrate.dst[i]) {
+				migrated = true;
+				break;
+			}
+		}
+
+		/*
+		 * Track a copy fence only when a copy was enqueued; waiting on an
+		 * empty fence would block until the fault's CTXSW_TIMEOUT.
+		 */
+		if (migrated)
+			fret = nouveau_dmem_fence_new(drm, &fence);
+
+		/*
+		 * The fault-in path must replay the faulting channel before waiting on
+		 * the copy fence: with the fault still unreplayed the copy does not
+		 * make progress. GPU has no mapping so it might refault, until it
+		 * gets the migrated or mirrored mapping.
+		 */
+		if (drm->svm && migrated)
+			nouveau_svm_fault_replay(drm->svm);
+
+		/* Without a fence (fret set) the copy can't be confirmed. */
+		if (migrated && !fret)
+			fret = nouveau_dmem_fence_poll(&fence);
+
+		/* Commit the migration only once the copy is confirmed. */
+		if (fret)
+			nouveau_dmem_migrate_abort(drm, &migrate);
+		migrate_vma_pages(&migrate);
+
+		/*
+		 * Don't map destination pages that migrate_vma_pages() didn't
+		 * migrate: finalize frees them and restores the source.
+		 */
+		for (i = 0; i < npages; i++)
+			if (!(migrate.src[i] & MIGRATE_PFN_MIGRATE))
+				pfns[i] = NVIF_VMM_PFNMAP_V0_NONE;
+
+		mutex_lock(&svmm->mutex);
+		if (fret) {
+			/* Copy did not complete; don't map a half-copied page. */
+			ret = -EIO;
+		} else if (mmu_interval_read_retry(notifier, range.notifier_seq)) {
+			ret = -EBUSY;
+		} else {
+			unsigned long map_addr = migrate.start;
+			unsigned int page_shift = PAGE_SHIFT + order;
+
+			/*
+			 * If nothing migrated might still be able to mirror.
+			 * In that case use the snapshot hmm_pfn.
+			 * npages == 1 always today.
+			 */
+			if (npages == 1 && !(pfns[0] & NVIF_VMM_PFNMAP_V0_V))
+				pfns[0] = nouveau_dmem_hmm_pfn_to_map(hmm_pfn0,
+						start, &map_addr, &page_shift);
+
+			/*
+			 * Nothing to map: leave the GPU mapping alone, the
+			 * caller falls back to nouveau_range_fault().
+			 */
+			if (pfns[0] & NVIF_VMM_PFNMAP_V0_V) {
+				/* On failure the caller falls back, then cancels */
+				ret = __nouveau_pfns_map_locked(svmm, map_addr,
+								pfns, n,
+								page_shift);
+				if (!ret) {
+					*out_pfn0 = pfns[0];
+					*out_addr = map_addr;
+					*out_shift = page_shift;
+				}
+			}
+		}
+		mutex_unlock(&svmm->mutex);
+
+		if (fret)
+			NV_ERROR(drm,
+				 "svm: migrate copy did not complete (%d) for %lx-%lx\n",
+				 fret, start, end);
+
+		/* After an aborted copy the engine may still use the mappings */
+		while (!fret && nr_dma--) {
+			dma_unmap_page(drm->dev->dev, dma_info[nr_dma].dma_addr,
+				       dma_info[nr_dma].size, DMA_BIDIRECTIONAL);
+		}
+		migrate_vma_finalize(&migrate);
+unlock:
+		mmap_read_unlock(mm);
+	} while (ret == -EBUSY && !time_after(jiffies, timeout));
+
+	/* Nothing migrated or mappable in place, fallback to nouveau_range_fault(). */
+	if (!ret && !(pfns[0] & NVIF_VMM_PFNMAP_V0_V))
+		ret = -ENOENT;
+
+	nouveau_pfns_free(pfns);
+out_free_dma:
+	kfree(dma_info);
+out_free_dst:
+	kfree(migrate.dst);
+out_free_src:
+	kfree(migrate.src);
+	return ret;
 }
 
 int
