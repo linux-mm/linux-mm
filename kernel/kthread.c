@@ -327,24 +327,46 @@ void __noreturn kthread_complete_and_exit(struct completion *comp, long code)
 }
 EXPORT_SYMBOL(kthread_complete_and_exit);
 
+/*
+ * Unbound kthreads must run neither on domain isolated CPUs (isolcpus=domain,
+ * cpuset isolated partitions) nor on CPUs isolated from kernel noise
+ * (nohz_full=, isolcpus=nohz). The two sets usually coincide, but the kernel
+ * accepts nohz_full CPUs that remain in the scheduler domains, so both
+ * housekeeping types have to be honoured.
+ */
 static void kthread_fetch_affinity(struct kthread *kthread, struct cpumask *cpumask)
 {
-	const struct cpumask *pref;
+	const struct cpumask *pref, *hk_domain, *hk_kthread;
 
 	guard(rcu)();
+
+	hk_domain = housekeeping_cpumask(HK_TYPE_DOMAIN);
+	/*
+	 * Deliberately not HK_TYPE_KTHREAD: since v7.1 that is an alias of
+	 * HK_TYPE_DOMAIN (commit 8f78b749f3da), which is the very assumption
+	 * being corrected here.
+	 */
+	hk_kthread = housekeeping_cpumask(HK_TYPE_KERNEL_NOISE);
 
 	if (kthread->preferred_affinity) {
 		pref = kthread->preferred_affinity;
 	} else {
 		if (kthread->node == NUMA_NO_NODE)
-			pref = housekeeping_cpumask(HK_TYPE_DOMAIN);
+			pref = hk_domain;
 		else
 			pref = cpumask_of_node(kthread->node);
 	}
 
-	cpumask_and(cpumask, pref, housekeeping_cpumask(HK_TYPE_DOMAIN));
+	cpumask_and(cpumask, pref, hk_domain);
+	cpumask_and(cpumask, cpumask, hk_kthread);
+	if (cpumask_empty(cpumask))
+		cpumask_and(cpumask, hk_domain, hk_kthread);
+	/*
+	 * Both the boot parameters and cpuset guarantee that at least one
+	 * CPU stays housekeeping for every type, but don't rely on it.
+	 */
 	if (!cpumask_intersects(cpumask, cpu_online_mask))
-		cpumask_copy(cpumask, housekeeping_cpumask(HK_TYPE_DOMAIN));
+		cpumask_copy(cpumask, hk_domain);
 }
 
 static void kthread_affine_node(void)

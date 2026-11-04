@@ -268,6 +268,16 @@ static void folio_batch_move_lru(struct folio_batch *fbatch, move_fn_t move_fn)
 	folios_put(fbatch);
 }
 
+/* Move a single folio to the LRU without touching the per-CPU batches. */
+static void folio_move_lru_now(struct folio *folio, move_fn_t move_fn)
+{
+	struct folio_batch fbatch;
+
+	folio_batch_init(&fbatch);
+	folio_batch_add(&fbatch, folio);
+	folio_batch_move_lru(&fbatch, move_fn);
+}
+
 static void __folio_batch_add_and_move(struct folio_batch __percpu *fbatch,
 		struct folio *folio, move_fn_t move_fn, bool disable_irq)
 {
@@ -280,7 +290,9 @@ static void __folio_batch_add_and_move(struct folio_batch __percpu *fbatch,
 	else
 		local_lock(&cpu_fbatches.lock);
 
-	if (!folio_batch_add(this_cpu_ptr(fbatch), folio) ||
+	if (lru_batching_bypassed())
+		folio_move_lru_now(folio, move_fn);
+	else if (!folio_batch_add(this_cpu_ptr(fbatch), folio) ||
 			!folio_may_be_lru_cached(folio) || lru_cache_disabled())
 		folio_batch_move_lru(this_cpu_ptr(fbatch), move_fn);
 
@@ -916,6 +928,13 @@ static inline void __lru_add_drain_all(bool force_all_cpus)
 	WRITE_ONCE(lru_drain_gen, lru_drain_gen + 1);
 	smp_mb();
 
+	/*
+	 * Isolated CPUs don't batch folios (see lru_batching_bypassed()), so
+	 * their counters stay at zero and no work gets queued to them.  This
+	 * matters because the per-CPU kworker of an isolated CPU may not get
+	 * to run for a very long time, if ever, and flush_work() below would
+	 * wait for it.
+	 */
 	cpumask_clear(&has_work);
 	for_each_online_cpu(cpu) {
 		struct work_struct *work = &per_cpu(lru_add_drain_work, cpu);

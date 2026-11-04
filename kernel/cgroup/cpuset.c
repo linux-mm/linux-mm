@@ -2704,26 +2704,32 @@ static void cpuset_migrate_mm_workfn(struct work_struct *work)
 	kfree(mwork);
 }
 
-static void cpuset_migrate_mm(struct mm_struct *mm, const nodemask_t *from,
+/*
+ * Returns true if migration work was queued, in which case the caller may
+ * want to flush cpuset_migrate_mm_wq before returning to userspace.
+ */
+static bool cpuset_migrate_mm(struct mm_struct *mm, const nodemask_t *from,
 							const nodemask_t *to)
 {
 	struct cpuset_migrate_mm_work *mwork;
 
 	if (nodes_equal(*from, *to)) {
 		mmput(mm);
-		return;
+		return false;
 	}
 
 	mwork = kzalloc_obj(*mwork);
-	if (mwork) {
-		mwork->mm = mm;
-		mwork->from = *from;
-		mwork->to = *to;
-		INIT_WORK(&mwork->work, cpuset_migrate_mm_workfn);
-		queue_work(cpuset_migrate_mm_wq, &mwork->work);
-	} else {
+	if (!mwork) {
 		mmput(mm);
+		return false;
 	}
+
+	mwork->mm = mm;
+	mwork->from = *from;
+	mwork->to = *to;
+	INIT_WORK(&mwork->work, cpuset_migrate_mm_workfn);
+	queue_work(cpuset_migrate_mm_wq, &mwork->work);
+	return true;
 }
 
 static void flush_migrate_mm_task_workfn(struct callback_head *head)
@@ -3376,9 +3382,9 @@ static void cpuset_attach_task(struct cpuset *cs, struct task_struct *task)
 		 * migrate mm from.
 		 */
 		if (is_memory_migrate(cs)) {
-			cpuset_migrate_mm(mm, &oldcs->old_mems_allowed,
-					  &attach_ctx.nodemask_to);
-			attach_ctx.task_work_queued = true;
+			if (cpuset_migrate_mm(mm, &oldcs->old_mems_allowed,
+					      &attach_ctx.nodemask_to))
+				attach_ctx.task_work_queued = true;
 		} else {
 			mmput(mm);
 		}
@@ -3482,7 +3488,16 @@ ssize_t cpuset_write_resmask(struct kernfs_open_file *of,
 	free_cpuset(trialcs);
 out_unlock:
 	cpuset_update_sd_hk_unlock();
-	if (of_cft(of)->private == FILE_MEMLIST)
+	/*
+	 * Memory migration runs on cpuset_migrate_mm_wq and the writer
+	 * normally waits for it before returning to userspace, so that the
+	 * write appears synchronous. A writer that opened the file with
+	 * O_NONBLOCK asks not to wait: let the migration finish in the
+	 * background, like memory.max and memory.high skip synchronous
+	 * reclaim for non-blocking writers.
+	 */
+	if (of_cft(of)->private == FILE_MEMLIST &&
+	    !(of->file->f_flags & O_NONBLOCK))
 		schedule_flush_migrate_mm();
 	return retval ?: nbytes;
 }
@@ -3878,8 +3893,13 @@ static void cpuset_fork(struct task_struct *task)
 	attach_ctx.task_work_queued = false;
 	attach_ctx.old_cs = oldcs;
 	cpuset_attach_task(cs, task);
-	if (attach_ctx.task_work_queued)
-		schedule_flush_migrate_mm();
+	/*
+	 * Unlike a cpuset.mems or cgroup.procs writer, the forking task has
+	 * no business waiting for the child's pages to be migrated, and a
+	 * flush of the ordered cpuset_migrate_mm_wq would make it wait for
+	 * every migration anyone queued. Let the migration run in the
+	 * background.
+	 */
 
 	dec_attach_in_progress_locked();
 	mutex_unlock(&cpuset_mutex);
