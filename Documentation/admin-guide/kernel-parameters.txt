@@ -1121,6 +1121,31 @@ Kernel parameters
 			possibly incomplete kdump is preferable to no kdump at
 			all.
 
+	crashkernel=size[KMG],hugetlb_cma
+			[KNL, X86, ARM64, RISCV, PPC] Use up to the specified
+			amount of existing hugetlb_cma memory as additional crash
+			kernel memory. Requires hugetlb_cma= and a standard
+			crashkernel reservation for the kernel image and initrd.
+			For example:
+			  hugetlb_cma=6G crashkernel=256M crashkernel=2G,hugetlb_cma
+
+			The selected memory remains available to HugeTLB and
+			movable allocations during normal operation. After a
+			crash, the capture kernel can overwrite these pages,
+			including allocated HugeTLB pages. The selected ranges
+			are excluded from the vmcore. The dump completeness
+			and DMA risks described for crashkernel=size,cma also
+			apply to this option.
+
+			Both CMA options use the same limit of four physical
+			ranges, with crashkernel=size,cma ranges added first.
+			If the available hugetlb CMA memory or range slots
+			cannot cover the requested size, the kernel reuses
+			what is available and reports the shortfall. Additional
+			CMA memory is not reserved by this option. Unused pages
+			in contributing CMA areas remain reserved if activation
+			fails.
+
 	cryptomgr.notests
 			[KNL] Disable crypto self-tests
 

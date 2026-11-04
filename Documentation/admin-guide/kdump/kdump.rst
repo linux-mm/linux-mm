@@ -332,6 +332,27 @@ crashkernel syntax
 	less reliable and possibly incomplete kdump is preferable to no kdump at
 	all.
 
+5) crashkernel=size,hugetlb_cma
+
+   Reuse existing HugeTLB CMA memory as additional crash kernel memory after
+   a crash. For example, to reuse 2G of a 6G HugeTLB CMA reservation::
+
+       hugetlb_cma=6G crashkernel=256M crashkernel=2G,hugetlb_cma
+
+   A standard crashkernel reservation is still required for the kernel image
+   and initrd. The selected ranges remain available to HugeTLB and movable
+   allocations during normal operation. After a crash, the capture kernel
+   can overwrite their contents, including allocated HugeTLB pages, and the
+   ranges are excluded from the vmcore. The dump completeness and DMA risks
+   described for crashkernel=size,cma apply here too.
+
+   The kernel selects up to the requested size from the existing hugetlb CMA
+   areas. Both CMA options use the same limit of four physical ranges, with
+   crashkernel=size,cma ranges added first. If there is insufficient memory
+   or too few range slots, the kernel reports the shortfall and reuses the
+   available ranges. Unused pages in contributing CMA areas remain reserved
+   if CMA activation fails.
+
 Boot into System Kernel
 -----------------------
 1) Update the boot loader (such as grub, yaboot, or lilo) configuration

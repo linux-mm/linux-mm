@@ -16,6 +16,7 @@
 #include <linux/kmemleak.h>
 #include <linux/cma.h>
 #include <linux/crash_reserve.h>
+#include <linux/hugetlb.h>
 
 #include <asm/page.h>
 #include <asm/sections.h>
@@ -173,18 +174,20 @@ static int __init parse_crashkernel_simple(char *cmdline,
 #define SUFFIX_HIGH 0
 #define SUFFIX_LOW  1
 #define SUFFIX_CMA  2
-#define SUFFIX_NULL 3
+#define SUFFIX_HUGETLB_CMA 3
+#define SUFFIX_NULL 4
 static __initdata char *suffix_tbl[] = {
 	[SUFFIX_HIGH] = ",high",
 	[SUFFIX_LOW]  = ",low",
 	[SUFFIX_CMA]  = ",cma",
+	[SUFFIX_HUGETLB_CMA] = ",hugetlb_cma",
 	[SUFFIX_NULL] = NULL,
 };
 
 /*
  * That function parses "suffix"  crashkernel command lines like
  *
- *	crashkernel=size,[high|low|cma]
+ *	crashkernel=size,[high|low|cma|hugetlb_cma]
  *
  * It returns 0 on success and -EINVAL on failure.
  */
@@ -518,6 +521,48 @@ void __init reserve_crashkernel_cma(unsigned long long cma_size)
 		pr_warn("crashkernel CMA reservation not supported\n");
 }
 #endif
+
+/* hugetlb CMA and the dedicated crash CMA reservation are both set up now. */
+static int __init crashk_hugetlb_cma_init(void)
+{
+	unsigned long long size, base;
+#ifdef CRASHKERNEL_CMA
+	unsigned long long reused_size;
+	int cnt = crashk_cma_cnt;
+#endif
+
+	/* The kernel image and initrd still need a dedicated reservation. */
+	if (crashk_res.start >= crashk_res.end)
+		return 0;
+
+	if (__parse_crashkernel(boot_command_line, 0, &size, &base,
+				suffix_tbl[SUFFIX_HUGETLB_CMA]) || !size)
+		return 0;
+
+	if (size > ULLONG_MAX - (PAGE_SIZE - 1)) {
+		pr_warn("crashkernel hugetlb CMA size is too large\n");
+		return 0;
+	}
+	size = roundup(size, PAGE_SIZE);
+
+#ifdef CRASHKERNEL_CMA
+	reused_size = hugetlb_cma_add_crashkernel_ranges(size, crashk_cma_ranges,
+							 &crashk_cma_cnt,
+							 CRASHKERNEL_CMA_RANGES_MAX);
+
+	if (reused_size < size)
+		pr_warn("crashkernel hugetlb CMA reuse failed: %llu MB requested, %llu MB reused in %d ranges\n",
+			size >> 20, reused_size >> 20, crashk_cma_cnt - cnt);
+	else
+		pr_info("crashkernel hugetlb CMA reused: %llu MB in %d ranges\n",
+			reused_size >> 20, crashk_cma_cnt - cnt);
+#else
+	pr_warn("crashkernel hugetlb CMA reuse not supported\n");
+#endif
+
+	return 0;
+}
+early_initcall(crashk_hugetlb_cma_init);
 
 #ifndef HAVE_ARCH_ADD_CRASH_RES_TO_IOMEM_EARLY
 static __init int insert_crashkernel_resources(void)
