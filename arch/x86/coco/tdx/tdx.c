@@ -980,6 +980,9 @@ static int tdx_enc_status_change_finish(unsigned long vaddr, int numpages,
 	if (!enc && !tdx_enc_status_changed(vaddr, numpages, enc))
 		return -EIO;
 
+	if (!enc)
+		memset((void *)vaddr, 0, (size_t)numpages << PAGE_SHIFT);
+
 	if (enc)
 		atomic_long_sub(numpages, &nr_shared);
 	else

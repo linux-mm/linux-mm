@@ -13,6 +13,7 @@
 #include <linux/dma-direct.h>
 #include <linux/swiotlb.h>
 #include <linux/mem_encrypt.h>
+#include <linux/string.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/bitops.h>
@@ -307,6 +308,9 @@ static int amd_enc_status_change_finish(unsigned long vaddr, int npages, bool en
 
 	if (!cc_platform_has(CC_ATTR_HOST_MEM_ENCRYPT))
 		enc_dec_hypercall(vaddr, npages << PAGE_SHIFT, enc);
+
+	if (!enc)
+		memset((void *)vaddr, 0, (size_t)npages << PAGE_SHIFT);
 
 	return 0;
 }
