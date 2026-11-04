@@ -3501,6 +3501,68 @@ static void reserve_highatomic_pageblock(struct page *page, int order,
 	}
 }
 
+bool unreserve_highatomic_pageblock_zone(struct zone *zone, int migratetype,
+					 bool force)
+{
+	/*
+	 * Preserve at least one pageblock unless memory pressure
+	 * is really high.
+	 */
+	if (!force && zone->nr_reserved_highatomic <= pageblock_nr_pages)
+		return false;
+
+	guard(spinlock_irqsave)(&zone->lock);
+	for (int order = 0; order < NR_PAGE_ORDERS; order++) {
+		struct free_area *area = &(zone->free_area[order]);
+		unsigned long size;
+		struct page *page;
+		int ret;
+
+		page = get_page_from_free_area(area, MIGRATE_HIGHATOMIC);
+		if (!page)
+			continue;
+
+		size = max(pageblock_nr_pages, 1UL << order);
+		/*
+		 * It should never happen but changes to locking could
+		 * inadvertently allow a per-cpu drain to add pages to
+		 * MIGRATE_HIGHATOMIC while unreserving so be safe and watch for
+		 * underflows.
+		 */
+		if (WARN_ON_ONCE(size > zone->nr_reserved_highatomic))
+			size = zone->nr_reserved_highatomic;
+		zone->nr_reserved_highatomic -= size;
+
+		/*
+		 * Convert to migratetype and avoid the normal pageblock
+		 * stealing heuristics. Minimally, the caller is doing the work
+		 * and needs the pages. More importantly, if the block was
+		 * always converted to MIGRATE_UNMOVABLE or another type then
+		 * the number of pageblocks that cannot be completely freed may
+		 * increase.
+		 */
+		if (order < pageblock_order)
+			ret = move_freepages_block(zone, page,
+					MIGRATE_HIGHATOMIC, migratetype);
+		else {
+			move_to_free_list(page, zone, order,
+					  MIGRATE_HIGHATOMIC,
+					  migratetype);
+			change_pageblock_range(page, order, migratetype);
+			ret = 1;
+		}
+		/*
+		 * Reserving the block(s) already succeeded,
+		 * so this should not fail on zone boundaries.
+		 */
+		WARN_ON_ONCE(ret == -1);
+		if (ret > 0)
+			return true;
+	}
+
+	return false;
+}
+
 /*
  * Used when an allocation is about to fail under memory pressure. This
  * potentially hurts the reliability of high-order allocations when under
@@ -3516,70 +3578,12 @@ static bool unreserve_highatomic_pageblock(const struct alloc_context *ac,
 	struct zonelist *zonelist = ac->zonelist;
 	struct zoneref *z;
 	struct zone *zone;
-	struct page *page;
-	int order;
-	int ret;
 
 	for_each_zone_zonelist_nodemask(zone, z, zonelist, ac->highest_zoneidx,
 								ac->nodemask) {
-		/*
-		 * Preserve at least one pageblock unless memory pressure
-		 * is really high.
-		 */
-		if (!force && zone->nr_reserved_highatomic <=
-					pageblock_nr_pages)
-			continue;
-
-		guard(spinlock_irqsave)(&zone->lock);
-		for (order = 0; order < NR_PAGE_ORDERS; order++) {
-			struct free_area *area = &(zone->free_area[order]);
-			unsigned long size;
-
-			page = get_page_from_free_area(area, MIGRATE_HIGHATOMIC);
-			if (!page)
-				continue;
-
-			size = max(pageblock_nr_pages, 1UL << order);
-			/*
-			 * It should never happen but changes to
-			 * locking could inadvertently allow a per-cpu
-			 * drain to add pages to MIGRATE_HIGHATOMIC
-			 * while unreserving so be safe and watch for
-			 * underflows.
-			 */
-			if (WARN_ON_ONCE(size > zone->nr_reserved_highatomic))
-				size = zone->nr_reserved_highatomic;
-			zone->nr_reserved_highatomic -= size;
-
-			/*
-			 * Convert to ac->migratetype and avoid the normal
-			 * pageblock stealing heuristics. Minimally, the caller
-			 * is doing the work and needs the pages. More
-			 * importantly, if the block was always converted to
-			 * MIGRATE_UNMOVABLE or another type then the number
-			 * of pageblocks that cannot be completely freed
-			 * may increase.
-			 */
-			if (order < pageblock_order)
-				ret = move_freepages_block(zone, page,
-							   MIGRATE_HIGHATOMIC,
-							   ac->migratetype);
-			else {
-				move_to_free_list(page, zone, order,
-						  MIGRATE_HIGHATOMIC,
-						  ac->migratetype);
-				change_pageblock_range(page, order,
-						       ac->migratetype);
-				ret = 1;
-			}
-			/*
-			 * Reserving the block(s) already succeeded,
-			 * so this should not fail on zone boundaries.
-			 */
-			WARN_ON_ONCE(ret == -1);
-			if (ret > 0)
-				return ret;
-		}
+		if (unreserve_highatomic_pageblock_zone(zone,
+							ac->migratetype, force))
+			return true;
 	}
 
 	return false;
