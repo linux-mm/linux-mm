@@ -152,7 +152,6 @@ struct zswap_comp_ctx {
 
 /* Separate requests, so that decompression does not wait for compression. */
 struct crypto_acomp_ctx {
-	struct crypto_acomp *acomp;
 	struct zswap_comp_ctx comp;
 	struct zswap_acomp_req decomp;	/* unused with on-stack requests */
 };
@@ -168,6 +167,7 @@ struct zswap_pool {
 	struct crypto_acomp_ctx __percpu *acomp_ctx;
 	struct percpu_ref ref;
 	struct rcu_work release_rwork;
+	struct crypto_acomp *acomp;
 	struct hlist_node node;
 	u8 idx;
 	char tfm_name[CRYPTO_MAX_ALG_NAME];
@@ -287,16 +287,6 @@ static void acomp_ctx_free(struct crypto_acomp_ctx *acomp_ctx)
 	acomp_request_free(acomp_ctx->decomp.req);
 	acomp_ctx->decomp.req = NULL;
 
-	/*
-	 * We have to handle both cases here: an error pointer return from
-	 * crypto_alloc_acomp_node(); and a) NULL initialization by zswap, or
-	 * b) NULL assignment done in a previous call to acomp_ctx_free().
-	 */
-	if (!IS_ERR_OR_NULL(acomp_ctx->acomp))
-		crypto_free_acomp(acomp_ctx->acomp);
-
-	acomp_ctx->acomp = NULL;
-
 	kfree(acomp_ctx->comp.buffer);
 	acomp_ctx->comp.buffer = NULL;
 }
@@ -322,6 +312,17 @@ static struct zswap_pool *zswap_pool_create(char *compressor)
 		goto error;
 
 	strscpy(pool->tfm_name, compressor, sizeof(pool->tfm_name));
+
+	/*
+	 * In case of an error, crypto_alloc_acomp() returns an
+	 * error pointer, never NULL.
+	 */
+	pool->acomp = crypto_alloc_acomp(pool->tfm_name, 0, 0);
+	if (IS_ERR(pool->acomp)) {
+		pr_err("could not alloc crypto acomp %s : %pe\n",
+			pool->tfm_name, pool->acomp);
+		goto error;
+	}
 
 	/* Many things rely on the zero-initialization. */
 	pool->acomp_ctx = alloc_percpu_gfp(*pool->acomp_ctx,
@@ -386,6 +387,14 @@ cpuhp_add_fail:
 error:
 	if (pool->acomp_ctx)
 		free_percpu(pool->acomp_ctx);
+
+	/*
+	 * We have to handle both cases here: an error pointer return from
+	 * crypto_alloc_acomp(); and NULL initialization by kzalloc_obj().
+	 */
+	if (!IS_ERR_OR_NULL(pool->acomp))
+		crypto_free_acomp(pool->acomp);
+
 	if (pool->zs_pool)
 		zs_destroy_pool(pool->zs_pool);
 	kfree(pool);
@@ -423,6 +432,13 @@ static void zswap_pool_destroy(struct zswap_pool *pool)
 		acomp_ctx_free(per_cpu_ptr(pool->acomp_ctx, cpu));
 
 	free_percpu(pool->acomp_ctx);
+
+	/*
+	 * We have to handle both cases here: an error pointer return from
+	 * crypto_alloc_acomp(); and NULL initialization by kzalloc_obj().
+	 */
+	if (!IS_ERR_OR_NULL(pool->acomp))
+		crypto_free_acomp(pool->acomp);
 
 	zs_destroy_pool(pool->zs_pool);
 	kfree(pool);
@@ -841,34 +857,20 @@ static int zswap_cpu_comp_prepare(unsigned int cpu, struct hlist_node *node)
 	 * To handle cases where the CPU goes through online-offline-online
 	 * transitions, we return if the acomp_ctx has already been initialized.
 	 */
-	if (acomp_ctx->acomp) {
-		WARN_ON_ONCE(IS_ERR(acomp_ctx->acomp));
+	if (acomp_ctx->comp.areq.req)
 		return 0;
-	}
 
 	acomp_ctx->comp.buffer = kmalloc_node(PAGE_SIZE, GFP_KERNEL, cpu_to_node(cpu));
 	if (!acomp_ctx->comp.buffer)
 		return ret;
 
-	/*
-	 * In case of an error, crypto_alloc_acomp_node() returns an
-	 * error pointer, never NULL.
-	 */
-	acomp_ctx->acomp = crypto_alloc_acomp_node(pool->tfm_name, 0, 0, cpu_to_node(cpu));
-	if (IS_ERR(acomp_ctx->acomp)) {
-		pr_err("could not alloc crypto acomp %s : %pe\n",
-				pool->tfm_name, acomp_ctx->acomp);
-		ret = PTR_ERR(acomp_ctx->acomp);
-		goto fail;
-	}
-
-	ret = zswap_acomp_req_init(&acomp_ctx->comp.areq, acomp_ctx->acomp);
+	ret = zswap_acomp_req_init(&acomp_ctx->comp.areq, pool->acomp);
 	if (ret)
 		goto req_fail;
 
 	/* Skip the per-CPU request when decompression can use the stack. */
-	if (acomp_is_async(acomp_ctx->acomp)) {
-		ret = zswap_acomp_req_init(&acomp_ctx->decomp, acomp_ctx->acomp);
+	if (acomp_is_async(pool->acomp)) {
+		ret = zswap_acomp_req_init(&acomp_ctx->decomp, pool->acomp);
 		if (ret)
 			goto req_fail;
 	}
@@ -877,7 +879,6 @@ static int zswap_cpu_comp_prepare(unsigned int cpu, struct hlist_node *node)
 
 req_fail:
 	pr_err("could not alloc crypto acomp_request %s\n", pool->tfm_name);
-fail:
 	acomp_ctx_free(acomp_ctx);
 	return ret;
 }
@@ -1032,7 +1033,7 @@ static bool zswap_decompress(struct zswap_entry *entry, struct folio *folio)
 	 * Otherwise serialize decompression on the shared per-CPU request.
 	 */
 	if (!acomp_ctx->decomp.req) {
-		ACOMP_REQUEST_ON_STACK(req, acomp_ctx->acomp);
+		ACOMP_REQUEST_ON_STACK(req, pool->acomp);
 		DECLARE_CRYPTO_WAIT(wait);
 
 		zswap_set_acomp_req_callback(req, &wait);
