@@ -4125,9 +4125,9 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 			 * threads.
 			 *
 			 * The critical issue is to order this
-			 * folio_remove_rmap_pte() with the ptp_clear_flush
+			 * folio_remove_rmap_pte() with the ptep_clear_flush
 			 * above. Those stores are ordered by (if nothing else,)
-			 * the barrier present in the atomic_add_negative
+			 * the release ordering of the mapcount decrement
 			 * in folio_remove_rmap_pte();
 			 *
 			 * Then the TLB flush in ptep_clear_flush ensures that
