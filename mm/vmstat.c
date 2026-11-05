@@ -1397,6 +1397,7 @@ const char * const vmstat_text[] = {
 #ifdef CONFIG_HUGETLB_PAGE
 	[I(HTLB_BUDDY_PGALLOC)]			= "htlb_buddy_alloc_success",
 	[I(HTLB_BUDDY_PGALLOC_FAIL)]		= "htlb_buddy_alloc_fail",
+	[I(HTLB_DISSOLVE)]			= "htlb_dissolve",
 #endif
 #ifdef CONFIG_CMA
 	[I(CMA_ALLOC_SUCCESS)]			= "cma_alloc_success",
