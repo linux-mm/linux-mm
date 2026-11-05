@@ -8,6 +8,7 @@
 #include <linux/gfp.h>
 #include <linux/pgalloc_tag.h>
 #include <linux/bug.h>
+#include <linux/capability.h>
 #include <linux/list.h>
 #include <linux/mmzone.h>
 #include <linux/rbtree.h>
@@ -2248,6 +2249,38 @@ vm_fault_t finish_fault(struct vm_fault *vmf);
 /* 127: arbitrary random number, small enough to assemble well */
 #define folio_ref_zero_or_close_to_overflow(folio) \
 	((unsigned int) folio_ref_count(folio) + 127u <= 127u)
+
+/* Leave separate reserves for administrators and concurrent reference gains. */
+#define FOLIO_REF_COUNT_LIMIT		(INT_MAX - (1U << 26))
+#define FOLIO_REF_COUNT_ADMIN_LIMIT	(INT_MAX - (1U << 25))
+
+/**
+ * folio_ref_count_over_limit - Check whether to refuse more folio references.
+ * @folio: The folio.
+ *
+ * Relevant for large pagecache folios (!hugetlb). For these, we have to check
+ * before adding page table mappings or other significant refcount users whether
+ * we are close to our folio ref count limit, to avoid overflows.
+ *
+ * Checking this for other folios does no harm but is mostly unnecessary.
+ *
+ * This check is an approximation; we leave some headroom such that concurrent
+ * increments, batches and temporary references are not a problem.
+ *
+ * Return: True if the caller should refuse additional references, false
+ * otherwise.
+ */
+static inline bool folio_ref_count_over_limit(const struct folio *folio)
+{
+	const unsigned int ref_count = folio_ref_count(folio);
+
+	if (likely(ref_count < FOLIO_REF_COUNT_LIMIT))
+		return false;
+	if (ref_count >= FOLIO_REF_COUNT_ADMIN_LIMIT)
+		return true;
+	/* Background threads must not consume admin reserves. */
+	return (current->flags & PF_KTHREAD) || !capable(CAP_SYS_RESOURCE);
+}
 
 /**
  * folio_get - Increment the reference count on a folio.
