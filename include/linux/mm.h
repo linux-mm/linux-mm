@@ -3621,23 +3621,41 @@ static inline unsigned long get_mm_counter_sum(struct mm_struct *mm, int member)
 
 void mm_trace_rss_stat(struct mm_struct *mm, int member);
 
+/*
+ * Until a second thread shares the mm, the RSS counters are exact single
+ * counters: the task which owns the mm updates a plain counter, and other
+ * tasks (reclaim, khugepaged, the OOM reaper, remote GUP, ...) an atomic
+ * one. See copy_mm(). Once the tree is active, all updates go to it:
+ * rss_owner is not read, so the updates of the threads of a process do not
+ * touch its cache line.
+ */
+static inline void __add_mm_counter(struct mm_struct *mm, int member, long value)
+{
+	struct percpu_counter_tree *counter = &mm->rss_stat[member];
+
+	if (!percpu_counter_tree_active(counter) && current == READ_ONCE(mm->rss_owner))
+		percpu_counter_tree_add_owner(counter, value);
+	else
+		percpu_counter_tree_add(counter, value);
+}
+
 static inline void add_mm_counter(struct mm_struct *mm, int member, long value)
 {
-	percpu_counter_tree_add(&mm->rss_stat[member], value);
+	__add_mm_counter(mm, member, value);
 
 	mm_trace_rss_stat(mm, member);
 }
 
 static inline void inc_mm_counter(struct mm_struct *mm, int member)
 {
-	percpu_counter_tree_add(&mm->rss_stat[member], 1);
+	__add_mm_counter(mm, member, 1);
 
 	mm_trace_rss_stat(mm, member);
 }
 
 static inline void dec_mm_counter(struct mm_struct *mm, int member)
 {
-	percpu_counter_tree_add(&mm->rss_stat[member], -1);
+	__add_mm_counter(mm, member, -1);
 
 	mm_trace_rss_stat(mm, member);
 }
