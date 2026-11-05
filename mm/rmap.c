@@ -1794,7 +1794,8 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 	switch (level) {
 	case PGTABLE_LEVEL_PTE:
 		if (!folio_test_large(folio)) {
-			nr = atomic_add_negative(-1, &folio->_mapcount);
+			/* Publish the PTE removal before lowering mapcount. */
+			nr = atomic_add_negative_release(-1, &folio->_mapcount);
 			break;
 		}
 
