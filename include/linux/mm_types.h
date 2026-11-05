@@ -1553,7 +1553,8 @@ static inline void lru_gen_use_mm(struct mm_struct *mm)
 	 * used since the last time it cleared the bitmap. So it might be worth
 	 * walking the page tables of this mm_struct to clear the accessed bit.
 	 */
-	WRITE_ONCE(mm->lru_gen.bitmap, -1);
+	if (READ_ONCE(mm->lru_gen.bitmap) != -1UL)
+		WRITE_ONCE(mm->lru_gen.bitmap, -1UL);
 }
 
 #else /* !CONFIG_LRU_GEN_WALKS_MMU */
