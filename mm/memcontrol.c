@@ -4481,14 +4481,27 @@ offline_kmem:
 	return -ENOMEM;
 }
 
+/*
+ * The store-plus-replay sequences of page_counter_set_min() and
+ * page_counter_set_low() must not interleave across writers: a stale
+ * replay can overwrite a newer one and protection accounting stays
+ * wrong until the next charge or uncharge re-runs it.  The walk in
+ * those helpers crosses counters, so this lock has to stay global --
+ * per-cgroup locking would still let a descendant writer and an
+ * ancestor writer race.
+ */
+static DEFINE_MUTEX(memcg_protected_mutex);
+
 static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 
 	memcg1_css_offline(memcg);
 
+	mutex_lock(&memcg_protected_mutex);
 	page_counter_set_min(&memcg->memory, 0);
 	page_counter_set_low(&memcg->memory, 0);
+	mutex_unlock(&memcg_protected_mutex);
 	page_counter_set_high(&memcg->memory, PAGE_COUNTER_MAX);
 	page_counter_set_high(&memcg->swap, PAGE_COUNTER_MAX);
 
@@ -4570,8 +4583,10 @@ static void mem_cgroup_css_reset(struct cgroup_subsys_state *css)
 	page_counter_set_max(&memcg->kmem, PAGE_COUNTER_MAX);
 	page_counter_set_max(&memcg->tcpmem, PAGE_COUNTER_MAX);
 #endif
+	mutex_lock(&memcg_protected_mutex);
 	page_counter_set_min(&memcg->memory, 0);
 	page_counter_set_low(&memcg->memory, 0);
+	mutex_unlock(&memcg_protected_mutex);
 	page_counter_set_high(&memcg->memory, PAGE_COUNTER_MAX);
 	page_counter_set_high(&memcg->swap, PAGE_COUNTER_MAX);
 	memcg_wb_domain_size_changed(memcg);
@@ -4946,7 +4961,9 @@ static ssize_t memory_min_write(struct kernfs_open_file *of,
 	if (err)
 		return err;
 
+	mutex_lock(&memcg_protected_mutex);
 	page_counter_set_min(&memcg->memory, min);
+	mutex_unlock(&memcg_protected_mutex);
 
 	return nbytes;
 }
@@ -4969,7 +4986,9 @@ static ssize_t memory_low_write(struct kernfs_open_file *of,
 	if (err)
 		return err;
 
+	mutex_lock(&memcg_protected_mutex);
 	page_counter_set_low(&memcg->memory, low);
+	mutex_unlock(&memcg_protected_mutex);
 
 	return nbytes;
 }
