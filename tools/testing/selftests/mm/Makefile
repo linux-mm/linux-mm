@@ -109,6 +109,7 @@ TEST_GEN_FILES += folio_split_race_test
 TEST_GEN_FILES += folio_order_check
 TEST_GEN_FILES += khugepaged_sync_check
 TEST_GEN_FILES += khugepaged_race
+TEST_GEN_FILES += pmd_swap
 TEST_GEN_FILES += soft-dirty
 
 ifeq ($(ARCH),x86_64)
@@ -168,6 +169,7 @@ TEST_PROGS += ksft_mremap.sh
 TEST_PROGS += ksft_pagemap.sh
 TEST_PROGS += ksft_pfnmap.sh
 TEST_PROGS += ksft_pkey.sh
+TEST_PROGS += ksft_pmd_swap.sh
 TEST_PROGS += ksft_process_madv.sh
 TEST_PROGS += ksft_process_mrelease.sh
 TEST_PROGS += ksft_rmap.sh
