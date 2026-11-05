@@ -63,7 +63,8 @@ possible CPU, and the tree items, whose number depends on nr_cpu_ids, so
 struct percpu_counter_tree has a fixed size.
 
 The fan-out of each tree level is selected at boot from nr_cpu_ids, the
-highest possible CPU number plus one.
+highest possible CPU number plus one. It can be overridden with the
+percpu_counter_tree.arity= boot parameter for performance comparison.
 
 The bounded accuracy is a property of the settled tree. While updates are
 in flight the transient error can exceed it, bounded by the number of
