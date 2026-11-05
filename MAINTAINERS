@@ -11949,6 +11949,15 @@ L:	linux-input@vger.kernel.org
 S:	Maintained
 F:	drivers/hid/hid-logitech-hidpp.c
 
+HIERARCHICAL PER-CPU COUNTERS (HPCC)
+M:	Mathieu Desnoyers <mathieu.desnoyers@efficios.com>
+L:	linux-mm@kvack.org
+L:	linux-kernel@vger.kernel.org
+S:	Supported
+F:	Documentation/core-api/percpu-counter-tree.rst
+F:	include/linux/percpu_counter_tree.h
+F:	lib/percpu_counter_tree.c
+
 HIGH-RESOLUTION TIMERS, TIMER WHEEL, CLOCKEVENTS
 M:	Anna-Maria Behnsen <anna-maria@linutronix.de>
 M:	Frederic Weisbecker <frederic@kernel.org>
