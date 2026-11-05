@@ -875,6 +875,8 @@ static int exec_mmap(struct linux_binprm *bprm)
 		}
 	}
 
+	/* This task owns the RSS counters of the new mm, see __add_mm_counter(). */
+	WRITE_ONCE(mm->rss_owner, tsk);
 	task_lock(tsk);
 	membarrier_exec_mmap(mm);
 
@@ -903,6 +905,9 @@ static int exec_mmap(struct linux_binprm *bprm)
 	if (old_mm) {
 		mmap_read_unlock(old_mm);
 		BUG_ON(active_mm != old_mm);
+		/* Updates of the old mm by this task are now atomic. */
+		if (READ_ONCE(old_mm->rss_owner) == tsk)
+			WRITE_ONCE(old_mm->rss_owner, NULL);
 		/* Defer teardown to setup_new_exec(), outside the exec locks. */
 		bprm->old_mm = old_mm;
 	} else {
