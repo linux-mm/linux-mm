@@ -2073,6 +2073,7 @@ retry:
 		}
 
 		update_and_free_hugetlb_folio(h, folio, false);
+		count_vm_event(HTLB_DISSOLVE);
 		return rc;
 	}
 out:
