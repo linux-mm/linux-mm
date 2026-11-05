@@ -220,6 +220,27 @@ err_out:
 	return rss_anon;
 }
 
+unsigned long rss_file(void)
+{
+	unsigned long rss_file = 0;
+	FILE *fp;
+	char buffer[MAX_LINE_LENGTH];
+
+	fp = fopen(STATUS_FILE_PATH, "r");
+	if (!fp)
+		ksft_exit_fail_msg("%s: Failed to open file %s\n", __func__, STATUS_FILE_PATH);
+
+	if (!check_for_pattern(fp, "RssFile:", buffer, sizeof(buffer)))
+		goto err_out;
+
+	if (sscanf(buffer, "RssFile:%10lu kB", &rss_file) != 1)
+		ksft_exit_fail_msg("Reading status error\n");
+
+err_out:
+	fclose(fp);
+	return rss_file;
+}
+
 static int vaddr_pageflags_get(char *vaddr, int pagemap_fd, int kpageflags_fd,
 		uint64_t *flags)
 {
