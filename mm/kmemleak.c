@@ -2241,6 +2241,9 @@ static void stop_scan_thread(void)
 	}
 }
 
+/* Also break RCU periodically when preemption clears need_resched(). */
+#define KMEMLEAK_SEQ_RESCHED_INTERVAL 256
+
 /*
  * Iterate over the object_list and return the first valid object at or after
  * the required position with its use_count incremented. The function triggers
@@ -2258,6 +2261,9 @@ static void *kmemleak_seq_start(struct seq_file *seq, loff_t *pos)
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(object, &object_list, object_list) {
+		if (need_resched() || !(n % KMEMLEAK_SEQ_RESCHED_INTERVAL))
+			kmemleak_cond_resched(object);
+
 		if (n-- > 0)
 			continue;
 		if (get_object(object))
@@ -2281,6 +2287,9 @@ static void *kmemleak_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	++(*pos);
 
 	list_for_each_entry_continue_rcu(obj, &object_list, object_list) {
+		if (need_resched() || !(*pos % KMEMLEAK_SEQ_RESCHED_INTERVAL))
+			kmemleak_cond_resched(obj);
+
 		if (get_object(obj)) {
 			next_obj = obj;
 			break;
