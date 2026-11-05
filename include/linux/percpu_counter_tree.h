@@ -32,10 +32,22 @@ struct percpu_counter_tree {
 	unsigned int items_stride;	/* Distance between this counter's consecutive items. */
 	/*
 	 * Approximate sum: this counter's item of the root, in the tree
-	 * items allocated with the per-CPU counters.
+	 * items allocated with the per-CPU counters. NULL until the tree of a
+	 * counter initialized by percpu_counter_tree_init_many_lazy() is
+	 * activated.
 	 */
 	atomic_long_t *approx_sum;
-	long bias;	/* Bias to apply to counter precise and approximate values. */
+	/*
+	 * Bias to apply to counter precise and approximate values. Before the
+	 * tree is activated, it also accumulates the updates of
+	 * percpu_counter_tree_add_owner(), written only by the owner.
+	 */
+	long bias;
+	/*
+	 * Updates of percpu_counter_tree_add() made before the tree is
+	 * activated, also applied to the precise and approximate values.
+	 */
+	atomic_long_t atomic_bias;
 };
 
 int percpu_counter_tree_init_many(struct percpu_counter_tree *counters,
@@ -43,10 +55,15 @@ int percpu_counter_tree_init_many(struct percpu_counter_tree *counters,
 				  gfp_t gfp_flags);
 int percpu_counter_tree_init(struct percpu_counter_tree *counter,
 			     unsigned long batch_size, gfp_t gfp_flags);
+int percpu_counter_tree_init_many_lazy(struct percpu_counter_tree *counters,
+				       unsigned int nr_counters, unsigned long batch_size);
+int percpu_counter_tree_activate_many(struct percpu_counter_tree *counters,
+				      unsigned int nr_counters, gfp_t gfp_flags);
 void percpu_counter_tree_destroy_many(struct percpu_counter_tree *counters,
 				      unsigned int nr_counters);
 void percpu_counter_tree_destroy(struct percpu_counter_tree *counter);
 void percpu_counter_tree_add(struct percpu_counter_tree *counter, long inc);
+void percpu_counter_tree_add_owner(struct percpu_counter_tree *counter, long inc);
 long percpu_counter_tree_precise_sum(struct percpu_counter_tree *counter);
 int percpu_counter_tree_approximate_compare(struct percpu_counter_tree *a,
 					    struct percpu_counter_tree *b);
@@ -56,6 +73,26 @@ int percpu_counter_tree_precise_compare(struct percpu_counter_tree *a,
 int percpu_counter_tree_precise_compare_value(struct percpu_counter_tree *counter, long v);
 void percpu_counter_tree_set(struct percpu_counter_tree *counter, long v);
 int percpu_counter_tree_subsystem_init(void);
+
+/**
+ * percpu_counter_tree_active() - Query whether the tree of a counter is active.
+ * @counter: The counter to query.
+ *
+ * A counter initialized by percpu_counter_tree_init_many() is active. A
+ * counter initialized by percpu_counter_tree_init_many_lazy() becomes
+ * active when percpu_counter_tree_activate_many() publishes its tree, and
+ * stays active. Once active, percpu_counter_tree_add() and
+ * percpu_counter_tree_add_owner() both add to the tree, so a user can skip
+ * selecting between them.
+ *
+ * Return: true if the updates of @counter go to its tree.
+ */
+static inline
+bool percpu_counter_tree_active(struct percpu_counter_tree *counter)
+{
+	/* No ordering: the update functions and the sums read level0 again. */
+	return !!READ_ONCE(counter->level0);
+}
 
 /**
  * percpu_counter_tree_approximate_sum() - Return approximate counter sum.
@@ -71,13 +108,21 @@ int percpu_counter_tree_subsystem_init(void);
 static inline
 long percpu_counter_tree_approximate_sum(struct percpu_counter_tree *counter)
 {
-	atomic_long_t *approx_sum = counter->approx_sum;
-	unsigned long v = (unsigned long)READ_ONCE(counter->bias);
+	/*
+	 * Pairs with the release of approx_sum in
+	 * percpu_counter_tree_activate_many(): the root is zeroed before its
+	 * pointer, and the address dependency orders the read of the root
+	 * after it, as for rcu_dereference().
+	 */
+	atomic_long_t *approx_sum = READ_ONCE(counter->approx_sum);
+	unsigned long v = (unsigned long)READ_ONCE(counter->bias) +
+			  (unsigned long)atomic_long_read(&counter->atomic_bias);
 
 	/*
-	 * A zeroed counter reads as 0, like a zeroed struct percpu_counter:
-	 * sparc64 init_new_context() reads the RSS counters after mm_init()
-	 * zeroes them, before their initialization.
+	 * A counter not activated yet has no tree items. A zeroed counter
+	 * reads as 0, like a zeroed struct percpu_counter: sparc64
+	 * init_new_context() reads the RSS counters after mm_init() zeroes
+	 * them, before their initialization.
 	 */
 	if (approx_sum)
 		v += (unsigned long)atomic_long_read(approx_sum);
@@ -122,6 +167,26 @@ int percpu_counter_tree_init(struct percpu_counter_tree *counter,
 			     unsigned long batch_size, gfp_t gfp_flags)
 {
 	return percpu_counter_tree_init_many(counter, 1, batch_size, gfp_flags);
+}
+
+static inline
+int percpu_counter_tree_init_many_lazy(struct percpu_counter_tree *counters,
+				       unsigned int nr_counters, unsigned long batch_size)
+{
+	return percpu_counter_tree_init_many(counters, nr_counters, batch_size, 0);
+}
+
+static inline
+int percpu_counter_tree_activate_many(struct percpu_counter_tree *counters,
+				      unsigned int nr_counters, gfp_t gfp_flags)
+{
+	return 0;
+}
+
+static inline
+bool percpu_counter_tree_active(struct percpu_counter_tree *counter)
+{
+	return true;
 }
 
 static inline
@@ -199,6 +264,12 @@ static inline
 void percpu_counter_tree_add(struct percpu_counter_tree *counter, long inc)
 {
 	atomic_long_add(inc, &counter->count);
+}
+
+static inline
+void percpu_counter_tree_add_owner(struct percpu_counter_tree *counter, long inc)
+{
+	percpu_counter_tree_add(counter, inc);
 }
 
 static inline

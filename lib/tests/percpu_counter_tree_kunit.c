@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Mathieu Desnoyers <mathieu.desnoyers@efficios.com>
 
 #include <kunit/test.h>
+#include <linux/delay.h>
+#include <linux/mutex.h>
 #include <linux/percpu_counter_tree.h>
 #include <linux/kthread.h>
 #include <linux/wait.h>
@@ -796,6 +798,220 @@ static void hpcc_test_saturated_compare(struct kunit *test)
 	}
 }
 
+/* Check a counter against its expected sum: exact before activation, within range after. */
+static void check_lazy_counter(struct kunit *test, struct percpu_counter_tree *c, long v)
+{
+	long approx_sum = percpu_counter_tree_approximate_sum(c);
+	unsigned long accuracy;
+
+	KUNIT_EXPECT_EQ(test, percpu_counter_tree_precise_sum(c), v);
+	KUNIT_EXPECT_EQ(test, 0, percpu_counter_tree_precise_compare_value(c, v));
+	KUNIT_EXPECT_EQ(test, 0, percpu_counter_tree_approximate_compare_value(c, v));
+	check_residuals(test, c);
+#ifdef CONFIG_SMP
+	if (!READ_ONCE(c->level0)) {
+		KUNIT_EXPECT_EQ(test, approx_sum, v);
+		return;
+	}
+#endif
+	accuracy = percpu_counter_tree_approximate_accuracy(c);
+	KUNIT_EXPECT_GE(test, (long)(approx_sum - (v - accuracy)), 0);
+	KUNIT_EXPECT_LE(test, (long)(approx_sum - (v + accuracy)), 0);
+}
+
+/*
+ * Lazily initialized counters: exact sums before the tree is activated,
+ * with owner and atomic updates, set(), idempotent activation, updates
+ * after activation, and destruction of counters never activated.
+ */
+static void hpcc_test_lazy(struct kunit *test)
+{
+	struct percpu_counter_tree pct[2];
+	long expect[2] = { 0, 0 };
+	int i, j;
+
+	KUNIT_ASSERT_EQ(test, 0, percpu_counter_tree_init_many_lazy(pct, 2, 32));
+#ifdef CONFIG_SMP
+	KUNIT_EXPECT_FALSE(test, percpu_counter_tree_active(&pct[0]));
+	KUNIT_EXPECT_FALSE(test, percpu_counter_tree_active(&pct[1]));
+	/* The level 0 counters are __percpu pointers: compare them as booleans. */
+	KUNIT_EXPECT_TRUE(test, !pct[0].level0);
+	KUNIT_EXPECT_TRUE(test, !pct[1].level0);
+	KUNIT_EXPECT_NULL(test, pct[0].approx_sum);
+	KUNIT_EXPECT_NULL(test, pct[1].approx_sum);
+#endif
+	for (j = 0; j < 2; j++) {
+		/* j == 0: before activation; j == 1: after activation. */
+		for (i = 0; i < 10000; i++) {
+			long inc = (long)(get_random_u32() % 1025) - 512;
+
+			if (get_random_u32() & 1)
+				percpu_counter_tree_add_owner(&pct[0], inc);
+			else
+				percpu_counter_tree_add(&pct[0], inc);
+			expect[0] += inc;
+			percpu_counter_tree_add(&pct[1], -inc);
+			expect[1] -= inc;
+		}
+		check_lazy_counter(test, &pct[0], expect[0]);
+		check_lazy_counter(test, &pct[1], expect[1]);
+		percpu_counter_tree_set(&pct[1], 12345);
+		expect[1] = 12345;
+		check_lazy_counter(test, &pct[1], expect[1]);
+		if (j)
+			break;
+		KUNIT_ASSERT_EQ(test, 0, percpu_counter_tree_activate_many(pct, 2, GFP_KERNEL));
+		KUNIT_EXPECT_TRUE(test, percpu_counter_tree_active(&pct[0]));
+		KUNIT_EXPECT_TRUE(test, percpu_counter_tree_active(&pct[1]));
+#ifdef CONFIG_SMP
+		{
+			s8 __percpu *level0 = pct[0].level0;
+
+			KUNIT_EXPECT_TRUE(test, level0);
+			KUNIT_EXPECT_TRUE(test, pct[1].level0 == level0 + 1);
+			KUNIT_EXPECT_NOT_NULL(test, pct[0].approx_sum);
+			KUNIT_EXPECT_PTR_EQ(test, pct[1].approx_sum, pct[0].approx_sum + 1);
+			KUNIT_EXPECT_EQ(test, 0,
+					percpu_counter_tree_activate_many(pct, 2, GFP_KERNEL));
+			KUNIT_EXPECT_TRUE(test, pct[0].level0 == level0);
+		}
+#endif
+		/* The sums carry the updates made before activation. */
+		check_lazy_counter(test, &pct[0], expect[0]);
+		check_lazy_counter(test, &pct[1], expect[1]);
+	}
+	percpu_counter_tree_destroy_many(pct, 2);
+
+	/* Destroy counters which were never activated. */
+	KUNIT_ASSERT_EQ(test, 0, percpu_counter_tree_init_many_lazy(pct, 2, 32));
+	percpu_counter_tree_add_owner(&pct[0], 7);
+	percpu_counter_tree_add(&pct[1], -7);
+	check_lazy_counter(test, &pct[0], 7);
+	check_lazy_counter(test, &pct[1], -7);
+	percpu_counter_tree_destroy_many(pct, 2);
+}
+
+/*
+ * Activation racing with updates: one owner and updaters on other CPUs add
+ * to a lazily initialized counter. Each worker makes a first part of its
+ * updates, reports their sum and waits. The test checks that the counter
+ * is exact, then releases the workers and activates the tree while they
+ * make the rest of their updates. The remote updaters also activate the
+ * tree when released, serialized with the test and with each other by a
+ * mutex, and check that the tree is active once their activation returns.
+ * No update may be lost, whichever side of the activation it lands on.
+ */
+#define LAZY_RACE_NR_INC	200000
+#define LAZY_RACE_NR_FIRST	(LAZY_RACE_NR_INC / 8)
+#define LAZY_RACE_MAX_REMOTE	8
+
+struct lazy_race_shared {
+	struct percpu_counter_tree *c;
+	atomic_long_t first_sum;	/* Sum of the updates made before the release. */
+	atomic_long_t expect;		/* Sum of all updates. */
+	struct mutex activate_lock;	/* Serializes the activations. */
+	atomic_t paused;		/* Workers waiting for the release. */
+	atomic_t activate_errors;	/* Failed activations of the workers. */
+	bool go;			/* Releases the workers. */
+};
+
+struct lazy_race_work {
+	struct work_struct work;
+	struct lazy_race_shared *sh;
+	bool owner;
+};
+
+static void lazy_race_fn(struct work_struct *work)
+{
+	struct lazy_race_work *w = container_of(work, struct lazy_race_work, work);
+	struct lazy_race_shared *sh = w->sh;
+	long sum = 0;
+	int i;
+
+	for (i = 0; i < LAZY_RACE_NR_INC; i++) {
+		long inc = (long)(get_random_u32() % 65) - 32;
+
+		if (i == LAZY_RACE_NR_FIRST) {
+			/* Fully ordered: the first updates are visible before the pause. */
+			atomic_long_add_return(sum, &sh->first_sum);
+			atomic_inc_return(&sh->paused);
+			while (!READ_ONCE(sh->go))
+				cond_resched();
+			if (!w->owner) {
+				mutex_lock(&sh->activate_lock);
+				if (percpu_counter_tree_activate_many(sh->c, 1, GFP_KERNEL) ||
+				    !percpu_counter_tree_active(sh->c))
+					atomic_inc(&sh->activate_errors);
+				mutex_unlock(&sh->activate_lock);
+			}
+		}
+		if (w->owner)
+			percpu_counter_tree_add_owner(sh->c, inc);
+		else
+			percpu_counter_tree_add(sh->c, inc);
+		sum += inc;
+		if (!(i & 1023))
+			cond_resched();
+	}
+	atomic_long_add(sum, &sh->expect);
+	kfree(w);
+	complete_work();
+}
+
+static void hpcc_test_lazy_activation_race(struct kunit *test)
+{
+	struct percpu_counter_tree pct;
+	int round;
+
+	if (num_online_cpus() < 2)
+		kunit_skip(test, "needs at least 2 online CPUs");
+	for (round = 0; round < 4; round++) {
+		struct lazy_race_shared sh = { .c = &pct };
+		unsigned long timeout = jiffies + 10 * HZ;
+		int cpu, nr_workers = 0;
+
+		KUNIT_ASSERT_EQ(test, 0, percpu_counter_tree_init_many_lazy(&pct, 1, 32));
+		mutex_init(&sh.activate_lock);
+		init_kthreads();
+		cpus_read_lock();
+		for_each_online_cpu(cpu) {
+			struct lazy_race_work *w;
+
+			if (nr_workers > LAZY_RACE_MAX_REMOTE)
+				break;
+			w = kzalloc_obj(*w);
+			KUNIT_EXPECT_NOT_NULL(test, w);
+			if (!w)
+				break;
+			INIT_WORK(&w->work, lazy_race_fn);
+			w->sh = &sh;
+			/* The first worker is the owner, the others update remotely. */
+			w->owner = !nr_workers;
+			atomic_inc(&kernel_threads_to_run);
+			queue_work_on(cpu, hpcc_test_wq, &w->work);
+			nr_workers++;
+		}
+		cpus_read_unlock();
+		while (atomic_read(&sh.paused) < nr_workers && time_before(jiffies, timeout))
+			usleep_range(100, 200);
+		smp_mb();	/* Read the counter after the first updates of the workers. */
+		/* Every worker, the owner included, has updates left for after the activation. */
+		KUNIT_EXPECT_EQ(test, atomic_read(&sh.paused), nr_workers);
+		/* Before activation, the owner and atomic updates are exact. */
+		check_lazy_counter(test, &pct, atomic_long_read(&sh.first_sum));
+		WRITE_ONCE(sh.go, true);
+		mutex_lock(&sh.activate_lock);
+		KUNIT_EXPECT_EQ(test, 0, percpu_counter_tree_activate_many(&pct, 1, GFP_KERNEL));
+		KUNIT_EXPECT_TRUE(test, percpu_counter_tree_active(&pct));
+		mutex_unlock(&sh.activate_lock);
+		fini_kthreads();
+		mutex_destroy(&sh.activate_lock);
+		KUNIT_EXPECT_EQ(test, 0, atomic_read(&sh.activate_errors));
+		check_lazy_counter(test, &pct, atomic_long_read(&sh.expect));
+		percpu_counter_tree_destroy_many(&pct, 1);
+	}
+}
+
 static void hpcc_test_check_config(struct kunit *test)
 {
 #ifdef CONFIG_SMP
@@ -817,6 +1033,8 @@ static struct kunit_case hpcc_test_cases[] = {
 	KUNIT_CASE(hpcc_test_set),
 	KUNIT_CASE(hpcc_test_saturated_compare),
 	KUNIT_CASE(hpcc_test_contended_carries),
+	KUNIT_CASE(hpcc_test_lazy),
+	KUNIT_CASE(hpcc_test_lazy_activation_race),
 	{}
 };
 
