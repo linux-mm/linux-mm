@@ -1819,6 +1819,8 @@ static int scan_movable_pages(unsigned long start, unsigned long end,
 		struct folio *folio;
 
 		page = pfn_to_page(pfn);
+		if (PageHWPoison(page) && !hwpoison_page_offlineable(page))
+			return -EBUSY;
 		if (PageLRU(page) || page_has_movable_ops(page))
 			goto found;
 
@@ -1884,6 +1886,9 @@ static void do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
 			 * in all cases yet.
 			 */
 			if (folio_test_large(folio) && !folio_test_hugetlb(folio))
+				goto put_folio;
+			/* The offline fails on it anyway, leave it to memory_failure() */
+			if (!hwpoison_page_offlineable(page))
 				goto put_folio;
 			if (folio_test_lru(folio) && !folio_isolate_lru(folio))
 				goto put_folio;
