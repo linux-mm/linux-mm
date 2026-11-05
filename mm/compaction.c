@@ -23,6 +23,7 @@
 #include <linux/freezer.h>
 #include <linux/page_owner.h>
 #include <linux/psi.h>
+#include <linux/random.h>
 #include <linux/cpuset.h>
 #include "page_alloc.h"
 #include "internal.h"
@@ -1801,6 +1802,26 @@ static void isolate_freepages(struct compact_control *cc)
 		/* Found a block suitable for isolating free pages from. */
 		nr_isolated = isolate_freepages_block(cc, &isolate_start_pfn,
 					block_end_pfn, cc->freepages, stride, false);
+
+		/*
+		 * Free pages of the stride's size or larger start on a sample,
+		 * but order-0 free pages spaced at a power of two can all fall
+		 * between the samples. Sample a block that gave nothing again
+		 * from a random offset.
+		 */
+		if (!nr_isolated && stride > 1 &&
+		    isolate_start_pfn == block_end_pfn) {
+			unsigned long pfn = block_start_pfn + 1 +
+					    get_random_u32_below(stride - 1);
+
+			/* The block can be shorter than the stride */
+			if (pfn < block_end_pfn) {
+				nr_isolated = isolate_freepages_block(cc, &pfn,
+						block_end_pfn, cc->freepages,
+						stride, false);
+				isolate_start_pfn = pfn;
+			}
+		}
 
 		/* Update the skip hint if the full pageblock was scanned */
 		if (isolate_start_pfn == block_end_pfn)
