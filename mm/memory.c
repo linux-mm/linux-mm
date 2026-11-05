@@ -1437,11 +1437,21 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	do {
 		next = pmd_addr_end(addr, end);
 		if (pmd_is_huge(*src_pmd)) {
+			softleaf_t entry = softleaf_mk_none();
 			int err;
 
 			VM_BUG_ON_VMA(next-addr != HPAGE_PMD_SIZE, src_vma);
+again:
 			err = copy_huge_pmd(dst_mm, src_mm, dst_pmd, src_pmd,
-					    addr, dst_vma, src_vma);
+					    addr, dst_vma, src_vma, &entry);
+			if (err == -EIO) {
+				VM_WARN_ON_ONCE(!entry.val);
+				if (swap_retry_table_alloc_nr(entry,
+							      HPAGE_PMD_NR,
+							      GFP_KERNEL) < 0)
+					return -ENOMEM;
+				goto again;
+			}
 			if (err == -ENOMEM)
 				return -ENOMEM;
 			if (!err)
