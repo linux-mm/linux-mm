@@ -417,8 +417,13 @@ sector_t swap_folio_sector(struct folio *folio);
  * All entries must be allocated by folio_alloc_swap(). And they must have
  * a swap count > 1. See comments of folio_*_swap helpers for more info.
  */
-int swap_dup_entry_direct(swp_entry_t entry);
+int swap_dup_entries_direct(swp_entry_t entry, int nr);
 void swap_put_entries_direct(swp_entry_t entry, int nr);
+
+static inline int swap_dup_entry_direct(swp_entry_t entry)
+{
+	return swap_dup_entries_direct(entry, 1);
+}
 
 /*
  * folio_free_swap tries to free the swap entries pinned by a swap cache
@@ -462,6 +467,11 @@ static inline void put_swap_device(struct swap_info_struct *si)
 
 static inline void free_swap_cache(struct folio *folio)
 {
+}
+
+static inline int swap_dup_entries_direct(swp_entry_t ent, int nr)
+{
+	return 0;
 }
 
 static inline int swap_dup_entry_direct(swp_entry_t ent)
