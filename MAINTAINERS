@@ -11957,6 +11957,7 @@ S:	Supported
 F:	Documentation/core-api/percpu-counter-tree.rst
 F:	include/linux/percpu_counter_tree.h
 F:	lib/percpu_counter_tree.c
+F:	lib/tests/percpu_counter_tree_bench.c
 F:	lib/tests/percpu_counter_tree_kunit.c
 F:	tools/testing/hpcc/
 
