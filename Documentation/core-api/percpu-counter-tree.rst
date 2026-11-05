@@ -74,6 +74,34 @@ takes no lock: an update which carries from the per-cpu counter to the
 upper levels can be counted in part, the residual it left below read and
 its carry missed on the way up.
 
+Lazy Tree Activation
+====================
+
+Counters initialized with percpu_counter_tree_init_many_lazy() start
+without their per-cpu counters and tree items, for counters which may
+never need the scalability of the tree. Until
+percpu_counter_tree_activate_many() allocates and publishes the tree,
+the counters are exact:
+
+ * percpu_counter_tree_add_owner() adds to the bias of the counter,
+   written only by its owner, a single context chosen by the user of the
+   counters, such as a task, without atomic instruction.
+
+ * percpu_counter_tree_add() adds to the atomic bias of the counter, for
+   any other updater.
+
+The precise and approximate sums read both, in O(1), and count each
+update whole. The activation does not move these values: the sums keep
+reading them along with the tree, so updates racing with the activation
+are not lost, whichever side of it they land on. The bias only has the
+owner as writer, and the atomic bias only receives atomic additions,
+before and after the activation. After activation, both update functions
+add to the tree, and the approximation has the accuracy of the tree.
+
+The activations of the same counters must be serialized by the caller:
+a concurrent activation would publish a second tree and lose the
+updates made to the first.
+
 Use Cases
 =========
 
