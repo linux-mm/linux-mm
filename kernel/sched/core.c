@@ -2811,8 +2811,6 @@ out_unlock:
 	return 0;
 }
 
-static inline void mm_update_cpus_allowed(struct mm_struct *mm, const cpumask_t *affmask);
-
 /*
  * sched_class::set_cpus_allowed must do the below, but is not required to
  * actually call this function.
@@ -2826,7 +2824,7 @@ void set_cpus_allowed_common(struct task_struct *p, struct affinity_context *ctx
 
 	cpumask_copy(&p->cpus_mask, ctx->new_mask);
 	p->nr_cpus_allowed = cpumask_weight(ctx->new_mask);
-	mm_update_cpus_allowed(p->mm, ctx->new_mask);
+	mm_cid_notify_affinity_change(p);
 
 	/*
 	 * Swap in a new user_cpus_ptr if SCA_USER flag set
@@ -10826,7 +10824,7 @@ static bool mm_update_max_cids(struct mm_struct *mm)
 	return true;
 }
 
-static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
+void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
 {
 	struct cpumask *mm_allowed;
 	struct mm_mm_cid *mc;
@@ -10986,6 +10984,8 @@ static void sched_mm_cid_fork(struct task_struct *t)
 
 	if (!mm)
 		return;
+	scoped_guard(task_rq_lock, t)
+		mm_update_cpus_allowed(mm, &t->cpus_mask);
 
 	WARN_ON_ONCE(t->mm_cid.cid != MM_CID_UNSET);
 
@@ -11180,7 +11180,6 @@ void mm_init_cid(struct mm_struct *mm, struct task_struct *p)
 	bitmap_zero(mm_cidmask(mm), num_possible_cpus());
 }
 #else /* CONFIG_SCHED_MM_CID */
-static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk) { }
 static inline void sched_mm_cid_fork(struct task_struct *t) { }
 #endif /* !CONFIG_SCHED_MM_CID */
 
