@@ -11,9 +11,11 @@ non-regular
 null-argv
 /check-exec
 /false
+/false-dynamic
 /inc
 /load_address.*
 !load_address.c
+/load_elf_phdrs
 /recursion-depth
 /set-exec
 xxxxxxxx*
