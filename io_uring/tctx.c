@@ -23,7 +23,7 @@ static struct io_wq *io_init_wq_offload(struct io_ring_ctx *ctx,
 	mutex_lock(&ctx->uring_lock);
 	hash = ctx->hash_map;
 	if (!hash) {
-		hash = kzalloc_obj(*hash);
+		hash = kzalloc_obj(*hash, GFP_KERNEL_ACCOUNT);
 		if (!hash) {
 			mutex_unlock(&ctx->uring_lock);
 			return ERR_PTR(-ENOMEM);
@@ -85,7 +85,7 @@ __cold struct io_uring_task *io_uring_alloc_task_context(struct task_struct *tas
 	struct io_uring_task *tctx;
 	int ret;
 
-	tctx = kzalloc_obj(*tctx);
+	tctx = kzalloc_obj(*tctx, GFP_KERNEL_ACCOUNT);
 	if (unlikely(!tctx))
 		return ERR_PTR(-ENOMEM);
 
