@@ -4074,7 +4074,7 @@ static struct st_buffer *new_tape_buffer(int max_sg)
 {
 	struct st_buffer *tb;
 
-	tb = kzalloc_obj(struct st_buffer);
+	tb = kzalloc_obj(struct st_buffer, GFP_KERNEL_ACCOUNT);
 	if (!tb) {
 		printk(KERN_NOTICE "st: Can't allocate new tape buffer.\n");
 		return NULL;
@@ -4083,7 +4083,8 @@ static struct st_buffer *new_tape_buffer(int max_sg)
 	tb->use_sg = max_sg;
 	tb->buffer_size = 0;
 
-	tb->reserved_pages = kzalloc_objs(struct page *, max_sg);
+	tb->reserved_pages = kzalloc_objs(struct page *, max_sg,
+					  GFP_KERNEL_ACCOUNT);
 	if (!tb->reserved_pages) {
 		kfree(tb);
 		return NULL;
@@ -4109,7 +4110,7 @@ static int enlarge_buffer(struct st_buffer * STbuffer, int new_size)
 
 	max_segs = STbuffer->use_sg;
 
-	priority = GFP_KERNEL | __GFP_NOWARN;
+	priority = GFP_KERNEL | __GFP_NOWARN | __GFP_ACCOUNT;
 
 	if (STbuffer->cleared)
 		priority |= __GFP_ZERO;
