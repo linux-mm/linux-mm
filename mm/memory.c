@@ -5657,6 +5657,22 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 	return ret;
 }
 
+/*
+ * A page cache folio that is not uptodate holds data that was never read in
+ * or cleared, and mapping it leaks stale memory to userspace. The callers are
+ * expected to check, so treat a hit as a kernel bug and refuse the mapping.
+ */
+static bool file_folio_not_uptodate(struct folio *folio)
+{
+	if (likely(folio_test_uptodate(folio)))
+		return false;
+	/* Driver pages from ->fault() never get PG_uptodate */
+	if (folio_test_anon(folio) || !folio->mapping)
+		return false;
+	WARN_ONCE(1, "refusing to map a page cache folio that is not uptodate\n");
+	return true;
+}
+
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 static void deposit_prealloc_pte(struct vm_fault *vmf)
 {
@@ -5696,6 +5712,9 @@ vm_fault_t do_set_pmd(struct vm_fault *vmf, struct folio *folio, struct page *pa
 	if (!is_pmd_order(folio_order(folio)))
 		return ret;
 	page = &folio->page;
+
+	if (file_folio_not_uptodate(folio))
+		return VM_FAULT_SIGBUS;
 
 	/*
 	 * Just backoff if any subpage of a THP is corrupted otherwise
@@ -5831,6 +5850,16 @@ vm_fault_t finish_fault(struct vm_fault *vmf)
 	int type, nr_pages;
 	unsigned long addr;
 	bool needs_fallback = false;
+
+	/*
+	 * Check the folio ->fault() returned. For CoW that is the source of the
+	 * copy; DAX CoW has none.
+	 */
+	if (vmf->page) {
+		folio = page_folio(vmf->page);
+		if (file_folio_not_uptodate(folio))
+			return VM_FAULT_SIGBUS;
+	}
 
 fallback:
 	addr = vmf->address;
