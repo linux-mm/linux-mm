@@ -732,6 +732,15 @@ int invalidate_inode_pages2_range(struct address_space *mapping,
 	if (mapping_empty(mapping))
 		return 0;
 
+	/*
+	 * Invalidating a DAX entry can release its folio, so unmap DAX entries
+	 * before invalidating them. dax_invalidate_mapping_entry_sync() skips
+	 * the last association of a folio that still has references, e.g.
+	 * because it was faulted in again in the meantime.
+	 */
+	if (dax_mapping(mapping))
+		unmap_mapping_pages(mapping, start, end - start + 1, false);
+
 	folio_batch_init(&fbatch);
 	index = start;
 	while (find_get_entries(mapping, &index, end, &fbatch, indices)) {
@@ -787,11 +796,8 @@ int invalidate_inode_pages2_range(struct address_space *mapping,
 		cond_resched();
 	}
 	/*
-	 * For DAX we invalidate page tables after invalidating page cache.  We
-	 * could invalidate page tables while invalidating each entry however
-	 * that would be expensive. And doing range unmapping before doesn't
-	 * work as we have no cheap way to find whether page cache entry didn't
-	 * get remapped later.
+	 * For DAX, also zap the mappings that were faulted in while we were
+	 * invalidating.
 	 */
 	if (dax_mapping(mapping)) {
 		unmap_mapping_pages(mapping, start, end - start + 1, false);
