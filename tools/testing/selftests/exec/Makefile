@@ -20,6 +20,8 @@ TEST_FILES := Makefile
 TEST_GEN_PROGS += recursion-depth
 TEST_GEN_PROGS += null-argv
 TEST_GEN_PROGS += check-exec
+TEST_GEN_PROGS += load_elf_phdrs
+TEST_GEN_PROGS_EXTENDED += false-dynamic
 
 # binfmt_misc must not be reachable as an exec source or as a stacking layer,
 # or an 'F' entry can pin the instance that owns it. Unprivileged, no bpf.
@@ -98,6 +100,8 @@ $(OUTPUT)/load_address.static.0x%: load_address.c
 		-fPIE -static-pie $< -o $@
 $(OUTPUT)/false: false.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -static $< -o $@
+$(OUTPUT)/false-dynamic: false.c
+	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
 $(OUTPUT)/inc: $(CHECK_EXEC_SAMPLES)/inc.c
 	$(CC) $(CFLAGS) $(LDFLAGS) $< -o $@
 $(OUTPUT)/set-exec: $(CHECK_EXEC_SAMPLES)/set-exec.c
