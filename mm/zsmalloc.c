@@ -212,8 +212,12 @@ enum fullness_group {
 };
 
 enum class_stat_type {
+#ifdef CONFIG_ZSMALLOC_STAT
 	/* NOTE: stats for 12 fullness groups here: from inuse 0 to 100 */
 	ZS_OBJS_ALLOCATED       = NR_FULLNESS_GROUPS,
+#else
+	ZS_OBJS_ALLOCATED,
+#endif
 	ZS_OBJS_INUSE,
 	NR_CLASS_STAT_TYPES,
 };
@@ -721,7 +725,9 @@ static void insert_zspage(struct size_class *class,
 				struct zspage *zspage,
 				int fullness)
 {
+#ifdef CONFIG_ZSMALLOC_STAT
 	class_stat_add(class, fullness, 1);
+#endif
 	list_add(&zspage->list, &class->fullness_list[fullness]);
 	zspage->fullness = fullness;
 }
@@ -737,7 +743,9 @@ static void remove_zspage(struct size_class *class, struct zspage *zspage)
 	VM_BUG_ON(list_empty(&class->fullness_list[fullness]));
 
 	list_del_init(&zspage->list);
+#ifdef CONFIG_ZSMALLOC_STAT
 	class_stat_sub(class, fullness, 1);
+#endif
 }
 
 /*
@@ -1896,7 +1904,9 @@ static void async_free_zspage(struct work_struct *work)
 
 		class = zspage_class(pool, zspage);
 		spin_lock(&class->lock);
+#ifdef CONFIG_ZSMALLOC_STAT
 		class_stat_sub(class, ZS_INUSE_RATIO_0, 1);
+#endif
 		__free_zspage(pool, class, zspage);
 		spin_unlock(&class->lock);
 	}
