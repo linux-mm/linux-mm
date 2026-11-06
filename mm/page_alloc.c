@@ -3862,14 +3862,18 @@ retry:
 		}
 
 		/*
-		 * If kswapd is already active on a node, keep looking
-		 * for other nodes that might be idle. This can happen
-		 * if another process has NUMA bindings and is causing
-		 * kswapd wakeups on only some nodes. Avoid accidental
-		 * "node_reclaim_mode"-like behavior in this case.
+		 * If kswapd is already active on a node and the zone is below
+		 * its kswapd watermark for this request, keep looking for other
+		 * nodes that might be idle. This can happen if another process
+		 * has NUMA bindings and is causing kswapd wakeups on only some
+		 * nodes. Avoid accidental "node_reclaim_mode" behavior.
 		 */
 		if (skip_kswapd_nodes &&
-		    !waitqueue_active(&zone->zone_pgdat->kswapd_wait)) {
+		    !waitqueue_active(&zone->zone_pgdat->kswapd_wait) &&
+		    !zone_watermark_fast(zone, order, kswapd_wmark_pages(zone),
+					 ac->highest_zoneidx,
+					 alloc_flags & ~ALLOC_RESERVES,
+					 gfp_mask)) {
 			skipped_kswapd_nodes = true;
 			continue;
 		}
