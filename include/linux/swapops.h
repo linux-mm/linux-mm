@@ -79,6 +79,16 @@ static inline pte_t pte_swp_clear_flags(pte_t pte)
 	return pte;
 }
 
+#ifdef CONFIG_ARCH_HAS_PMD_SOFTLEAVES
+static inline pmd_t pmd_swp_clear_flags(pmd_t pmd)
+{
+	pmd = pmd_swp_clear_soft_dirty(pmd);
+	pmd = pmd_swp_clear_uffd(pmd);
+	pmd = pmd_swp_clear_exclusive(pmd);
+	return pmd;
+}
+#endif
+
 /*
  * Store a type+offset into a swp_entry_t in an arch-independent format
  */
