@@ -199,6 +199,30 @@ uint64_t pmd_pshift(void)
 	return __pmd_pshift;
 }
 
+long read_vmstat(const char *name)
+{
+	char line[MAX_LINE_LENGTH];
+	size_t name_len = strlen(name);
+	long val = -1;
+	FILE *f;
+
+	f = fopen("/proc/vmstat", "r");
+	if (!f)
+		return -1;
+	/*
+	 * Match the whole field name: "thp_swpout" is a prefix of
+	 * "thp_swpout_fallback" and "thp_swpout_pmd".
+	 */
+	while (fgets(line, sizeof(line), f)) {
+		if (!strncmp(line, name, name_len) && line[name_len] == ' ') {
+			val = strtol(line + name_len + 1, NULL, 10);
+			break;
+		}
+	}
+	fclose(f);
+	return val;
+}
+
 unsigned long rss_anon(void)
 {
 	unsigned long rss_anon = 0;
