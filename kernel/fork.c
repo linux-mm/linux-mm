@@ -138,6 +138,28 @@
 #define MAX_THREADS FUTEX_TID_MASK
 
 /*
+ * Batch size of rss stat approximation, tunable with the rss_stat_batch=
+ * boot parameter to compare batch sizes on a given machine.
+ */
+static unsigned int rss_stat_batch_size __ro_after_init = 32;
+
+static int __init setup_rss_stat_batch(char *str)
+{
+	unsigned int batch;
+
+	if (kstrtouint(str, 0, &batch) || batch < 2 || !is_power_of_2(batch) ||
+	    batch > PERCPU_COUNTER_TREE_MAX_BATCH) {
+		pr_warn("rss_stat_batch: expecting a power of 2 between 2 and %u\n",
+			PERCPU_COUNTER_TREE_MAX_BATCH);
+		return 1;
+	}
+	rss_stat_batch_size = batch;
+	pr_info("rss_stat_batch: %u\n", batch);
+	return 1;
+}
+__setup("rss_stat_batch=", setup_rss_stat_batch);
+
+/*
  * Protected counters by write_lock_irq(&tasklist_lock)
  */
 unsigned long total_forks;	/* Handle normal Linux uptimes. */
@@ -633,7 +655,7 @@ static void check_mm(struct mm_struct *mm)
 			 "Please make sure 'struct resident_page_types[]' is updated as well");
 
 	for (i = 0; i < NR_MM_COUNTERS; i++) {
-		long x = percpu_counter_sum(&mm->rss_stat[i]);
+		long x = percpu_counter_tree_precise_sum(&mm->rss_stat[i]);
 
 		if (unlikely(x)) {
 			pr_alert("BUG: Bad rss-counter state mm:%p type:%s val:%ld Comm:%s Pid:%d\n",
@@ -738,7 +760,7 @@ void __mmdrop(struct mm_struct *mm)
 	check_mm(mm);
 	mm_pasid_drop(mm);
 	mm_destroy_cid(mm);
-	percpu_counter_destroy_many(mm->rss_stat, NR_MM_COUNTERS);
+	percpu_counter_tree_destroy_many(mm->rss_stat, NR_MM_COUNTERS);
 
 	free_mm(mm);
 }
@@ -1103,6 +1125,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	memset(&mm->rss_stat, 0, sizeof(mm->rss_stat));
 	spin_lock_init(&mm->page_table_lock);
 	spin_lock_init(&mm->arg_lock);
+	mutex_init(&mm->rss_stat_mutex);
 	mm_init_cpumask(mm);
 	mm_init_aio(mm);
 	mm_init_owner(mm, p);
@@ -1143,8 +1166,7 @@ static struct mm_struct *mm_init(struct mm_struct *mm, struct task_struct *p)
 	if (mm_alloc_sched(mm))
 		goto fail_sched;
 
-	if (percpu_counter_init_many(mm->rss_stat, 0, GFP_KERNEL_ACCOUNT,
-				     NR_MM_COUNTERS))
+	if (percpu_counter_tree_init_many_lazy(mm->rss_stat, NR_MM_COUNTERS, rss_stat_batch_size))
 		goto fail_pcpu;
 
 	lru_gen_init_mm(mm);
@@ -1537,6 +1559,8 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
 
 	if (!mm_init(mm, tsk))
 		goto fail_nomem;
+	/* The child owns its RSS counters, see __add_mm_counter(). */
+	mm->rss_owner = tsk;
 
 	uprobe_start_dup_mmap();
 	err = dup_mmap(mm, oldmm);
@@ -1564,6 +1588,23 @@ fail_nomem:
 	return NULL;
 }
 
+/*
+ * Serialize the activations of the RSS counter tree, whichever tasks create
+ * threads. Once the last counter is active, the activation is complete and
+ * thread creation skips the mutex. That check needs no acquire: the updates
+ * and the sums of the counters order their own accesses to the tree. Not
+ * observing the other counters active yet only delays their updates going
+ * to the tree.
+ */
+static int mm_activate_rss_stat(struct mm_struct *mm)
+{
+	if (percpu_counter_tree_active(&mm->rss_stat[NR_MM_COUNTERS - 1]))
+		return 0;
+	guard(mutex)(&mm->rss_stat_mutex);
+	return percpu_counter_tree_activate_many(mm->rss_stat, NR_MM_COUNTERS,
+						 GFP_KERNEL_ACCOUNT);
+}
+
 static int copy_mm(u64 clone_flags, struct task_struct *tsk)
 {
 	struct mm_struct *mm, *oldmm;
@@ -1588,6 +1629,18 @@ static int copy_mm(u64 clone_flags, struct task_struct *tsk)
 		return 0;
 
 	if (clone_flags & CLONE_VM) {
+		int err = 0;
+
+		/*
+		 * A second thread shares the mm: activate the RSS counter
+		 * tree. A vfork child shares the mm while the parent waits,
+		 * so the single counters still fit. The tree stays active if
+		 * the clone fails later, which is harmless.
+		 */
+		if (!(clone_flags & CLONE_VFORK))
+			err = mm_activate_rss_stat(oldmm);
+		if (err)
+			return err;
 		mmget(oldmm);
 		mm = oldmm;
 	} else {
