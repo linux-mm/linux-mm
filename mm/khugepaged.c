@@ -1884,8 +1884,9 @@ static enum scan_result try_collapse_pte_mapped_thp(struct mm_struct *mm, unsign
 		return SCAN_VMA_CHECK;
 
 	/*
-	 * Keep pmd pgtable while the uffd bit is in use; see comment in
-	 * retract_page_tables().
+	 * Keep the PTE table for uffd-wp and RWP registrations: it may
+	 * contain per-PTE protection state that cannot be reconstructed
+	 * from the page cache.
 	 */
 	if (userfaultfd_protected(vma))
 		return SCAN_PTE_UFFD;
@@ -2081,47 +2082,6 @@ void collapse_pte_mapped_thp(struct mm_struct *mm, unsigned long addr,
 	try_collapse_pte_mapped_thp(mm, addr, install_pmd);
 }
 
-/* Can we retract page tables for this file-backed VMA? */
-static bool file_backed_vma_is_retractable(struct vm_area_struct *vma)
-{
-	/*
-	 * Check vma->anon_vma to exclude MAP_PRIVATE mappings that
-	 * got written to. These VMAs are likely not worth removing
-	 * page tables from, as PMD-mapping is likely to be split later.
-	 *
-	 * Can't use vma_has_anon_rmap() here as the VMA may be stabilised
-	 * by the file rmap lock.
-	 */
-	if (READ_ONCE(vma->anon_vma))
-		return false;
-
-	/*
-	 * When a vma is registered with uffd-wp or RWP, we cannot recycle
-	 * the page table because there may be pte markers installed.
-	 * VM_UFFD_RWP ranges similarly rely on per-PTE uffd state
-	 * and cannot be recycled to a shared PMD. Other vmas can still
-	 * have the same file mapped hugely, but skip this one: it will
-	 * always be mapped in small page size for these registrations.
-	 */
-	if (userfaultfd_protected(vma))
-		return false;
-
-	/*
-	 * If the VMA contains guard regions then we can't collapse it.
-	 *
-	 * This is set atomically on guard marker installation under mmap/VMA
-	 * read lock, and here we may not hold any VMA or mmap lock at all.
-	 *
-	 * This is therefore serialised on the PTE page table lock, which is
-	 * obtained on guard region installation after the flag is set, so this
-	 * check being performed under this lock excludes races.
-	 */
-	if (vma_test_atomic_flag(vma, VMA_MAYBE_GUARD_BIT))
-		return false;
-
-	return true;
-}
-
 static void retract_page_tables(struct address_space *mapping, pgoff_t pgoff)
 {
 	struct vm_area_struct *vma;
@@ -2132,9 +2092,17 @@ static void retract_page_tables(struct address_space *mapping, pgoff_t pgoff)
 		struct mm_struct *mm;
 		unsigned long addr;
 		pmd_t *pmd, pgt_pmd;
-		spinlock_t *pml;
-		spinlock_t *ptl;
+		pte_t *pte;
+		spinlock_t *pml = NULL, *ptl;
 		bool success = false;
+
+		/*
+		 * Skip private mappings that have been written to: we'll likely
+		 * split them as soon as we CoW later. Use READ_ONCE() because
+		 * we are neither holding the VMA lock nor the mmap_lock.
+		 */
+		if (READ_ONCE(vma->anon_vma))
+			continue;
 
 		addr = vma->vm_start +
 			((pgoff - vma_start_pgoff(vma)) << PAGE_SHIFT);
@@ -2149,52 +2117,48 @@ static void retract_page_tables(struct address_space *mapping, pgoff_t pgoff)
 		if (collapse_test_exit(mm))
 			continue;
 
-		if (!file_backed_vma_is_retractable(vma))
-			continue;
-
 		/* PTEs were notified when unmapped; but now for the PMD? */
 		mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm,
 					addr, addr + HPAGE_PMD_SIZE);
 		mmu_notifier_invalidate_range_start(&range);
 
-		pml = pmd_lock(mm, pmd);
-		/*
-		 * The lock of new_folio is still held, we will be blocked in
-		 * the page fault path, which prevents the pte entries from
-		 * being set again. So even though the old empty PTE page may be
-		 * concurrently freed and a new PTE page is filled into the pmd
-		 * entry, it is still empty and can be removed.
-		 *
-		 * So here we only need to recheck if the state of pmd entry
-		 * still meets our requirements, rather than checking pmd_same()
-		 * like elsewhere.
-		 */
-		if (check_pmd_state(pmd) != SCAN_SUCCEED)
-			goto drop_pml;
-		ptl = pte_lockptr(mm, pmd);
-		if (ptl != pml)
-			spin_lock_nested(ptl, SINGLE_DEPTH_NESTING);
+		pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+		if (!pte)
+			goto unlock;
 
 		/*
-		 * Huge page lock is still held, so normally the page table must
-		 * remain empty; and we have already skipped vmas with an anon
-		 * rmap and userfaultfd_wp() vmas.  But since the mmap_lock is not
-		 * held, it is still possible for a racing userfaultfd_ioctl() or
-		 * madvise() to have inserted ptes or markers.  Now that we hold
-		 * ptlock, repeating the retractable checks protects us from
-		 * races against the prior checks.
+		 * The folio lock prevents file faults from modifying the
+		 * page table, but other things (userfaultfd, CoW, guard
+		 * markers) could have modified the page table until we lock it
+		 * and check.
 		 */
-		if (likely(file_backed_vma_is_retractable(vma))) {
-			pgt_pmd = pmdp_collapse_flush(vma, addr, pmd);
-			pmdp_get_lockless_sync();
-			success = true;
+		if (!pte_table_empty(pte))
+			goto unlock;
+
+		pml = pmd_lockptr(mm, pmd);
+		if (ptl != pml && !spin_trylock(pml)) {
+			pte_unmap_unlock(pte, ptl);
+			ptl = NULL;
+
+			pml = pmd_lock(mm, pmd);
+			pte = pte_offset_map_rw_nolock(mm, pmd, addr, &pgt_pmd, &ptl);
+			if (!pte)
+				goto unlock;
+			if (ptl != pml)
+				spin_lock_nested(ptl, SINGLE_DEPTH_NESTING);
+
+			if (!pte_table_empty(pte))
+				goto unlock;
 		}
 
-		if (ptl != pml)
-			spin_unlock(ptl);
-drop_pml:
-		spin_unlock(pml);
-
+		pgt_pmd = pmdp_collapse_flush(vma, addr, pmd);
+		pmdp_get_lockless_sync();
+		success = true;
+unlock:
+		if (pte)
+			pte_unmap_unlock(pte, ptl);
+		if (pml && pml != ptl)
+			spin_unlock(pml);
 		mmu_notifier_invalidate_range_end(&range);
 
 		if (success) {
