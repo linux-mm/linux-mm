@@ -51,6 +51,11 @@ struct movable_operations {
 /* Defined in mm/debug.c: */
 extern const char *migrate_reason_names[MR_TYPES];
 
+static inline bool migrate_is_async(enum migrate_mode mode)
+{
+	return mode == MIGRATE_ASYNC || mode == MIGRATE_ASYNC_NONTEMPORAL;
+}
+
 #ifdef CONFIG_MIGRATION
 
 void putback_movable_pages(struct list_head *l);

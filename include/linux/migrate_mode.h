@@ -12,6 +12,7 @@ enum migrate_mode {
 	MIGRATE_ASYNC,
 	MIGRATE_SYNC_LIGHT,
 	MIGRATE_SYNC,
+	MIGRATE_ASYNC_NONTEMPORAL,
 };
 
 enum migrate_reason {
