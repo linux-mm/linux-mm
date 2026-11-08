@@ -194,7 +194,7 @@ int hmcdrv_ftp_probe(void)
 		.len = PAGE_SIZE
 	};
 
-	ftp.buf = (void *) get_zeroed_page(GFP_KERNEL | GFP_DMA);
+	ftp.buf = kzalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
 
 	if (!ftp.buf)
 		return -ENOMEM;
@@ -218,7 +218,7 @@ int hmcdrv_ftp_probe(void)
 		break;
 	} /* switch */
 out:
-	free_page((unsigned long) ftp.buf);
+	kfree(ftp.buf);
 	return rc;
 }
 EXPORT_SYMBOL(hmcdrv_ftp_probe);
@@ -238,16 +238,16 @@ EXPORT_SYMBOL(hmcdrv_ftp_probe);
 ssize_t hmcdrv_ftp_cmd(char __kernel *cmd, loff_t offset,
 		       char __user *buf, size_t len)
 {
-	int order;
-
 	struct hmcdrv_ftp_cmdspec ftp = {.len = len, .ofs = offset};
 	ssize_t retlen = hmcdrv_ftp_parse(cmd, &ftp);
 
 	if (retlen)
 		return retlen;
 
-	order = get_order(ftp.len);
-	ftp.buf = (void *) __get_free_pages(GFP_KERNEL | GFP_DMA, order);
+	if (!ftp.len || ftp.len > KMALLOC_MAX_SIZE)
+		return -ENOMEM;
+
+	ftp.buf = kmalloc(round_up(ftp.len, PAGE_SIZE), GFP_KERNEL | GFP_DMA);
 
 	if (!ftp.buf)
 		return -ENOMEM;
@@ -280,7 +280,7 @@ ssize_t hmcdrv_ftp_cmd(char __kernel *cmd, loff_t offset,
 		break;
 	}
 
-	free_pages((unsigned long) ftp.buf, order);
+	kfree(ftp.buf);
 	return retlen;
 }
 

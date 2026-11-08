@@ -10,6 +10,7 @@
 #define pr_fmt(fmt) "hmcdrv: " fmt
 
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/irq.h>
 #include <linux/wait.h>
@@ -152,7 +153,7 @@ ssize_t diag_ftp_cmd(const struct hmcdrv_ftp_cmdspec *ftp, size_t *fsize)
 #endif
 	init_completion(&diag_ftp_rx_complete);
 
-	ldfpl = (void *) get_zeroed_page(GFP_KERNEL | GFP_DMA);
+	ldfpl = kzalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
 	if (!ldfpl) {
 		len = -ENOMEM;
 		goto out;
@@ -208,7 +209,7 @@ ssize_t diag_ftp_cmd(const struct hmcdrv_ftp_cmdspec *ftp, size_t *fsize)
 	}
 
 out_free:
-	free_page((unsigned long) ldfpl);
+	kfree(ldfpl);
 out:
 	return len;
 }
