@@ -275,6 +275,14 @@ static inline void page_pool_fragment_page(struct page *page, long nr)
 	page_pool_fragment_netmem(page_to_netmem(page), nr);
 }
 
+static inline bool page_pool_netmem_is_exclusively_owned(netmem_ref netmem)
+{
+	if (netmem_is_net_iov(netmem))
+		return true;
+
+	return page_ref_count(__netmem_to_page(netmem)) == 1;
+}
+
 static inline long page_pool_unref_netmem(netmem_ref netmem, long nr)
 {
 	atomic_long_t *pp_ref_count = netmem_get_pp_ref_count_ref(netmem);
@@ -293,6 +301,13 @@ static inline long page_pool_unref_netmem(netmem_ref netmem, long nr)
 	 * handling by ensuring all pages have partitioned into only 1 piece
 	 * initially, and only overwrite it when the page is partitioned into
 	 * more than one piece.
+	 *
+	 * This non-RMW fast path is safe because pp_ref_count is only ever
+	 * incremented by callers that already hold an active pp_ref_count
+	 * (>= 1) on @netmem; a raw page_ref_count is never converted into a
+	 * pp_ref_count. Thus when pp_ref_count == nr, the caller holds all
+	 * remaining pp_ref_count references and no concurrent
+	 * page_pool_ref_netmem() / napi_pp_get_page() can occur.
 	 */
 	if (atomic_long_read(pp_ref_count) == nr) {
 		/* As we have ensured nr is always one for constant case using

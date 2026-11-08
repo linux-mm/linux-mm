@@ -1056,6 +1056,13 @@ EXPORT_SYMBOL(napi_pp_put_page);
  * Acquires a page_pool reference (pp_ref_count) on @netmem if it belongs to a
  * page_pool. Counterpart to napi_pp_put_page().
  *
+ * If @netmem belongs to a page_pool, the caller MUST already hold an active
+ * pp_ref_count (>= 1) on @netmem (e.g. via an existing skb_frag_t in
+ * skb_frag_ref() or a spliced pipe buffer in skb_pipe_buf_ops). A raw
+ * page_ref_count is never converted into a pp_ref_count (in particular,
+ * tcp_zerocopy_receive() detaches page_pool pages before mapping them into
+ * userspace so GUP callers never observe page_pool pages).
+ *
  * Return: true if @netmem belongs to a page_pool, false otherwise.
  */
 bool napi_pp_get_page(netmem_ref netmem)
@@ -1072,9 +1079,9 @@ bool napi_pp_get_page(netmem_ref netmem)
 EXPORT_SYMBOL(napi_pp_get_page);
 #endif
 
-static bool skb_pp_recycle(struct sk_buff *skb, void *data)
+static bool skb_pp_recycle(void *data)
 {
-	if (!IS_ENABLED(CONFIG_PAGE_POOL) || !skb->pp_recycle)
+	if (!IS_ENABLED(CONFIG_PAGE_POOL))
 		return false;
 	return napi_pp_put_page(page_to_netmem(virt_to_page(data)));
 }
@@ -1089,7 +1096,7 @@ static void skb_free_head(struct sk_buff *skb)
 	unsigned char *head = skb->head;
 
 	if (skb->head_frag) {
-		if (skb_pp_recycle(skb, head))
+		if (skb_pp_recycle(head))
 			return;
 		skb_free_frag(head);
 	} else {
@@ -1114,8 +1121,7 @@ static void skb_release_data(struct sk_buff *skb, enum skb_drop_reason reason)
 	}
 
 	for (i = 0; i < shinfo->nr_frags; i++)
-		skb_netmem_unref(skb_frag_netmem(&shinfo->frags[i]),
-				 skb->pp_recycle);
+		netmem_dec_ref(skb_frag_netmem(&shinfo->frags[i]));
 
 free_head:
 	if (shinfo->frag_list)
@@ -1613,7 +1619,6 @@ static struct sk_buff *__skb_clone(struct sk_buff *n, struct sk_buff *skb)
 	n->nohdr = 0;
 	n->peeked = 0;
 	C(pfmemalloc);
-	C(pp_recycle);
 	n->destructor = NULL;
 	C(alloc_cpu);
 	C(tail);
@@ -2251,7 +2256,6 @@ struct sk_buff *__pskb_copy_fclone(struct sk_buff *skb, int headroom,
 			n = NULL;
 			goto out;
 		}
-		n->pp_recycle = skb->pp_recycle;
 		for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
 			skb_shinfo(n)->frags[i] = skb_shinfo(skb)->frags[i];
 			skb_frag_ref(n, i);
@@ -3941,7 +3945,6 @@ skb_zerocopy(struct sk_buff *to, struct sk_buff *from, int len, int hlen)
 	if (len <= skb_tailroom(to))
 		return skb_copy_bits(from, 0, skb_put(to, len), len);
 
-	to->pp_recycle = from->pp_recycle;
 	if (hlen) {
 		ret = skb_copy_bits(from, 0, skb_put(to, hlen), hlen);
 		if (unlikely(ret))
@@ -4314,7 +4317,6 @@ void skb_split(struct sk_buff *skb, struct sk_buff *skb1, const u32 len)
 
 	skb_shinfo(skb1)->flags |= skb_shinfo(skb)->flags & zc_flags;
 	skb_zerocopy_clone(skb1, skb, 0);
-	skb1->pp_recycle = skb->pp_recycle;
 	if (len < pos)	/* Split line is inside header. */
 		skb_split_inside_header(skb, skb1, len, pos);
 	else		/* Second chunk has no header, nothing to copy. */
@@ -4364,7 +4366,6 @@ int skb_shift(struct sk_buff *tgt, struct sk_buff *skb, int shiftlen)
 	if (skb_zcopy(tgt) || skb_zcopy(skb))
 		return 0;
 
-	DEBUG_NET_WARN_ON_ONCE(tgt->pp_recycle != skb->pp_recycle);
 	DEBUG_NET_WARN_ON_ONCE(skb_cmp_decrypted(tgt, skb));
 
 	todo = shiftlen;
@@ -5108,16 +5109,6 @@ normal:
 
 		while (pos < offset + len) {
 			if (i >= nfrags) {
-				if (skb_shinfo(nskb)->nr_frags &&
-				    nskb->pp_recycle != list_skb->pp_recycle) {
-					nskb->data_len = pos - offset - hsize;
-					nskb->len += nskb->data_len;
-					nskb->truesize += nskb->data_len;
-					if (__skb_linearize(nskb))
-						goto err;
-					hsize = pos - offset;
-					nskb_frag = skb_shinfo(nskb)->frags;
-				}
 				if (skb_orphan_frags(list_skb, GFP_ATOMIC) ||
 				    skb_zerocopy_clone(nskb, list_skb,
 						       GFP_ATOMIC))
@@ -5160,8 +5151,6 @@ normal:
 				goto err;
 			}
 
-			if (!skb_shinfo(nskb)->nr_frags)
-				nskb->pp_recycle = frag_skb->pp_recycle;
 			*nskb_frag = (i < 0) ? skb_head_frag_to_page_desc(frag_skb) : *frag;
 			skb_frag_ref(nskb, skb_shinfo(nskb)->nr_frags);
 			size = skb_frag_size(nskb_frag);
@@ -6309,15 +6298,6 @@ bool skb_try_coalesce(struct sk_buff *to, struct sk_buff *from,
 	*fragstolen = false;
 
 	if (skb_cloned(to))
-		return false;
-
-	/* In general, avoid mixing page_pool and non-page_pool allocated
-	 * pages within the same SKB. In theory we could take full
-	 * references if @from is cloned and !@to->pp_recycle but its
-	 * tricky (due to potential race with the clone disappearing) and
-	 * rare, so not worth dealing with.
-	 */
-	if (to->pp_recycle != from->pp_recycle)
 		return false;
 
 	/* All frags in an skb must either all be struct page-backed or all

@@ -167,7 +167,6 @@ TRACE_EVENT(iptfs_ingress_nth_add, TP_PROTO(struct sk_buff *skb, u8 share_ok),
 			     __field(u32, data_len)
 			     __field(u8, share_ok)
 			     __field(u8, head_frag)
-			     __field(u8, pp_recycle)
 			     __field(u8, cloned)
 			     __field(u8, shared)
 			     __field(u8, nr_frags)
@@ -178,15 +177,14 @@ TRACE_EVENT(iptfs_ingress_nth_add, TP_PROTO(struct sk_buff *skb, u8 share_ok),
 			   __entry->data_len = skb->data_len;
 			   __entry->share_ok = share_ok;
 			   __entry->head_frag = skb->head_frag;
-			   __entry->pp_recycle = skb->pp_recycle;
 			   __entry->cloned = skb_cloned(skb);
 			   __entry->shared = skb_shared(skb);
 			   __entry->nr_frags = skb_shinfo(skb)->nr_frags;
 			   __entry->frag_list = (bool)skb_shinfo(skb)->frag_list;
 		    ),
-	    TP_printk("INGRPSTQ: NTHADD: skb=%p len=%u data_len=%u share_ok=%u head_frag=%u pp_recycle=%u cloned=%u shared=%u nr_frags=%u frag_list=%u",
+	    TP_printk("INGRPSTQ: NTHADD: skb=%p len=%u data_len=%u share_ok=%u head_frag=%u cloned=%u shared=%u nr_frags=%u frag_list=%u",
 		      __entry->skb, __entry->skb_len, __entry->data_len, __entry->share_ok,
-		      __entry->head_frag, __entry->pp_recycle, __entry->cloned, __entry->shared,
+		      __entry->head_frag, __entry->cloned, __entry->shared,
 		      __entry->nr_frags, __entry->frag_list));
 
 DECLARE_EVENT_CLASS(iptfs_timer_event,
