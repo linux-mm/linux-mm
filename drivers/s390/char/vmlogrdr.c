@@ -793,7 +793,7 @@ static void vmlogrdr_cleanup(void)
 	}
 	for (i=0; i < MAXMINOR; ++i ) {
 		vmlogrdr_unregister_device(&sys_ser[i]);
-		free_page((unsigned long)sys_ser[i].buffer);
+		kfree(sys_ser[i].buffer);
 	}
 	vmlogrdr_unregister_driver();
 	if (vmlogrdr_major) {
@@ -826,7 +826,7 @@ static int __init vmlogrdr_init(void)
 		goto cleanup;
 
 	for (i=0; i < MAXMINOR; ++i ) {
-		sys_ser[i].buffer = (char *) get_zeroed_page(GFP_KERNEL | GFP_DMA);
+		sys_ser[i].buffer = kzalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
 		if (!sys_ser[i].buffer) {
 			rc = -ENOMEM;
 			break;

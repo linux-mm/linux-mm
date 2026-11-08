@@ -11,6 +11,7 @@
 
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/jiffies.h>
 
 #include "hmcdrv_ftp.h"
@@ -42,7 +43,6 @@ struct hmcdrv_cache_entry {
 	size_t len;
 };
 
-static int hmcdrv_cache_order; /* cache allocated page order */
 
 static struct hmcdrv_cache_entry hmcdrv_cache_file = {
 	.fsize = SIZE_MAX,
@@ -214,11 +214,14 @@ ssize_t hmcdrv_cache_cmd(const struct hmcdrv_ftp_cmdspec *ftp,
  */
 int hmcdrv_cache_startup(size_t cachesize)
 {
+	if (cachesize > KMALLOC_MAX_SIZE)
+		return -ENOMEM;
+
 	if (cachesize > 0) { /* perform caching ? */
-		hmcdrv_cache_order = get_order(cachesize);
+		/* the buffer must be 4k aligned, hence round up to page size */
 		hmcdrv_cache_file.content =
-			(void *) __get_free_pages(GFP_KERNEL | GFP_DMA,
-						  hmcdrv_cache_order);
+			kmalloc(round_up(cachesize, PAGE_SIZE),
+				GFP_KERNEL | GFP_DMA);
 
 		if (!hmcdrv_cache_file.content) {
 			pr_err("Allocating the requested cache size of %zu bytes failed\n",
@@ -239,11 +242,8 @@ int hmcdrv_cache_startup(size_t cachesize)
  */
 void hmcdrv_cache_shutdown(void)
 {
-	if (hmcdrv_cache_file.content) {
-		free_pages((unsigned long) hmcdrv_cache_file.content,
-			   hmcdrv_cache_order);
-		hmcdrv_cache_file.content = NULL;
-	}
+	kfree(hmcdrv_cache_file.content);
+	hmcdrv_cache_file.content = NULL;
 
 	hmcdrv_cache_file.id = HMCDRV_FTP_NOOP;
 	hmcdrv_cache_file.fsize = LLONG_MAX;
