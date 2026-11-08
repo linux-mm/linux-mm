@@ -224,7 +224,7 @@ static int __init zcore_reipl_init(void)
 		return rc;
 	if (ipib_info.ipib == 0)
 		return 0;
-	zcore_ipl_block = (void *) __get_free_page(GFP_KERNEL);
+	zcore_ipl_block = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!zcore_ipl_block)
 		return -ENOMEM;
 	if (ipib_info.ipib < sclp.hsa_size)
@@ -235,7 +235,7 @@ static int __init zcore_reipl_init(void)
 	if (rc || (__force u32)csum_partial(zcore_ipl_block, zcore_ipl_block->hdr.len, 0) !=
 	    ipib_info.checksum) {
 		TRACE("Checksum does not match\n");
-		free_page((unsigned long) zcore_ipl_block);
+		kfree(zcore_ipl_block);
 		zcore_ipl_block = NULL;
 	}
 	/*
@@ -244,7 +244,7 @@ static int __init zcore_reipl_init(void)
 	 * to continue dump processing, considering that os_info could be
 	 * corrupted on the panicked system.
 	 */
-	os_info = (void *)__get_free_page(GFP_KERNEL);
+	os_info = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!os_info)
 		return -ENOMEM;
 	rc = memcpy_hsa_kernel(&os_info_addr, __LC_OS_INFO, sizeof(os_info_addr));
@@ -266,7 +266,7 @@ static int __init zcore_reipl_init(void)
 			os_info_flags = 0;
 	}
 out:
-	free_page((unsigned long)os_info);
+	kfree(os_info);
 	return 0;
 }
 
