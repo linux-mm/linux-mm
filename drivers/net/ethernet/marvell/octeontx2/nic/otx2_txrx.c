@@ -383,7 +383,6 @@ static void otx2_rcv_pkt_handler(struct otx2_nic *pfvf,
 	if (pfvf->flags & OTX2_FLAG_TC_MARK_ENABLED)
 		skb->mark = parse->match_id;
 
-	skb_mark_for_recycle(skb);
 	if (metasize)
 		skb_metadata_set(skb, metasize);
 

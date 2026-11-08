@@ -622,9 +622,6 @@ static int gve_rx_append_frags(struct napi_struct *napi,
 		if (!skb)
 			return -1;
 
-		if (rx->dqo.page_pool)
-			skb_mark_for_recycle(skb);
-
 		if (rx->ctx.skb_tail == rx->ctx.skb_head)
 			skb_shinfo(rx->ctx.skb_head)->frag_list = skb;
 		else
@@ -883,9 +880,6 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 			if (unlikely(!rx->ctx.skb_head))
 				goto error;
 			rx->ctx.skb_tail = rx->ctx.skb_head;
-
-			if (rx->dqo.page_pool)
-				skb_mark_for_recycle(rx->ctx.skb_head);
 		} else {
 			unsplit = 1;
 		}
@@ -987,9 +981,6 @@ static int gve_rx_dqo(struct napi_struct *napi, struct gve_rx_ring *rx,
 			goto error;
 		return 0;
 	}
-
-	if (rx->dqo.page_pool)
-		skb_mark_for_recycle(rx->ctx.skb_head);
 
 	gve_skb_add_rx_frag(rx, buf_state, 0, buf_len);
 	gve_reuse_buffer(rx, buf_state);

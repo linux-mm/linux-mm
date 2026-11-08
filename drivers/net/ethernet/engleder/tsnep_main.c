@@ -1416,8 +1416,6 @@ static void tsnep_rx_page(struct tsnep_rx *rx, struct napi_struct *napi,
 
 	skb = tsnep_build_skb(rx, page, length);
 	if (skb) {
-		skb_mark_for_recycle(skb);
-
 		rx->packets++;
 		rx->bytes += length;
 		if (skb->pkt_type == PACKET_MULTICAST)

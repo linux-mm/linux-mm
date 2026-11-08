@@ -1226,7 +1226,6 @@ static struct sk_buff *bnxt_rx_multi_page_skb(struct bnxt *bp,
 		bnxt_reuse_rx_data(rxr, cons, data);
 		return NULL;
 	}
-	skb_mark_for_recycle(skb);
 	skb_reserve(skb, data_ptr - (u8 *)frag_start);
 	__skb_put(skb, len);
 
@@ -1265,7 +1264,6 @@ static struct sk_buff *bnxt_rx_page_skb(struct bnxt *bp,
 		return NULL;
 	}
 
-	skb_mark_for_recycle(skb);
 	off = (void *)data_ptr - page_address(page);
 	skb_add_rx_frag(skb, 0, page, off, len, rxr->rx_page_size);
 	memcpy(skb->data - NET_IP_ALIGN, data_ptr - NET_IP_ALIGN,
@@ -1304,7 +1302,6 @@ static struct sk_buff *bnxt_rx_skb(struct bnxt *bp,
 		return NULL;
 	}
 
-	skb_mark_for_recycle(skb);
 	skb_reserve(skb, bp->rx_offset);
 	skb_put(skb, offset_and_len & 0xffff);
 	return skb;
@@ -1411,7 +1408,6 @@ static struct sk_buff *bnxt_rx_agg_netmems_skb(struct bnxt *bp,
 	total_frag_len = __bnxt_rx_agg_netmems(bp, cpr, idx, agg_bufs, tpa,
 					       skb, NULL);
 	if (!total_frag_len) {
-		skb_mark_for_recycle(skb);
 		dev_kfree_skb(skb);
 		return NULL;
 	}
@@ -2023,7 +2019,6 @@ static inline struct sk_buff *bnxt_tpa_end(struct bnxt *bp,
 			cpr->sw_stats->rx.rx_oom_discards += 1;
 			return NULL;
 		}
-		skb_mark_for_recycle(skb);
 		skb_reserve(skb, bp->rx_offset);
 		skb_put(skb, len);
 	}
@@ -2088,8 +2083,6 @@ static void bnxt_tpa_agg(struct bnxt *bp, struct bnxt_rx_ring_info *rxr,
 static void bnxt_deliver_skb(struct bnxt *bp, struct bnxt_napi *bnapi,
 			     struct sk_buff *skb)
 {
-	skb_mark_for_recycle(skb);
-
 	if (skb->dev != bp->dev) {
 		/* this packet belongs to a vf-rep */
 		bnxt_vf_rep_rx(bp, skb);
@@ -2151,7 +2144,6 @@ static struct sk_buff *bnxt_rx_vlan(struct sk_buff *skb, u8 cmp_type,
 	}
 	return skb;
 vlan_err:
-	skb_mark_for_recycle(skb);
 	dev_kfree_skb(skb);
 	return NULL;
 }

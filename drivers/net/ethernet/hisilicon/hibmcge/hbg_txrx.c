@@ -471,7 +471,6 @@ static int hbg_build_skb(struct hbg_priv *priv,
 	buffer->skb = napi_build_skb(buffer->page_addr, buffer->page_size);
 	if (unlikely(!buffer->skb))
 		return -ENOMEM;
-	skb_mark_for_recycle(buffer->skb);
 
 	/* page will be freed together with the skb */
 	buffer->page = NULL;

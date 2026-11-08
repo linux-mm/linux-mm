@@ -925,7 +925,6 @@ static int airoha_qdma_rx_process(struct airoha_queue *q, int budget)
 
 			skb_reserve(q->skb, AIROHA_RX_HEADROOM);
 			__skb_put(q->skb, len);
-			skb_mark_for_recycle(q->skb);
 			q->skb->dev = netdev;
 			q->skb->ip_summed = CHECKSUM_UNNECESSARY;
 			skb_record_rx_queue(q->skb, qid);

@@ -2305,7 +2305,6 @@ static int mtk_poll_rx(struct napi_struct *napi, int budget,
 			metasize = xdp.data - xdp.data_meta;
 			if (metasize)
 				skb_metadata_set(skb, metasize);
-			skb_mark_for_recycle(skb);
 		} else {
 			if (ring->frag_size <= PAGE_SIZE)
 				new_data = napi_alloc_frag(ring->frag_size);

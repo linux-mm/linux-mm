@@ -625,8 +625,8 @@ EXPORT_SYMBOL_GPL(xdp_warn);
  *
  * Perform common operations to create a new skb to pass up the stack from
  * &xdp_buff: allocate an skb head from the NAPI percpu cache, initialize
- * skb data pointers and offsets, set the recycle bit if the buff is
- * PP-backed, Rx queue index, protocol and update frags info.
+ * skb data pointers and offsets, Rx queue index, protocol and update frags
+ * info.
  *
  * Return: new &sk_buff on success, %NULL on error.
  */
@@ -653,9 +653,6 @@ struct sk_buff *xdp_build_skb_from_buff(const struct xdp_buff *xdp)
 	metalen = xdp->data - xdp->data_meta;
 	if (metalen > 0)
 		skb_metadata_set(skb, metalen);
-
-	if (rxq->mem.type == MEM_TYPE_PAGE_POOL)
-		skb_mark_for_recycle(skb);
 
 	skb_record_rx_queue(skb, rxq->queue_index);
 
@@ -761,7 +758,6 @@ struct sk_buff *xdp_build_skb_from_zc(struct xdp_buff *xdp)
 		goto out;
 	}
 
-	skb_mark_for_recycle(skb);
 	skb_reserve(skb, xdp->data_meta - xdp->data_hard_start);
 
 	memcpy(__skb_put(skb, len), xdp->data_meta, LARGEST_ALIGN(len));
@@ -835,9 +831,6 @@ struct sk_buff *__xdp_build_skb_from_frame(struct xdp_frame *xdpf,
 	 * - HW RX hash			(skb_set_hash)
 	 * - RX ring dev queue index	(skb_record_rx_queue)
 	 */
-
-	if (xdpf->mem_type == MEM_TYPE_PAGE_POOL)
-		skb_mark_for_recycle(skb);
 
 	/* Allow SKB to reuse area used by xdp_frame */
 	xdp_scrub_frame(xdpf);
