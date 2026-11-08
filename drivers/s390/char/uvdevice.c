@@ -371,13 +371,13 @@ static int uvio_list_secrets(struct uvio_ioctl_cb *uv_ioctl)
 	    uv_ioctl->argument_len % UVIO_LIST_SECRETS_LEN != 0)
 		return -EINVAL;
 
-	zpage = (void *)get_zeroed_page(GFP_KERNEL);
+	zpage = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!zpage)
 		return -ENOMEM;
 
 	rc = uvio_get_list(zpage, uv_ioctl);
 
-	free_page((unsigned long)zpage);
+	kfree(zpage);
 	return rc;
 }
 
