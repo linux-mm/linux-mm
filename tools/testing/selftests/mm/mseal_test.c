@@ -24,7 +24,7 @@ static unsigned long get_vma_size(void *addr, int *prot)
 	FILE *maps;
 	char line[256];
 	int size = 0;
-	uintptr_t  addr_start, addr_end;
+	unsigned long addr_start, addr_end;
 	char protstr[5];
 	*prot = 0;
 

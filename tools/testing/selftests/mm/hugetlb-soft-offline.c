@@ -56,7 +56,7 @@ static int do_soft_offline(int fd, size_t len, int expect_errno)
 	}
 
 	memset(filemap, 0xab, len);
-	ksft_print_msg("Allocated %#lx bytes of hugetlb pages\n", len);
+	ksft_print_msg("Allocated %#zx bytes of hugetlb pages\n", len);
 
 	hwp_addr = filemap + len / 2;
 	ret = madvise(hwp_addr, pagesize, MADV_SOFT_OFFLINE);
