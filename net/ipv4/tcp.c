@@ -286,6 +286,7 @@
 #include <asm/ioctls.h>
 #include <net/busy_poll.h>
 #include <net/hotdata.h>
+#include <net/page_pool/helpers.h>
 #include <trace/events/tcp.h>
 #include <net/rps.h>
 
@@ -1921,7 +1922,7 @@ static skb_frag_t *skb_advance_to_frag(struct sk_buff *skb, u32 offset_skb,
 	return frag;
 }
 
-static bool can_map_frag(const skb_frag_t *frag)
+static bool can_map_frag(const struct sk_buff *skb, const skb_frag_t *frag)
 {
 	struct page *page;
 
@@ -1935,18 +1936,32 @@ static bool can_map_frag(const skb_frag_t *frag)
 	if (PageCompound(page) || page->mapping)
 		return false;
 
+	/* Before mapping a page_pool page into userspace,
+	 * tcp_zerocopy_receive() converts this fragment's pp_ref_count into a
+	 * regular page reference and detaches the page from its page_pool via
+	 * napi_pp_put_page(). Require this skb_frag_t to hold the sole
+	 * reference to the page so no other fragment or SKB clone expects
+	 * pp_ref_count on it after detachment.
+	 */
+	if (page_pool_page_is_pp(page) &&
+	    (skb_cloned(skb) ||
+	     page_pool_ref_count(page_to_netmem(page)) != 1 ||
+	     page_ref_count(page) != 1))
+		return false;
+
 	return true;
 }
 
-static int find_next_mappable_frag(const skb_frag_t *frag,
+static int find_next_mappable_frag(const struct sk_buff *skb,
+				   const skb_frag_t *frag,
 				   int remaining_in_skb)
 {
 	int offset = 0;
 
-	if (likely(can_map_frag(frag)))
+	if (likely(can_map_frag(skb, frag)))
 		return 0;
 
-	while (offset < remaining_in_skb && !can_map_frag(frag)) {
+	while (offset < remaining_in_skb && !can_map_frag(skb, frag)) {
 		offset += skb_frag_size(frag);
 		++frag;
 	}
@@ -1986,7 +2001,8 @@ static void tcp_zerocopy_set_hint_for_skb(struct sock *sk,
 	 * mappable_offset: Bytes till next mappable frag, *not* counting bytes
 	 * in partial_frag_remainder.
 	 */
-	mappable_offset = find_next_mappable_frag(frag, zc->recv_skip_hint);
+	mappable_offset = find_next_mappable_frag(skb, frag,
+						  zc->recv_skip_hint);
 	zc->recv_skip_hint = mappable_offset + partial_frag_remainder;
 }
 
@@ -2290,7 +2306,7 @@ static int tcp_zerocopy_receive(struct sock *sk,
 				break;
 		}
 
-		mappable_offset = find_next_mappable_frag(frags,
+		mappable_offset = find_next_mappable_frag(skb, frags,
 							  zc->recv_skip_hint);
 		if (mappable_offset) {
 			zc->recv_skip_hint = mappable_offset;
@@ -2299,6 +2315,22 @@ static int tcp_zerocopy_receive(struct sock *sk,
 		page = skb_frag_page(frags);
 		if (WARN_ON_ONCE(!page))
 			break;
+
+		/* Convert this fragment's sole pp_ref_count into a regular
+		 * page reference and detach the page from its page_pool before
+		 * mapping it into userspace. Once vm_insert_pages() elevates
+		 * page_ref_count the page cannot be recycled into the
+		 * page_pool anyway (and if vm_insert_pages() fails, the
+		 * detached page is freed to the page allocator when the skb is
+		 * consumed); detaching it up front ensures that a page_pool
+		 * page is never mapped into a userspace VMA (where GUP callers
+		 * such as MSG_ZEROCOPY or vmsplice() would otherwise observe a
+		 * page_pool page while holding only a raw page_ref_count).
+		 */
+		if (page_pool_page_is_pp(page)) {
+			get_page(page);
+			napi_pp_put_page(page_to_netmem(page));
+		}
 
 		prefetchw(page);
 		pages[pages_to_map++] = page;
