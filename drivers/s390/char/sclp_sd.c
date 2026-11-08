@@ -173,7 +173,7 @@ static struct sclp_register sclp_sd_register = {
 
 /**
  * sclp_sd_sync() - Perform Store Data request synchronously
- * @page: Address of work page - must be below 2GB
+ * @sccb: Address of work SCCB - must be below 2GB
  * @eq: Input EQ value
  * @di: Input DI value
  * @sat: Input SAT value
@@ -186,10 +186,9 @@ static struct sclp_register sclp_sd_register = {
  * Return %0 on success and store resulting DSIZE and ESIZE values in
  * @dsize_ptr and @esize_ptr (if provided). Return non-zero on error.
  */
-static int sclp_sd_sync(unsigned long page, u8 eq, u8 di, u64 sat, u64 sa,
+static int sclp_sd_sync(struct sclp_sd_sccb *sccb, u8 eq, u8 di, u64 sat, u64 sa,
 			u32 *dsize_ptr, u32 *esize_ptr)
 {
-	struct sclp_sd_sccb *sccb = (void *) page;
 	struct sclp_sd_listener listener;
 	struct sclp_sd_evbuf *evbuf;
 	int rc;
@@ -291,17 +290,18 @@ out_remove:
  */
 static int sclp_sd_store_data(struct sclp_sd_data *result, u8 di)
 {
+	struct sclp_sd_sccb *sccb;
 	u32 dsize = 0, esize = 0;
-	unsigned long page, asce = 0;
+	unsigned long asce = 0;
 	void *data = NULL;
 	int rc;
 
-	page = __get_free_page(GFP_KERNEL | GFP_DMA);
-	if (!page)
+	sccb = kmalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
+	if (!sccb)
 		return -ENOMEM;
 
 	/* Get size */
-	rc = sclp_sd_sync(page, SD_EQ_SIZE, di, 0, 0, &dsize, &esize);
+	rc = sclp_sd_sync(sccb, SD_EQ_SIZE, di, 0, 0, &dsize, &esize);
 	if (rc)
 		goto out;
 	if (dsize == 0)
@@ -323,12 +323,12 @@ static int sclp_sd_store_data(struct sclp_sd_data *result, u8 di)
 	}
 
 	/* Get data */
-	rc = sclp_sd_sync(page, SD_EQ_STORE_DATA, di, asce, (u64) data, &dsize,
+	rc = sclp_sd_sync(sccb, SD_EQ_STORE_DATA, di, asce, (u64) data, &dsize,
 			  &esize);
 	if (rc) {
 		/* Cancel running request if interrupted or timed out */
 		if (rc == -ERESTARTSYS || rc == -ETIME) {
-			if (sclp_sd_sync(page, SD_EQ_HALT, di, 0, 0, NULL, NULL)) {
+			if (sclp_sd_sync(sccb, SD_EQ_HALT, di, 0, 0, NULL, NULL)) {
 				pr_warn("Could not stop Store Data request - leaking at least %zu bytes\n",
 					(size_t)dsize * PAGE_SIZE);
 				data = NULL;
@@ -346,7 +346,7 @@ out_result:
 
 out:
 	base_asce_free(asce);
-	free_page(page);
+	kfree(sccb);
 
 	return rc;
 }

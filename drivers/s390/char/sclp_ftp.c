@@ -93,7 +93,7 @@ static int sclp_ftp_et7(const struct hmcdrv_ftp_cmdspec *ftp)
 	int rc;
 
 	req = kzalloc_obj(*req);
-	sccb = (void *) get_zeroed_page(GFP_KERNEL | GFP_DMA);
+	sccb = kzalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
 	if (!req || !sccb) {
 		rc = -ENOMEM;
 		goto out_free;
@@ -155,7 +155,7 @@ static int sclp_ftp_et7(const struct hmcdrv_ftp_cmdspec *ftp)
 	}
 
 out_free:
-	free_page((unsigned long) sccb);
+	kfree(sccb);
 	kfree(req);
 	return rc;
 }
@@ -250,7 +250,7 @@ int sclp_ftp_startup(void)
 		return rc;
 
 #ifdef DEBUG
-	info = get_zeroed_page(GFP_KERNEL);
+	info = (unsigned long)kzalloc(PAGE_SIZE, GFP_KERNEL);
 
 	if (info != 0) {
 		struct sysinfo_2_2_2 *info222 = (struct sysinfo_2_2_2 *)info;
@@ -262,7 +262,7 @@ int sclp_ftp_startup(void)
 				 info222->lpar_number, info222->name);
 		}
 
-		free_page(info);
+		kfree((void *)info);
 	}
 #endif	/* DEBUG */
 	return 0;
