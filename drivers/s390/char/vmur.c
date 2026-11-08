@@ -529,7 +529,7 @@ static ssize_t diag14_read(struct file *file, char __user *ubuf, size_t count,
 		return rc;
 
 	len = min((size_t) PAGE_SIZE, count);
-	buf = (char *) __get_free_page(GFP_KERNEL | GFP_DMA);
+	buf = kmalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
 	if (!buf)
 		return -ENOMEM;
 
@@ -556,7 +556,7 @@ static ssize_t diag14_read(struct file *file, char __user *ubuf, size_t count,
 	*offs += copied;
 	rc = copied;
 fail:
-	free_page((unsigned long) buf);
+	kfree(buf);
 	return rc;
 }
 
@@ -621,7 +621,7 @@ static int verify_uri_device(struct urdev *urd)
 	}
 
 	/* open file on virtual reader	*/
-	buf = (char *) __get_free_page(GFP_KERNEL | GFP_DMA);
+	buf = kmalloc(PAGE_SIZE, GFP_KERNEL | GFP_DMA);
 	if (!buf) {
 		rc = -ENOMEM;
 		goto fail_free_fcb;
@@ -641,7 +641,7 @@ static int verify_uri_device(struct urdev *urd)
 	rc = 0;
 
 fail_free_buf:
-	free_page((unsigned long) buf);
+	kfree(buf);
 fail_free_fcb:
 	kfree(fcb);
 	return rc;
