@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: GPL-2.0-only
+nommu_mmap_test
+nommu_mremap_test
