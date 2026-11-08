@@ -31,6 +31,8 @@
 #include <linux/kmemleak.h>
 #include <trace/events/cma.h>
 
+#include <asm/sections.h>
+
 #include "internal.h"
 #include "cma.h"
 #include "mm_init.h"
@@ -54,6 +56,29 @@ const char *cma_get_name(const struct cma *cma)
 	return cma->name;
 }
 EXPORT_SYMBOL_GPL(cma_get_name);
+
+/**
+ * cma_has_dynamic_base() - was the area placed at an address CMA chose?
+ * @cma: Contiguous memory region
+ *
+ * An area without a dynamic base was placed where something outside the kernel
+ * said it should go, typically a device tree reserved-memory node, and so lands
+ * at the same address in every kernel booted with that description.
+ */
+bool cma_has_dynamic_base(const struct cma *cma)
+{
+	return test_bit(CMA_DYNAMIC_BASE, &cma->flags);
+}
+
+static bool cma_overlaps_kernel_image(phys_addr_t base, phys_addr_t size)
+{
+	phys_addr_t end;
+
+	if (check_add_overflow(base, size, &end))
+		return true;
+
+	return base < __pa_symbol(_end) && __pa_symbol(_text) < end;
+}
 
 static unsigned long cma_bitmap_aligned_mask(const struct cma *cma,
 					     unsigned int align_order)
@@ -282,6 +307,15 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	if (!size || !memblock_is_region_reserved(base, size))
 		return -EINVAL;
 
+	if (cma_overlaps_kernel_image(base, size)) {
+		phys_addr_t text = __pa_symbol(_text);
+		phys_addr_t end = __pa_symbol(_end);
+
+		pr_err("area %s (%pa, size %pa) overlaps kernel image [%pa-%pa]\n",
+		       name ?: "(unnamed)", &base, &size, &text, &end);
+		return -EBUSY;
+	}
+
 	/*
 	 * CMA uses CMA_MIN_ALIGNMENT_BYTES as alignment requirement which
 	 * needs pageblock_order to be initialized. Let's enforce it.
@@ -292,8 +326,12 @@ int __init cma_init_reserved_mem(phys_addr_t base, phys_addr_t size,
 	}
 
 	/* ensure minimal alignment required by mm core */
-	if (!IS_ALIGNED(base | size, CMA_MIN_ALIGNMENT_BYTES))
+	if (!IS_ALIGNED(base | size, CMA_MIN_ALIGNMENT_BYTES)) {
+		pr_err("area %s (%pa, size %pa) is not aligned to %lu bytes\n",
+		       name ?: "(unnamed)", &base, &size,
+		       (unsigned long)CMA_MIN_ALIGNMENT_BYTES);
 		return -EINVAL;
+	}
 
 	ret = cma_new_area(name, size, order_per_bit, &cma);
 	if (ret != 0)
@@ -519,6 +557,8 @@ static int __init __cma_declare_contiguous_nid(phys_addr_t *basep,
 	}
 
 	(*res_cma)->nid = nid;
+	if (!fixed)
+		set_bit(CMA_DYNAMIC_BASE, &(*res_cma)->flags);
 	*basep = base;
 
 	return 0;
@@ -708,6 +748,7 @@ int __init cma_declare_contiguous_multi(phys_addr_t total_size,
 
 	cma->nranges = nr;
 	cma->nid = nid;
+	set_bit(CMA_DYNAMIC_BASE, &cma->flags);
 	*res_cma = cma;
 
 out:
