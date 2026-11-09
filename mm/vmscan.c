@@ -7152,6 +7152,7 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
 	unsigned long pflags;
 	unsigned long nr_boost_reclaim;
 	unsigned long zone_boosts[MAX_NR_ZONES] = { 0, };
+	bool has_highatomic = false;
 	bool boosted;
 	struct zone *zone;
 	struct scan_control sc = {
@@ -7177,6 +7178,8 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
 	for_each_managed_zone_pgdat(zone, pgdat, i, highest_zoneidx) {
 		nr_boost_reclaim += zone->watermark_boost;
 		zone_boosts[i] = zone->watermark_boost;
+		if (zone->nr_reserved_highatomic)
+			has_highatomic = true;
 	}
 	boosted = nr_boost_reclaim;
 
@@ -7313,11 +7316,30 @@ restart:
 	 * If the reclaim was boosted, we might still be far from the
 	 * watermark_high at this point. We need to avoid increasing the
 	 * failure count to prevent the kswapd thread from stopping.
+	 * We also don't want to stop unreserving highatomic pageblocks,
+	 * if there are any.
 	 */
-	if (!sc.nr_reclaimed && !boosted) {
+	if (!sc.nr_reclaimed && !boosted && !has_highatomic) {
 		int fail_cnt = atomic_inc_return(&pgdat->kswapd_failures);
 		/* kswapd context, low overhead to trace every failure */
 		trace_mm_vmscan_kswapd_reclaim_fail(pgdat->node_id, fail_cnt);
+	}
+
+	/*
+	 * We exhausted all reclaim priority and didn't balance pgdat (except
+	 * perhaps during the last attempt, but it's unlikely), even if we
+	 * reclaimed something. If there are highatomic pageblocks, unreserve
+	 * some.
+	 * Convert them to unmovable ones as kswapd doesn't have a target
+	 * migratetype, and unmovable should minimize permanent fragmentation.
+	 */
+	if (sc.priority < 1 && has_highatomic) {
+		for (int i = 0; i <= highest_zoneidx; i++) {
+			struct zone *zone = pgdat->node_zones + i;
+
+			unreserve_highatomic_pageblock_zone(zone,
+					MIGRATE_UNMOVABLE, true);
+		}
 	}
 
 out:
