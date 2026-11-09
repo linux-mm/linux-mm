@@ -119,6 +119,9 @@ static inline bool kpkeys_hardened_pgtables_early_enabled(void)
 	return arch_supports_kpkeys_early();
 }
 
+struct page *kpkeys_pgtable_alloc(gfp_t gfp, unsigned int order);
+void kpkeys_pgtable_free(struct page *page, unsigned int order);
+
 void kpkeys_hardened_pgtables_init(void);
 
 #else /* CONFIG_KPKEYS_HARDENED_PGTABLES */
@@ -132,6 +135,13 @@ static inline bool kpkeys_hardened_pgtables_early_enabled(void)
 {
 	return false;
 }
+
+static inline struct page *kpkeys_pgtable_alloc(gfp_t gfp, unsigned int order)
+{
+	return NULL;
+}
+
+static inline void kpkeys_pgtable_free(struct page *page, unsigned int order) {}
 
 static inline void kpkeys_hardened_pgtables_init(void) {}
 
