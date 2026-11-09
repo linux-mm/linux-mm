@@ -23,7 +23,7 @@ static inline void set_my_cpu_offset(unsigned long off)
 			:: "r" (off) : "memory");
 }
 
-static inline unsigned long __hyp_my_cpu_offset(void)
+static __always_inline unsigned long __hyp_my_cpu_offset(void)
 {
 	/*
 	 * Non-VHE hyp code runs with preemption disabled. No need to hazard
@@ -37,7 +37,7 @@ static inline unsigned long __hyp_my_cpu_offset(void)
 		    "mrs " dst ", tpidr_el2",				\
 		       ARM64_HAS_VIRT_HOST_EXTN)
 
-static inline unsigned long __kern_my_cpu_offset(void)
+static __always_inline unsigned long __kern_my_cpu_offset(void)
 {
 	unsigned long off;
 
@@ -129,7 +129,7 @@ static inline unsigned long __kern_my_cpu_offset(void)
 #endif
 
 #define PERCPU_RW_OPS(w, sfx, sz)						\
-static inline unsigned long __percpu_read_##sz(void __percpu *pcp)		\
+static __always_inline unsigned long __percpu_read_##sz(void __percpu *pcp)		\
 {										\
 	u16 *gprs = &current_thread_info()->pcpu_gprs;				\
 	unsigned long off;							\
@@ -149,7 +149,7 @@ static inline unsigned long __percpu_read_##sz(void __percpu *pcp)		\
 	return val;								\
 }										\
 										\
-static inline void __percpu_write_##sz(void __percpu *pcp, unsigned long val)	\
+static __always_inline void __percpu_write_##sz(void __percpu *pcp, unsigned long val) \
 {										\
 	u16 *gprs = &current_thread_info()->pcpu_gprs;				\
 	unsigned long off;							\
@@ -167,7 +167,7 @@ static inline void __percpu_write_##sz(void __percpu *pcp, unsigned long val)	\
 }
 
 #define __PERCPU_OP_CASE(w, sfx, name, sz, op_llsc, op_lse)		\
-static inline void							\
+static __always_inline void					\
 __percpu_##name##_case_##sz(void __percpu *pcp, unsigned long val)	\
 {									\
 	u16 *gprs = &current_thread_info()->pcpu_gprs;			\
@@ -200,7 +200,7 @@ __percpu_##name##_case_##sz(void __percpu *pcp, unsigned long val)	\
 }
 
 #define __PERCPU_RET_OP_CASE(w, sfx, name, sz, op_llsc, op_lse)		\
-static inline u##sz							\
+static __always_inline u##sz					\
 __percpu_##name##_return_case_##sz(void __percpu *pcp, unsigned long val)	\
 {									\
 	u16 *gprs = &current_thread_info()->pcpu_gprs;			\
@@ -270,7 +270,7 @@ PERCPU_RET_OP(add, add, ldadd)
 #undef PERCPU_RET_OP
 
 #define PERCPU_XCHG_OP(w, sfx, sz)					\
-static inline unsigned long						\
+static __always_inline unsigned long				\
 __percpu_xchg_case_##sz(void __percpu *pcp, u##sz val)			\
 {									\
 	u16 *gprs = &current_thread_info()->pcpu_gprs;			\
@@ -307,7 +307,7 @@ __percpu_xchg_case_##sz(void __percpu *pcp, u##sz val)			\
 }
 
 #define PERCPU_CMPXCHG_OP(w, sfx, sz)					\
-static inline unsigned long						\
+static __always_inline unsigned long				\
 __percpu_cmpxchg_case_##sz(void __percpu *pcp,				\
 			   u##sz old,					\
 			   u##sz new)					\
@@ -463,7 +463,7 @@ PERCPU_CMPXCHG_OP(x,  , 64)
 
 #define this_cpu_cmpxchg64(pcp, o, n)	this_cpu_cmpxchg_8(pcp, o, n)
 
-static inline u128
+static __always_inline u128
 __percpu_cmpxchg_128(void __percpu *pcp, u128 old, u128 new)
 {
 	u16 *gprs = &current_thread_info()->pcpu_gprs;
