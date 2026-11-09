@@ -30,6 +30,7 @@
 #include <linux/io.h>
 #include <linux/kmemleak.h>
 #include <trace/events/cma.h>
+#include <linux/page-isolation.h>
 
 #include "internal.h"
 #include "cma.h"
@@ -136,6 +137,13 @@ bool cma_validate_zones(struct cma *cma)
 	set_bit(CMA_ZONES_VALID, &cma->flags);
 
 	return true;
+}
+
+static void __init init_cma_pageblock(struct page *page)
+{
+	init_pageblock_migratetype(page, MIGRATE_CMA, false);
+	adjust_managed_page_count(page, pageblock_nr_pages);
+	page_zone(page)->cma_pages += pageblock_nr_pages;
 }
 
 static void __init cma_activate_area(struct cma *cma)
