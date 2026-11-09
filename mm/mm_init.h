@@ -109,6 +109,8 @@ extern bool mirrored_kernelcore;
 bool memblock_has_mirror(void);
 void memblock_free_all(void);
 
+void __meminit memmap_init_page_common(struct page *page, enum zone_type zone,
+		int nid);
 void __meminit __init_single_page(struct page *page, unsigned long pfn,
 				unsigned long zone, int nid);
 
