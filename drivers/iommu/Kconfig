@@ -423,4 +423,37 @@ config IOMMU_DEBUG_PAGEALLOC
 	  If unsure, say N.
 endif # IOMMU_SUPPORT
 
+# Pre-mapped IOVA Superpage Allocator
+config PISA
+	bool "Pre-mapped IOVA Superpage Allocator"
+	depends on X86_64 || ARM64
+	depends on !PREEMPT_RT
+	default y
+	help
+	  PISA is a specialized memory allocator with an API similar to
+	  alloc_pages(). For devices that opt-in, it provides DMA-able
+	  pages backed by 2MB physically contiguous pages, and mapped in
+	  the IOMMU maps with a single leaf PTE of the same size. Mapping,
+	  unmapping and IOTLB flushing are done lazily to reduce CPU overhead.
+	  The large mappings greatly reduce IOTLB usage. As in strict iommu
+	  mode, pages are returned to the buddy allocator only when any existing
+	  mappings have been removed and IOTLB flushed.
+	  Uses 4KB of metadata for each 32MB of PISA buffers, allocated on demand.
+
+	  The config option enforces requirements (2MB large pages and !PREEMPT_RT) at compile
+	  time. Other constraints (e.g. dma-coherent devices) are verified at runtime.
+
+	  If unsure, say Y.
+
+config PISA_META_KUNIT_TEST
+	bool "KUnit test for PISA metadata table (built-in)" if !KUNIT_ALL_TESTS
+	depends on PISA && KUNIT=y
+	default KUNIT_ALL_TESTS
+	help
+	  Builds KUnit unit tests for the sparse, per-PISA-frame metadata table,
+	  and PISA page allocators in drivers/iommu/pisa-*.c, verifying metadata
+	  lookup, allocator recycling, and coherent block allocation.
+
+	  If unsure, say N.
+
 source "drivers/iommu/generic_pt/Kconfig"
