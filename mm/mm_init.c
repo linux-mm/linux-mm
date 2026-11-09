@@ -618,7 +618,7 @@ void __meminit memmap_init_page_common(struct page *page,
 #endif
 }
 
-void __meminit __init_single_page(struct page *page, unsigned long pfn,
+static void __meminit __init_single_page(struct page *page, unsigned long pfn,
 		unsigned long zone, int nid)
 {
 	memmap_init_page_common(page, zone, nid);
