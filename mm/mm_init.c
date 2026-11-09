@@ -21,6 +21,7 @@
 #include <linux/buffer_head.h>
 #include <linux/kmemleak.h>
 #include <linux/kfence.h>
+#include <linux/kpkeys.h>
 #include <linux/page_ext.h>
 #include <linux/pti.h>
 #include <linux/pgtable.h>
@@ -2733,6 +2734,7 @@ void __init mm_core_init(void)
 	kmemleak_init();
 	ptlock_cache_init();
 	pgtable_cache_init();
+	kpkeys_hardened_pgtables_init();
 	debug_objects_mem_init();
 	vmalloc_init();
 	/* If no deferred init page_ext now, as vmap is fully initialized */
