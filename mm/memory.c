@@ -5642,6 +5642,18 @@ oom:
 }
 
 /*
+ * A page cache folio that is not uptodate holds data that was never read in
+ * or cleared, and mapping it leaks stale memory to userspace.
+ */
+static bool file_folio_not_uptodate(struct folio *folio)
+{
+	if (likely(folio_test_uptodate(folio)))
+		return false;
+	/* Driver pages from ->fault() never get PG_uptodate */
+	return !folio_test_anon(folio) && folio->mapping;
+}
+
+/*
  * Either the VMA lock or the mmap_lock must have been held on entry
  * (see FAULT_FLAG_VMA_LOCK) and may have been released depending on
  * flags and vma->vm_ops->fault() return value.
@@ -6201,6 +6213,16 @@ static vm_fault_t do_shared_fault(struct vm_fault *vmf)
 				(tmp & (VM_FAULT_ERROR | VM_FAULT_NOPAGE)))) {
 			folio_put(folio);
 			return tmp;
+		}
+
+		/*
+		 * The folio was unlocked for ->page_mkwrite(). If it lost
+		 * PG_uptodate meanwhile, retry the fault to read it in again.
+		 */
+		if (unlikely(file_folio_not_uptodate(folio))) {
+			folio_unlock(folio);
+			folio_put(folio);
+			return VM_FAULT_NOPAGE;
 		}
 	}
 
