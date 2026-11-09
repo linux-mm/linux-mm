@@ -31,4 +31,11 @@ static inline bool por_elx_allows_exec(u64 por, u8 pkey)
 	return perm & POE_X;
 }
 
+static inline u64 por_elx_set_pkey_perms(u64 por, u8 pkey, u8 perms)
+{
+	u64 mask = POE_MASK << POR_ELx_PERM_SHIFT(pkey);
+
+	return (por & ~mask) | field_prep(mask, perms);
+}
+
 #endif /* _ASM_ARM64_POR_H */
