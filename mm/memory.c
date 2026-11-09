@@ -5712,6 +5712,13 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 	else
 		VM_BUG_ON_PAGE(!folio_test_locked(folio), vmf->page);
 
+	if (WARN_ON_ONCE(file_folio_not_uptodate(folio))) {
+		folio_unlock(folio);
+		folio_put(folio);
+		vmf->page = NULL;
+		return VM_FAULT_SIGBUS;
+	}
+
 	return ret;
 }
 
@@ -5756,6 +5763,9 @@ vm_fault_t do_set_pmd(struct vm_fault *vmf, struct folio *folio, struct page *pa
 	if (!is_pmd_order(folio_order(folio)))
 		return ret;
 	page = &folio->page;
+
+	if (WARN_ON_ONCE(file_folio_not_uptodate(folio)))
+		return VM_FAULT_SIGBUS;
 
 	/*
 	 * Just backoff if any subpage of a THP is corrupted otherwise
