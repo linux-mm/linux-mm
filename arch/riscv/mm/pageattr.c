@@ -3,9 +3,11 @@
  * Copyright (C) 2019 SiFive
  */
 
+#include <linux/mm.h>
 #include <linux/pagewalk.h>
 #include <linux/pgtable.h>
 #include <linux/vmalloc.h>
+#include <asm/pgalloc.h>
 #include <asm/tlbflush.h>
 #include <asm/bitops.h>
 #include <asm/set_memory.h>
@@ -93,6 +95,26 @@ static const struct mm_walk_ops pageattr_ops = {
 };
 
 #ifdef CONFIG_64BIT
+/*
+ * Kernel page tables allocated for the split linear mapping are never
+ * freed today, but they must still go through the page table constructor
+ * so that they are flagged PG_table, accounted in NR_PAGETABLE and marked
+ * as kernel page tables, like any other kernel page table allocated via
+ * the standard allocation APIs.
+ */
+static struct ptdesc *alloc_kernel_pgtable(void)
+{
+	struct ptdesc *ptdesc = pagetable_alloc(GFP_PGTABLE_KERNEL, 0);
+
+	if (!ptdesc)
+		return NULL;
+
+	__pagetable_ctor(ptdesc);
+	ptdesc_set_kernel(ptdesc);
+
+	return ptdesc;
+}
+
 static int __split_linear_mapping_pmd(pud_t *pudp,
 				      unsigned long vaddr, unsigned long end)
 {
@@ -109,23 +131,22 @@ static int __split_linear_mapping_pmd(pud_t *pudp,
 			continue;
 
 		if (pmd_leaf(pmdp_get(pmdp))) {
-			struct page *pte_page;
 			unsigned long pfn = _pmd_pfn(pmdp_get(pmdp));
 			pgprot_t prot = __pgprot(pmd_val(pmdp_get(pmdp)) & ~_PAGE_PFN_MASK);
 			pte_t *ptep_new;
 			int i;
 
-			pte_page = alloc_page(GFP_KERNEL);
-			if (!pte_page)
+			ptep_new = pte_alloc_one_kernel(&init_mm);
+			if (!ptep_new)
 				return -ENOMEM;
 
-			ptep_new = (pte_t *)page_address(pte_page);
-			for (i = 0; i < PTRS_PER_PTE; ++i, ++ptep_new)
-				set_pte(ptep_new, pfn_pte(pfn + i, prot));
+			for (i = 0; i < PTRS_PER_PTE; ++i)
+				set_pte(ptep_new + i, pfn_pte(pfn + i, prot));
 
 			smp_wmb();
 
-			set_pmd(pmdp, pfn_pmd(page_to_pfn(pte_page), PAGE_TABLE));
+			set_pmd(pmdp, pfn_pmd(page_to_pfn(virt_to_page(ptep_new)),
+					      PAGE_TABLE));
 		}
 	} while (pmdp++, vaddr = next, vaddr != end);
 
@@ -149,24 +170,25 @@ static int __split_linear_mapping_pud(p4d_t *p4dp,
 			continue;
 
 		if (pud_leaf(pudp_get(pudp))) {
-			struct page *pmd_page;
+			struct ptdesc *ptdesc;
 			unsigned long pfn = _pud_pfn(pudp_get(pudp));
 			pgprot_t prot = __pgprot(pud_val(pudp_get(pudp)) & ~_PAGE_PFN_MASK);
 			pmd_t *pmdp_new;
 			int i;
 
-			pmd_page = alloc_page(GFP_KERNEL);
-			if (!pmd_page)
+			ptdesc = alloc_kernel_pgtable();
+			if (!ptdesc)
 				return -ENOMEM;
 
-			pmdp_new = (pmd_t *)page_address(pmd_page);
-			for (i = 0; i < PTRS_PER_PMD; ++i, ++pmdp_new)
-				set_pmd(pmdp_new,
+			pmdp_new = (pmd_t *)ptdesc_address(ptdesc);
+			for (i = 0; i < PTRS_PER_PMD; ++i)
+				set_pmd(pmdp_new + i,
 					pfn_pmd(pfn + ((i * PMD_SIZE) >> PAGE_SHIFT), prot));
 
 			smp_wmb();
 
-			set_pud(pudp, pfn_pud(page_to_pfn(pmd_page), PAGE_TABLE));
+			set_pud(pudp, pfn_pud(page_to_pfn(ptdesc_page(ptdesc)),
+					      PAGE_TABLE));
 		}
 
 		ret = __split_linear_mapping_pmd(pudp, vaddr, next);
@@ -198,23 +220,23 @@ static int __split_linear_mapping_p4d(pgd_t *pgdp,
 			continue;
 
 		if (p4d_leaf(p4dp_get(p4dp))) {
-			struct page *pud_page;
+			struct ptdesc *ptdesc;
 			unsigned long pfn = _p4d_pfn(p4dp_get(p4dp));
 			pgprot_t prot = __pgprot(p4d_val(p4dp_get(p4dp)) & ~_PAGE_PFN_MASK);
 			pud_t *pudp_new;
 			int i;
 
-			pud_page = alloc_page(GFP_KERNEL);
-			if (!pud_page)
+			ptdesc = alloc_kernel_pgtable();
+			if (!ptdesc)
 				return -ENOMEM;
 
 			/*
 			 * Fill the pud level with leaf puds that have the same
 			 * protections as the leaf p4d.
 			 */
-			pudp_new = (pud_t *)page_address(pud_page);
-			for (i = 0; i < PTRS_PER_PUD; ++i, ++pudp_new)
-				set_pud(pudp_new,
+			pudp_new = (pud_t *)ptdesc_address(ptdesc);
+			for (i = 0; i < PTRS_PER_PUD; ++i)
+				set_pud(pudp_new + i,
 					pfn_pud(pfn + ((i * PUD_SIZE) >> PAGE_SHIFT), prot));
 
 			/*
@@ -224,7 +246,8 @@ static int __split_linear_mapping_p4d(pgd_t *pgdp,
 			 */
 			smp_wmb();
 
-			set_p4d(p4dp, pfn_p4d(page_to_pfn(pud_page), PAGE_TABLE));
+			set_p4d(p4dp, pfn_p4d(page_to_pfn(ptdesc_page(ptdesc)),
+					      PAGE_TABLE));
 		}
 
 		ret = __split_linear_mapping_pud(p4dp, vaddr, next);
