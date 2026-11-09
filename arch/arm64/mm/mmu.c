@@ -781,7 +781,7 @@ static inline bool force_pte_mapping(void)
 	const bool bbml3 = system_capabilities_finalized() ?
 		system_supports_bbml3() : cpu_supports_bbml3();
 
-	if (debug_pagealloc_enabled())
+	if (debug_pagealloc_enabled() || kpkeys_hardened_pgtables_early_enabled())
 		return true;
 	if (bbml3)
 		return false;
