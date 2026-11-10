@@ -1085,13 +1085,22 @@ static inline pgoff_t __linear_anon_page_index(const struct vm_area_struct *vma,
 static inline pgoff_t linear_anon_page_index(const struct vm_area_struct *vma,
 		const unsigned long address)
 {
-	const pgoff_t pgoff = __linear_anon_page_index(vma, address);
-
 	VM_WARN_ON_ONCE(!vma_is_cow_mapping(vma));
-	if (vma_is_anonymous(vma))
-		VM_WARN_ON_ONCE(pgoff != linear_page_index(vma, address));
 
-	return pgoff;
+	/*
+	 * For anonymous VMAs the anonymous page offset always equals vm_pgoff,
+	 * so use it. This keeps the anonymous fault path (__folio_set_anon())
+	 * off __vm_anon_pgoff_hi, which shares a cacheline with vm_refcnt and
+	 * is therefore contended by concurrent faults on the same VMA.
+	 */
+	if (vma_is_anonymous(vma)) {
+		const pgoff_t pgoff = linear_page_index(vma, address);
+
+		VM_WARN_ON_ONCE(pgoff != __linear_anon_page_index(vma, address));
+		return pgoff;
+	}
+
+	return __linear_anon_page_index(vma, address);
 }
 
 struct wait_page_key {
