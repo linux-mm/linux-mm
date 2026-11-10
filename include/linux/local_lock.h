@@ -83,13 +83,13 @@
 #define local_trylock_irqsave(lock, flags)			\
 	__local_trylock_irqsave(__this_cpu_local_lock(lock), flags)
 
-DEFINE_LOCK_GUARD_1(local_lock, local_lock_t __percpu,
+DEFINE_LOCK_GUARD_1(local_lock, local_lock_t __percpu_var,
 		    local_lock(_T->lock),
 		    local_unlock(_T->lock))
-DEFINE_LOCK_GUARD_1(local_lock_irq, local_lock_t __percpu,
+DEFINE_LOCK_GUARD_1(local_lock_irq, local_lock_t __percpu_var,
 		    local_lock_irq(_T->lock),
 		    local_unlock_irq(_T->lock))
-DEFINE_LOCK_GUARD_1(local_lock_irqsave, local_lock_t __percpu,
+DEFINE_LOCK_GUARD_1(local_lock_irqsave, local_lock_t __percpu_var,
 		    local_lock_irqsave(_T->lock, _T->flags),
 		    local_unlock_irqrestore(_T->lock, _T->flags),
 		    unsigned long flags)
@@ -100,7 +100,7 @@ DEFINE_LOCK_GUARD_1(local_lock_irqsave, local_lock_t __percpu,
 #define local_unlock_nested_bh(_lock)				\
 	__local_unlock_nested_bh(__this_cpu_local_lock(_lock))
 
-DEFINE_LOCK_GUARD_1(local_lock_nested_bh, local_lock_t __percpu,
+DEFINE_LOCK_GUARD_1(local_lock_nested_bh, local_lock_t __percpu_var,
 		    local_lock_nested_bh(_T->lock),
 		    local_unlock_nested_bh(_T->lock))
 
