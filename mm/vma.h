@@ -278,7 +278,13 @@ static inline pgoff_t vmg_end_pgoff(const struct vma_merge_struct *vmg)
  */
 static inline bool vma_has_anon_rmap(const struct vm_area_struct *vma)
 {
-	if (vma_is_attached(vma))
+	/*
+	 * Only check the locking under CONFIG_DEBUG_VM. vma_is_attached() and
+	 * vma_assert_locked() read vm_refcnt, which concurrent faults on the
+	 * same VMA keep writing, and __vmf_anon_prepare() calls this on the
+	 * anonymous page allocation and CoW fault paths.
+	 */
+	if (IS_ENABLED(CONFIG_DEBUG_VM) && vma_is_attached(vma))
 		vma_assert_stabilised(vma);
 	/* KCSAN gets confused about the optimistic check. Silence it. */
 	return data_race(vma->anon_vma);
