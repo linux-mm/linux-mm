@@ -45,6 +45,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/migrate.h>
 #include <linux/sched/mm.h>
+#include <linux/sched/sysctl.h>
 #include <linux/page_owner.h>
 #include <linux/page_table_check.h>
 #include <linux/memcontrol.h>
@@ -3795,6 +3796,9 @@ get_page_from_freelist(gfp_t gfp_mask, unsigned int order, int alloc_flags,
 	struct zoneref *z;
 	struct zone *zone;
 	struct pglist_data *last_pgdat = NULL;
+	enum zone_watermarks kswapd_watermark =
+		sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING ?
+		WMARK_PROMO : WMARK_HIGH;
 	bool last_pgdat_dirty_ok = false;
 	bool no_fallback;
 	bool skip_kswapd_nodes = nr_online_nodes > 1;
@@ -3862,16 +3866,21 @@ retry:
 		}
 
 		/*
-		 * If kswapd is already active on a node, keep looking
-		 * for other nodes that might be idle. This can happen
-		 * if another process has NUMA bindings and is causing
-		 * kswapd wakeups on only some nodes. Avoid accidental
-		 * "node_reclaim_mode"-like behavior in this case.
+		 * If kswapd is already active on a node and the zone is below
+		 * its kswapd watermark for this request, keep looking for
+		 * other nodes that might be idle. This can happen if another
+		 * process has NUMA bindings and is causing kswapd wakeups on
+		 * only some nodes. Avoid accidental "node_reclaim_mode"-like
+		 * behavior in this case.
 		 */
 		if (skip_kswapd_nodes &&
 		    !waitqueue_active(&zone->zone_pgdat->kswapd_wait)) {
-			skipped_kswapd_nodes = true;
-			continue;
+			mark = wmark_pages(zone, kswapd_watermark);
+			if (!zone_watermark_fast(zone, order, mark,
+					ac->highest_zoneidx, 0, gfp_mask)) {
+				skipped_kswapd_nodes = true;
+				continue;
+			}
 		}
 
 		cond_accept_memory(zone, order, alloc_flags);
