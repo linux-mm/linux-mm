@@ -393,7 +393,8 @@ static inline void mapping_set_gfp_mask(struct address_space *m, gfp_t mask)
  */
 static inline size_t mapping_max_folio_size_supported(void)
 {
-	if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
+	if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) ||
+	    IS_ENABLED(CONFIG_LARGE_FOLIO))
 		return 1U << (PAGE_SHIFT + MAX_PAGECACHE_ORDER);
 	return PAGE_SIZE;
 }
@@ -418,7 +419,8 @@ static inline void mapping_set_folio_order_range(struct address_space *mapping,
 						 unsigned int min,
 						 unsigned int max)
 {
-	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
+	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) &&
+	    !IS_ENABLED(CONFIG_LARGE_FOLIO))
 		return;
 
 	if (min > MAX_PAGECACHE_ORDER)
@@ -459,7 +461,8 @@ static inline void mapping_set_large_folios(struct address_space *mapping)
 static inline unsigned int
 mapping_max_folio_order(const struct address_space *mapping)
 {
-	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
+	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) &&
+	    !IS_ENABLED(CONFIG_LARGE_FOLIO))
 		return 0;
 	return (mapping->flags & AS_FOLIO_ORDER_MAX_MASK) >> AS_FOLIO_ORDER_MAX;
 }
@@ -467,7 +470,8 @@ mapping_max_folio_order(const struct address_space *mapping)
 static inline unsigned int
 mapping_min_folio_order(const struct address_space *mapping)
 {
-	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
+	if (!IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) &&
+	    !IS_ENABLED(CONFIG_LARGE_FOLIO))
 		return 0;
 	return (mapping->flags & AS_FOLIO_ORDER_MIN_MASK) >> AS_FOLIO_ORDER_MIN;
 }
@@ -500,8 +504,9 @@ static inline pgoff_t mapping_align_index(const struct address_space *mapping,
 }
 
 /*
- * Large folio support currently depends on THP.  These dependencies are
- * being worked on but are not yet fixed.
+ * Large folio support is opt-in per mapping and requires CONFIG_LARGE_FOLIO.
+ * It does not depend on THP; CONFIG_LARGE_FOLIO defaults to y when
+ * CONFIG_TRANSPARENT_HUGEPAGE is enabled.
  */
 static inline bool mapping_large_folio_support(const struct address_space *mapping)
 {
