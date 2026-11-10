@@ -295,6 +295,13 @@ static unsigned int zero_checksum __read_mostly;
 /* Whether to merge empty (zeroed) pages with actual zero pages */
 static bool ksm_use_zero_pages __read_mostly;
 
+/*
+ * When set, ksmd only merges empty (zeroed) anonymous pages with the kernel
+ * zero page and skips the stable/unstable tree entirely for pages that carry
+ * data. This requires ksm_use_zero_pages to be enabled.
+ */
+static bool ksm_only_merge_zero_pages __read_mostly;
+
 /* Skip pages that couldn't be de-duplicated previously */
 /* Default to true at least temporarily, for testing */
 static bool ksm_smart_scan = true;
@@ -2323,6 +2330,14 @@ static void cmp_and_merge_page(struct page *page, struct ksm_rmap_item *rmap_ite
 
 		if (!try_to_merge_with_zero_page(rmap_item, page))
 			return;
+
+		/*
+		 * A page that reached here was not merged with the zero page this
+		 * round. Under only_merge_zero_pages we do not insert it into the
+		 * stable/unstable trees.
+		 */
+		if (ksm_only_merge_zero_pages)
+			return;
 	}
 
 	/* Start by searching for the folio in the stable tree */
@@ -3697,11 +3712,62 @@ static ssize_t use_zero_pages_store(struct kobject *kobj,
 	if (err)
 		return -EINVAL;
 
+	/*
+	 * only_merge_zero_pages depends on use_zero_pages: refuse to turn
+	 * the latter off while the former is active, so the two cannot
+	 * silently diverge. Take ksm_thread_mutex so that this check-and-set
+	 * is serialized against only_merge_zero_pages_store(), which reads
+	 * ksm_use_zero_pages under the same lock.
+	 */
+	mutex_lock(&ksm_thread_mutex);
+	if (!value && ksm_only_merge_zero_pages) {
+		mutex_unlock(&ksm_thread_mutex);
+		return -EBUSY;
+	}
 	ksm_use_zero_pages = value;
+	mutex_unlock(&ksm_thread_mutex);
 
 	return count;
 }
 KSM_ATTR(use_zero_pages);
+
+static ssize_t only_merge_zero_pages_show(struct kobject *kobj,
+					  struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", ksm_only_merge_zero_pages);
+}
+static ssize_t only_merge_zero_pages_store(struct kobject *kobj,
+					   struct kobj_attribute *attr,
+					   const char *buf, size_t count)
+{
+	int err;
+	bool value;
+
+	err = kstrtobool(buf, &value);
+	if (err)
+		return -EINVAL;
+
+	/*
+	 * Take ksm_thread_mutex so that this check-and-set is serialized
+	 * against use_zero_pages_store(), which reads ksm_only_merge_zero_pages
+	 * under the same lock. Without it, a concurrent write to the two
+	 * attributes could leave use_zero_pages=0 and only_merge_zero_pages=1,
+	 * a state in which ksmd would scan and checksum pages but never merge
+	 * any.
+	 */
+	mutex_lock(&ksm_thread_mutex);
+	if (value && !ksm_use_zero_pages) {
+		mutex_unlock(&ksm_thread_mutex);
+		pr_warn_once("ksm: only_merge_zero_pages can only be enabled "
+			     "when use_zero_pages is 1\n");
+		return -EINVAL;
+	}
+	ksm_only_merge_zero_pages = value;
+	mutex_unlock(&ksm_thread_mutex);
+
+	return count;
+}
+KSM_ATTR(only_merge_zero_pages);
 
 static ssize_t max_page_sharing_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
@@ -4028,6 +4094,7 @@ static struct attribute *ksm_attrs[] = {
 	&stable_node_dups_attr.attr,
 	&stable_node_chains_prune_millisecs_attr.attr,
 	&use_zero_pages_attr.attr,
+	&only_merge_zero_pages_attr.attr,
 	&general_profit_attr.attr,
 	&smart_scan_attr.attr,
 	&advisor_mode_attr.attr,
