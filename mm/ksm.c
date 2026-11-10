@@ -2535,6 +2535,69 @@ static bool should_skip_rmap_item(struct folio *folio,
 	return true;
 }
 
+/*
+ * Determines whether a candidate page should be skipped entirely when
+ * only_merge_zero_pages is enabled, before an rmap_item is allocated for
+ * it.
+ *
+ * A page that is not all zeros carries data and can never be merged with
+ * the kernel zero page, so there is no point in allocating an rmap_item
+ * for it. Skipping it here avoids the rmap_item metadata cost that full
+ * KSM would otherwise pay for every non-mergeable page.
+ *
+ * @rmap_list: head of the per-mm pending rmap_item list
+ * @addr:      address of the candidate page
+ * @folio:     folio containing the candidate page
+ * @page:      the candidate page
+ *
+ * Returns true if the page should be skipped (and any stale pending
+ * rmap_items below @addr are freed), false if it should be processed.
+ */
+static bool should_skip_non_zero_page(struct ksm_rmap_item **rmap_list,
+			     unsigned long addr, struct folio *folio,
+			     struct page *page)
+{
+	struct ksm_rmap_item *rmap_item;
+
+	if (!ksm_only_merge_zero_pages)
+		return false;
+
+	/*
+	 * Pages already merged by KSM are handled by cmp_and_merge_page();
+	 * do not skip them here.
+	 */
+	if (folio_test_ksm(folio))
+		return false;
+
+	/*
+	 * An all-zero page is exactly what we want to merge with the kernel
+	 * zero page; process it.
+	 */
+	if (pages_identical(page, ZERO_PAGE(0)))
+		return false;
+
+	/*
+	 * The page carries data: free any pending rmap_items that are below
+	 * it (they are stale, as get_next_rmap_item() would), and skip it so
+	 * no rmap_item is allocated for it.
+	 *
+	 * Compare the masked address, unlike get_next_rmap_item() which
+	 * compares the raw rmap_item->address (which may carry the
+	 * UNSTABLE/STABLE_FLAG bits). That is intentional: a pending
+	 * rmap_item at the same address as a non-zero page is stale and must
+	 * be freed here, not returned for processing.
+	 */
+	while (*rmap_list) {
+		rmap_item = *rmap_list;
+		if ((rmap_item->address & PAGE_MASK) > addr)
+			break;
+		*rmap_list = rmap_item->rmap_list;
+		remove_rmap_item_from_tree(rmap_item);
+		free_rmap_item(rmap_item);
+	}
+	return true;
+}
+
 struct ksm_next_page_arg {
 	struct folio *folio;
 	struct page *page;
@@ -2737,6 +2800,16 @@ next_mm:
 			if (tmp_page) {
 				flush_anon_page(vma, tmp_page, ksm_scan.address);
 				flush_dcache_page(tmp_page);
+
+				if (should_skip_non_zero_page(ksm_scan.rmap_list,
+						     ksm_scan.address, folio,
+						     tmp_page)) {
+					folio_put(folio);
+					ksm_scan.address += PAGE_SIZE;
+					mmap_read_unlock(mm);
+					return ERR_PTR(-EAGAIN);
+				}
+
 				rmap_item = get_next_rmap_item(mm_slot,
 					ksm_scan.rmap_list, ksm_scan.address);
 				if (rmap_item) {
@@ -2839,6 +2912,15 @@ static void ksm_do_scan(unsigned int scan_npages)
 		rmap_item = scan_get_next_rmap_item(&page);
 		if (!rmap_item)
 			return;
+		if (rmap_item == ERR_PTR(-EAGAIN)) {
+			/*
+			 * A non-zero page was skipped under
+			 * only_merge_zero_pages: it was examined but not
+			 * merged, so count it as scanned and keep going.
+			 */
+			ksm_pages_scanned++;
+			continue;
+		}
 		cmp_and_merge_page(page, rmap_item);
 		put_page(page);
 		ksm_pages_scanned++;
