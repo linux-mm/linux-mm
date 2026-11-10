@@ -869,12 +869,15 @@ static inline bool folio_test_large(const struct folio *folio)
 	return folio_test_head(folio);
 }
 
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+#if defined(CONFIG_TRANSPARENT_HUGEPAGE) || defined(CONFIG_LARGE_FOLIO)
 static inline void ClearPageCompound(struct page *page)
 {
 	BUG_ON(!PageHead(page));
 	ClearPageHead(page);
 }
+#endif
+
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
 FOLIO_FLAG(large_rmappable, FOLIO_SECOND_PAGE)
 FOLIO_FLAG(partially_mapped, FOLIO_SECOND_PAGE)
 #else

@@ -179,7 +179,36 @@ static inline void count_mthp_stat(int order, enum mthp_stat_item item)
 }
 #endif
 
+#if defined(CONFIG_TRANSPARENT_HUGEPAGE) || defined(CONFIG_LARGE_FOLIO)
+enum split_type {
+	SPLIT_TYPE_UNIFORM,
+	SPLIT_TYPE_NON_UNIFORM,
+};
+
+int __split_huge_page_to_list_to_order(struct page *page, struct list_head *list,
+		unsigned int new_order);
+unsigned int min_order_for_split(struct folio *folio);
+int split_folio_to_list(struct folio *folio, struct list_head *list);
+int folio_check_splittable(struct folio *folio, unsigned int new_order,
+			   enum split_type split_type);
+int folio_split(struct folio *folio, unsigned int new_order, struct page *page,
+		struct list_head *list);
+
+static inline int split_huge_page_to_list_to_order(struct page *page, struct list_head *list,
+		unsigned int new_order)
+{
+	return __split_huge_page_to_list_to_order(page, list, new_order);
+}
+static inline int split_huge_page_to_order(struct page *page, unsigned int new_order)
+{
+	return split_huge_page_to_list_to_order(page, NULL, new_order);
+}
+#endif
+
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+
+/* Only anon folios can be split while they are unmapped. */
+int folio_split_unmapped(struct folio *folio, unsigned int new_order);
 
 extern unsigned long transparent_hugepage_flags;
 extern unsigned long huge_anon_orders_always;
@@ -394,30 +423,6 @@ unsigned long thp_get_unmapped_area_vmaflags(struct file *filp, unsigned long ad
 		unsigned long len, unsigned long pgoff, unsigned long flags,
 		vma_flags_t vma_flags);
 
-enum split_type {
-	SPLIT_TYPE_UNIFORM,
-	SPLIT_TYPE_NON_UNIFORM,
-};
-
-int __split_huge_page_to_list_to_order(struct page *page, struct list_head *list,
-		unsigned int new_order);
-int folio_split_unmapped(struct folio *folio, unsigned int new_order);
-unsigned int min_order_for_split(struct folio *folio);
-int split_folio_to_list(struct folio *folio, struct list_head *list);
-int folio_check_splittable(struct folio *folio, unsigned int new_order,
-			   enum split_type split_type);
-int folio_split(struct folio *folio, unsigned int new_order, struct page *page,
-		struct list_head *list);
-
-static inline int split_huge_page_to_list_to_order(struct page *page, struct list_head *list,
-		unsigned int new_order)
-{
-	return __split_huge_page_to_list_to_order(page, list, new_order);
-}
-static inline int split_huge_page_to_order(struct page *page, unsigned int new_order)
-{
-	return split_huge_page_to_list_to_order(page, NULL, new_order);
-}
 
 static inline int split_huge_page(struct page *page)
 {
@@ -641,6 +646,7 @@ thp_get_unmapped_area_vmaflags(struct file *filp, unsigned long addr,
 	return 0;
 }
 
+#if !IS_ENABLED(CONFIG_LARGE_FOLIO)
 static inline int
 split_huge_page_to_list_to_order(struct page *page, struct list_head *list,
 		unsigned int new_order)
@@ -653,11 +659,15 @@ static inline int split_huge_page_to_order(struct page *page, unsigned int new_o
 	VM_WARN_ON_ONCE_PAGE(1, page);
 	return -EINVAL;
 }
+#endif
+
 static inline int split_huge_page(struct page *page)
 {
 	VM_WARN_ON_ONCE_PAGE(1, page);
 	return -EINVAL;
 }
+
+#if !IS_ENABLED(CONFIG_LARGE_FOLIO)
 
 static inline unsigned int min_order_for_split(struct folio *folio)
 {
@@ -677,6 +687,8 @@ static inline int folio_split(struct folio *folio, unsigned int new_order,
 	VM_WARN_ON_ONCE_FOLIO(1, folio);
 	return -EINVAL;
 }
+#endif
+
 
 static inline int folio_memcg_alloc_deferred(struct folio *folio)
 {

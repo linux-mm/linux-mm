@@ -827,6 +827,18 @@ config PERSISTENT_HUGE_ZERO_FOLIO
 config MM_ID
 	def_bool n
 
+config LARGE_FOLIO
+	bool "Large folio support for the page cache (without THP)" if !TRANSPARENT_HUGEPAGE
+	depends on MMU
+	select XARRAY_MULTI
+	default y if TRANSPARENT_HUGEPAGE
+	default n
+	help
+	  Build the folio split implementation for page-cache large folios
+	  even when transparent hugepages are disabled.  Transparent
+	  hugepages imply this option; this option alone does not enable
+	  large folio allocation, it only makes splitting them possible.
+
 menuconfig TRANSPARENT_HUGEPAGE
 	bool "Transparent Hugepage Support"
 	depends on HAVE_ARCH_TRANSPARENT_HUGEPAGE && !PREEMPT_RT

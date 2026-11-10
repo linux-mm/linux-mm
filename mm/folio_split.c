@@ -49,16 +49,22 @@ static int unmap_folio(struct folio *folio)
 	 * Anon pages need migration entries to preserve them, but file
 	 * pages can simply be left unmapped, then faulted back on demand.
 	 */
-	if (folio_test_anon(folio))
+	if (folio_test_anon(folio)) {
+#if IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)
 		try_to_migrate(folio, ttu_flags);
-	else
+#else
+		return -EOPNOTSUPP;
+#endif
+	} else {
 		try_to_unmap(folio, ttu_flags | TTU_IGNORE_MLOCK);
+	}
 
 	try_to_unmap_flush();
 
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)
 static void remap_anon_folio(struct folio *folio, unsigned long nr, int flags)
 {
 	int i = 0;
@@ -78,6 +84,7 @@ static void remap_anon_folio(struct folio *folio, unsigned long nr, int flags)
 		folio = folio_next(folio);
 	}
 }
+#endif
 
 static void lru_add_split_folio(struct folio *folio, struct folio *new_folio,
 		struct lruvec *lruvec, struct list_head *list)
@@ -409,6 +416,7 @@ int folio_check_splittable(struct folio *folio, unsigned int new_order,
 	return 0;
 }
 
+#if IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)
 /* Number of folio references from the swapcache. */
 static unsigned int folio_swapcache_ref_count(const struct folio *folio)
 {
@@ -416,6 +424,7 @@ static unsigned int folio_swapcache_ref_count(const struct folio *folio)
 		return 0;
 	return folio_nr_pages(folio);
 }
+#endif
 
 void folio_reset_partially_mapped(struct folio *folio)
 {
@@ -436,6 +445,7 @@ void folio_reset_partially_mapped(struct folio *folio)
 		      MTHP_STAT_NR_ANON_PARTIALLY_MAPPED, -1);
 }
 
+#if IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)
 static int __folio_freeze_split_anon(struct folio *folio,
 		unsigned int new_order, struct page *split_at, bool do_lru,
 		struct list_head *list, enum split_type split_type)
@@ -544,6 +554,7 @@ out_unlock:
 
 	return ret;
 }
+#endif
 
 static int __folio_freeze_split_file(struct folio *folio,
 		unsigned int new_order, struct page *split_at,
@@ -628,12 +639,14 @@ static int __folio_freeze_split_file(struct folio *folio,
 		goto fail;
 	}
 
+#if IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)
 	if (folio_test_pmd_mappable(folio) && new_order < HPAGE_PMD_ORDER) {
 		if (folio_test_swapbacked(folio))
 			lruvec_stat_mod_folio(folio, NR_SHMEM_THPS, -old_nr_pages);
 		else
 			lruvec_stat_mod_folio(folio, NR_FILE_THPS, -old_nr_pages);
 	}
+#endif
 
 	/* lock lru list/PageCompound, ref frozen by page_ref_freeze */
 	lruvec = folio_lruvec_lock(folio);
@@ -755,12 +768,17 @@ static int __folio_split(struct folio *folio, unsigned int new_order,
 		goto out;
 	}
 
-	if (is_anon)
+	if (is_anon) {
+#if IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)
 		ret = __folio_freeze_split_anon(folio, new_order, split_at,
 						true, list, split_type);
-	else
+#else
+		ret = -EOPNOTSUPP;
+#endif
+	} else {
 		ret = __folio_freeze_split_file(folio, new_order, split_at,
 						list, split_type);
+	}
 
 	/*
 	 * Unlock all after-split folios except the one containing
@@ -784,12 +802,15 @@ static int __folio_split(struct folio *folio, unsigned int new_order,
 	}
 
 out:
+#if IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)
 	if (is_pmd_order(old_order))
 		count_vm_event(!ret ? THP_SPLIT_PAGE : THP_SPLIT_PAGE_FAILED);
+#endif
 	count_mthp_stat(old_order, !ret ? MTHP_STAT_SPLIT : MTHP_STAT_SPLIT_FAILED);
 	return ret;
 }
 
+#if IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE)
 /**
  * folio_split_unmapped() - split a large anon folio that is already unmapped
  * @folio: folio to split
@@ -822,6 +843,7 @@ int folio_split_unmapped(struct folio *folio, unsigned int new_order)
 	return __folio_freeze_split_anon(folio, new_order, &folio->page,
 					 false, NULL, SPLIT_TYPE_UNIFORM);
 }
+#endif
 
 /*
  * This function splits a large folio into smaller folios of order @new_order.
