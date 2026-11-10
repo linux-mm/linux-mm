@@ -159,8 +159,7 @@ static inline int sz2ord(size_t size, size_t pagesize)
 void *sys_mremap(void *old_address, unsigned long old_size,
 		 unsigned long new_size, int flags, void *new_address);
 
-long ksm_get_self_zero_pages(void);
-long ksm_get_self_merging_pages(void);
+long ksm_get_self_stat(const char *key);
 long ksm_get_full_scans(void);
 int ksm_wait_full_scans(long nr);
 int ksm_get_smart_scan(void);
