@@ -2226,6 +2226,19 @@ struct collapse_file_state {
 };
 
 /**
+ * real_folio() - Convert a page cache folio * into a real folio *
+ * @folio: struct folio * to convert.
+ *
+ * Return: NULL if the passed folio is invalid (XA value, NULL), otherwise @folio.
+ */
+static inline struct folio *real_folio(struct folio *folio)
+{
+	if (!folio || xa_is_value(folio))
+		return NULL;
+	return folio;
+}
+
+/**
  * prepare_collapse_file_folio() - Prepare the collapsing of a single file folio
  * @index: folio index in the page cache
  * @state: helper struct of state being passed back and forth.
@@ -2249,7 +2262,7 @@ prepare_collapse_file_folio(pgoff_t index, struct collapse_file_state *state)
 	struct folio *folio = state->folio;
 
 	if (is_shmem) {
-		if (xa_is_value(folio) || !folio_test_uptodate(folio)) {
+		if (!folio || !folio_test_uptodate(folio)) {
 			xas_unlock_irq(state->xas);
 			/* swap in or instantiate fallocated page */
 			if (shmem_get_folio(mapping->host, index, 0,
@@ -2267,7 +2280,7 @@ prepare_collapse_file_folio(pgoff_t index, struct collapse_file_state *state)
 			goto xa_locked;
 		}
 	} else {	/* !is_shmem */
-		if (!folio || xa_is_value(folio)) {
+		if (!folio) {
 			state->do_readahead = !state->readahead_done;
 			result = SCAN_FAIL;
 			goto xa_unlocked;
@@ -2420,8 +2433,12 @@ retry:
 			continue;
 		}
 
-		/* At this point folio can be NULL, or a value. */
-		state.folio = folio;
+		/*
+		 * At this point folio can be a value. Make values NULL. The
+		 * value itself isn't interesting here. Collapse only cares
+		 * about the absence of a folio.
+		 */
+		state.folio = real_folio(folio);
 		result = prepare_collapse_file_folio(index, &state);
 		folio = state.folio;
 		if (result != SCAN_SUCCEED)
