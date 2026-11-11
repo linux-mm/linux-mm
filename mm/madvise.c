@@ -1167,6 +1167,29 @@ static long madvise_guard_install(struct madvise_behavior *madv_behavior)
 		return -EINVAL;
 
 	/*
+	 * Installing guards zaps the range, so report it to a userfaultfd
+	 * manager like MADV_DONTNEED does. The VMA can change while the mmap
+	 * lock is dropped for the event, so look it up again.
+	 */
+	if (!userfaultfd_remove(vma, range->start, range->end)) {
+		mark_mmap_lock_dropped(madv_behavior);
+		mmap_read_lock(madv_behavior->mm);
+		madv_behavior->vma = vma = vma_lookup(madv_behavior->mm,
+						      range->start);
+		if (!vma)
+			return -ENOMEM;
+		if (!is_valid_guard_vma(vma, /* allow_locked = */false))
+			return -EINVAL;
+		/*
+		 * The VMA may have been split while the lock was dropped.
+		 * Handle the part in this VMA. The remainder is handled by the
+		 * next iteration of madvise_walk_vmas().
+		 */
+		if (range->end > vma->vm_end)
+			range->end = vma->vm_end;
+	}
+
+	/*
 	 * Set atomically under read lock. All pertinent readers will need to
 	 * acquire an mmap/VMA write lock to read it. All remaining readers may
 	 * or may not see the flag set, but we don't care.
