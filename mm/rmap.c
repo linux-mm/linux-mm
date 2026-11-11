@@ -1804,6 +1804,7 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 	atomic_t *mapped = &folio->_nr_pages_mapped;
 	int last = 0, nr = 0, nr_pmdmapped = 0;
 	bool partially_mapped = false;
+	bool maybe_partially_mapped = false;
 
 	__folio_rmap_sanity_checks(folio, page, nr_pages, level);
 
@@ -1822,6 +1823,16 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 			} else {
 				partially_mapped = nr < folio_large_nr_pages(folio) &&
 						   !folio_entire_mapcount(folio);
+				/*
+				 * With other MMs mapping the folio, the total
+				 * mapcount cannot tell whether the pages we
+				 * just unmapped are still mapped by anyone.
+				 * Let the shrinker find out.
+				 */
+				maybe_partially_mapped = !partially_mapped &&
+					nr_pages < folio_large_nr_pages(folio) &&
+					!folio_entire_mapcount(folio) &&
+					folio_maybe_mapped_shared(folio);
 				nr = 0;
 			}
 			break;
@@ -1851,6 +1862,10 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 			} else {
 				partially_mapped = last &&
 						   nr < folio_large_nr_pages(folio);
+				/* Only PTE mappings by several MMs are left. */
+				maybe_partially_mapped = last &&
+					!partially_mapped &&
+					folio_maybe_mapped_shared(folio);
 				nr = 0;
 			}
 			break;
@@ -1889,10 +1904,10 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 	 * Device private folios do not support deferred splitting and
 	 * shrinker based scanning of the folios to free.
 	 */
-	if (partially_mapped && folio_test_anon(folio) &&
-	    !folio_test_partially_mapped(folio) &&
+	if ((partially_mapped || maybe_partially_mapped) &&
+	    folio_test_anon(folio) && !folio_test_partially_mapped(folio) &&
 	    !folio_is_device_private(folio))
-		deferred_split_folio(folio, true);
+		deferred_split_folio(folio, partially_mapped);
 
 	__folio_mod_stat(folio, -nr, -nr_pmdmapped);
 
