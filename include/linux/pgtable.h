@@ -1787,6 +1787,15 @@ void arch_sync_kernel_mappings(unsigned long start, unsigned long end);
 #define pgprot_mhp(prot)	(prot)
 #endif
 
+/*
+ * Convert a pgprot built for a PTE so that it can be used in a PMD or PUD
+ * entry. Only needed on architectures that encode attributes differently
+ * between the levels; elsewhere the pgprot is used as is.
+ */
+#ifndef pgprot_4k_2_large
+#define pgprot_4k_2_large(prot)	(prot)
+#endif
+
 #ifdef CONFIG_MMU
 #ifndef pgprot_modify
 #define pgprot_modify pgprot_modify
