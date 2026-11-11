@@ -1643,6 +1643,14 @@ static vm_fault_t insert_pmd(struct vm_area_struct *vma, unsigned long addr,
 		const unsigned long pfn = fop.is_folio ? folio_pfn(fop.folio) :
 					  fop.pfn;
 
+		/*
+		 * A concurrent order-0 fault may have installed a PTE table
+		 * here, which pmd_pfn() would report as the PFN of the table
+		 * itself. Only a leaf entry can be compared.
+		 */
+		if (!pmd_leaf(*pmd))
+			goto out_unlock;
+
 		if (write) {
 			if (pmd_pfn(*pmd) != pfn) {
 				WARN_ON_ONCE(!is_huge_zero_pmd(*pmd));
@@ -1768,6 +1776,14 @@ static vm_fault_t insert_pud(struct vm_area_struct *vma, unsigned long addr,
 	if (!pud_none(*pud)) {
 		const unsigned long pfn = fop.is_folio ? folio_pfn(fop.folio) :
 					  fop.pfn;
+
+		/*
+		 * A concurrent order-0 fault may have installed a PMD table
+		 * here, which pud_pfn() would report as the PFN of the table
+		 * itself. Only a leaf entry can be compared.
+		 */
+		if (!pud_leaf(*pud))
+			goto out_unlock;
 
 		if (write) {
 			if (WARN_ON_ONCE(pud_pfn(*pud) != pfn))
