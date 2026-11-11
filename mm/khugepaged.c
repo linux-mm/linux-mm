@@ -2239,6 +2239,46 @@ static inline struct folio *real_folio(struct folio *folio)
 }
 
 /**
+ * maybe_read_folio() - Ensure a folio is uptodate
+ * @index: folio index in the page cache
+ * @state: collapse_file state helper struct
+ * @new: if a new folio is returned, *new = true.
+ *
+ * maybe_read_folio() ensures a folio is uptodate and, if not, either reads it
+ * in synchronously (for shmem), or schedules readahead (for after the collapse
+ * logic untangles itself from all the folio locks it's holding).
+ *
+ * Context: Expects @state->mapping->i_pages.xa_lock to be held. Releases that
+ * same lock on error, or if *@new = true.
+ * Return: Valid folio (locked and uptodate iff *@new), or NULL on error.
+ */
+static struct folio *
+maybe_read_folio(pgoff_t index, struct collapse_file_state *state, bool *new)
+{
+	struct folio *folio = real_folio(state->folio);
+	const bool may_bring_uptodate = state->is_shmem;
+
+	/* Perfectly cromulent, uptodate folio. Proceed. */
+	if (folio && (!may_bring_uptodate || folio_test_uptodate(folio)))
+		return folio;
+
+	/* We're either returning NULL, or starting IO. Drop the lock now. */
+	xas_unlock_irq(state->xas);
+	if (!state->is_shmem) {
+		/* Folio is missing? Let's start readahead, if we haven't already. */
+		state->do_readahead = !state->readahead_done;
+		return NULL;
+	}
+
+	*new = true;
+	/* swap in or instantiate fallocated page */
+	if (shmem_get_folio(state->mapping->host, index, 0,
+				 &folio, SGP_NOALLOC))
+		return NULL;
+	return folio;
+}
+
+/**
  * prepare_collapse_file_folio() - Prepare the collapsing of a single file folio
  * @index: folio index in the page cache
  * @state: helper struct of state being passed back and forth.
@@ -2259,32 +2299,33 @@ prepare_collapse_file_folio(pgoff_t index, struct collapse_file_state *state)
 	struct address_space *mapping = state->mapping;
 	enum scan_result result = SCAN_SUCCEED;
 	const bool is_shmem = state->is_shmem;
-	struct folio *folio = state->folio;
+	struct folio *folio;
+	bool new = false;
+
+	folio = maybe_read_folio(index, state, &new);
+	if (!folio)
+		return SCAN_FAIL;
+	if (new) {
+		/*
+		 * maybe_read_folio() got a new folio. This folio is locked
+		 * and ref'd up. Nothing tricky (dirty, writeback, etc) is likely to
+		 * have happened, so bail now. But before that, drain the local LRU
+		 * add batch. Otherwise, it's very possible folio_isolate_lru()
+		 * will not succeed.
+		 */
+		lru_add_drain();
+		goto xa_unlocked;
+	}
 
 	if (is_shmem) {
-		if (!folio || !folio_test_uptodate(folio)) {
-			xas_unlock_irq(state->xas);
-			/* swap in or instantiate fallocated page */
-			if (shmem_get_folio(mapping->host, index, 0,
-					&folio, SGP_NOALLOC)) {
-				result = SCAN_FAIL;
-				goto xa_unlocked;
-			}
-			/* drain lru cache to help folio_isolate_lru() */
-			lru_add_drain();
-			goto xa_unlocked;
-		} else if (folio_trylock(folio)) {
+		if (folio_trylock(folio)) {
 			folio_get(folio);
 		} else {
 			result = SCAN_PAGE_LOCK;
 			goto xa_locked;
 		}
 	} else {	/* !is_shmem */
-		if (!folio) {
-			state->do_readahead = !state->readahead_done;
-			result = SCAN_FAIL;
-			goto xa_unlocked;
-		} else if (folio_test_dirty(folio)) {
+		if (folio_test_dirty(folio)) {
 			/*
 			 * This page is dirty because it hasn't
 			 * been flushed since first write.
