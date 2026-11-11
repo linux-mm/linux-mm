@@ -1,0 +1,14 @@
+config SECURITY_KAP
+	bool "Kernel Assurance Plane security module"
+	depends on SECURITY
+	select SECURITYFS
+	select SECURITY_PATH
+	help
+	  The Kernel Assurance Plane binds tasks to Intent Lineage Groups and
+	  checks their operations at LSM hooks against the authority compiled
+	  for the objective each group serves. Privileged userspace validates
+	  policy and installs it through /sys/kernel/security/kap.
+
+	  See Documentation/security/kap.rst for details.
+
+	  If you are unsure how to answer this question, answer N.
