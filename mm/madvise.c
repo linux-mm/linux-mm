@@ -360,243 +360,319 @@ static inline int madvise_folio_pte_batch(unsigned long addr, unsigned long end,
 				     FPB_MERGE_YOUNG_DIRTY);
 }
 
-static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
-				unsigned long addr, unsigned long end,
-				struct mm_walk *walk)
+static void madvise_lru_folio(struct folio *folio, bool pageout,
+		struct list_head *folio_list)
 {
-	struct madvise_walk_private *private = walk->private;
-	struct mmu_gather *tlb = private->tlb;
-	bool pageout = private->pageout;
-	struct mm_struct *mm = tlb->mm;
+	/*
+	 * Reclaim keeps a recently referenced folio, so clear its references
+	 * before deactivating or reclaiming it. As a side effect, idle page
+	 * tracking misses those accesses.
+	 */
+	folio_clear_referenced(folio);
+	folio_test_clear_young(folio);
+	if (folio_test_active(folio))
+		folio_set_workingset(folio);
+
+	if (!pageout) {
+		folio_deactivate(folio);
+		return;
+	}
+
+	if (!folio_isolate_lru(folio))
+		return;
+	if (folio_test_unevictable(folio))
+		folio_putback_lru(folio);
+	else
+		list_add(&folio->lru, folio_list);
+}
+
+/*
+ * Do not interfere with other mappings of the folio, and skip file folios
+ * when only anonymous folios may be paged out.
+ */
+static bool madvise_lru_folio_is_filtered(struct folio *folio,
+		bool pageout_anon_only)
+{
+	return folio_maybe_mapped_shared(folio) ||
+	       (pageout_anon_only && !folio_test_anon(folio));
+}
+
+/* Split a locked and referenced folio, then drop the lock and reference. */
+static int madvise_lru_split_folio(struct folio *folio)
+{
+	int err = split_folio(folio);
+
+	folio_unlock(folio);
+	folio_put(folio);
+	return err;
+}
+
+static void madvise_cold_ptes(struct mmu_gather *tlb,
+		struct vm_area_struct *vma, pte_t *pte, unsigned long addr,
+		int nr, pte_t ptent)
+{
+	if (!pte_young(ptent))
+		return;
+
+	clear_young_dirty_ptes(vma, addr, pte, nr, CYDP_CLEAR_YOUNG);
+	tlb_remove_tlb_entries(tlb, pte, nr, addr);
+}
+
+/* Return the normal folio mapped by a present PTE, or NULL. */
+static struct folio *madvise_lru_pte_folio(struct vm_area_struct *vma,
+		unsigned long addr, pte_t ptent)
+{
+	struct folio *folio;
+
+	if (pte_none(ptent) || !pte_present(ptent))
+		return NULL;
+
+	folio = vm_normal_folio(vma, addr, ptent);
+	if (!folio || folio_is_zone_device(folio))
+		return NULL;
+	return folio;
+}
+
+/* Return a split candidate locked and referenced for use after the PTL drop. */
+static struct folio *madvise_lru_pte_batch_locked(pte_t *pte,
+		unsigned long addr, unsigned long end, struct mm_walk *walk,
+		struct list_head *folio_list, bool pageout_anon_only, int *nr)
+{
+	const struct madvise_walk_private *private = walk->private;
 	struct vm_area_struct *vma = walk->vma;
-	pte_t *start_pte, *pte, ptent;
-	spinlock_t *ptl;
-	struct folio *folio = NULL;
-	LIST_HEAD(folio_list);
-	bool pageout_anon_only_filter;
-	unsigned int batch_count = 0;
-	int nr;
+	pte_t ptent = ptep_get(pte);
+	struct folio *folio;
 
-	if (fatal_signal_pending(current))
-		return -EINTR;
+	*nr = 1;
+	folio = madvise_lru_pte_folio(vma, addr, ptent);
+	if (!folio)
+		return NULL;
 
-	pageout_anon_only_filter = pageout && !vma_is_anonymous(vma) &&
-					!can_do_file_pageout(vma);
+	/* Split a large folio that the range only partly maps. */
+	if (folio_test_large(folio)) {
+		*nr = madvise_folio_pte_batch(addr, end, folio, pte, &ptent);
+		if (*nr < folio_nr_pages(folio)) {
+			if (madvise_lru_folio_is_filtered(folio, pageout_anon_only))
+				return NULL;
+			if (!folio_trylock(folio))
+				return NULL;
+			folio_get(folio);
+			return folio;
+		}
+	}
+
+	/*
+	 * Skip non-LRU folios and folios mapped elsewhere. A large folio here
+	 * is fully mapped, so it is exclusive if its mapcount equals its page
+	 * count.
+	 */
+	if (!folio_test_lru(folio) ||
+	    folio_mapcount(folio) != folio_nr_pages(folio))
+		return NULL;
+	if (pageout_anon_only && !folio_test_anon(folio))
+		return NULL;
+
+	if (!private->pageout)
+		madvise_cold_ptes(private->tlb, vma, pte, addr, *nr, ptent);
+	madvise_lru_folio(folio, private->pageout, folio_list);
+	return NULL;
+}
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
-	if (pmd_trans_huge(*pmd)) {
-		pmd_t orig_pmd;
-		unsigned long next = pmd_addr_end(addr, end);
+static void madvise_cold_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
+		pmd_t *pmd, unsigned long addr, pmd_t orig_pmd)
+{
+	if (!pmd_young(orig_pmd))
+		return;
 
-		tlb_change_page_size(tlb, HPAGE_PMD_SIZE);
-		ptl = pmd_trans_huge_lock(pmd, vma);
-		if (!ptl)
-			return 0;
+	pmdp_test_and_clear_young(vma, addr, pmd);
+	tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
+}
 
-		orig_pmd = *pmd;
-		if (unlikely(!pmd_present(orig_pmd))) {
-			VM_WARN_ON_ONCE(!pmd_is_migration_entry(orig_pmd) &&
-					!pmd_is_device_private_entry(orig_pmd));
-			goto huge_unlock;
-		}
+/* Return the folio mapped by a huge PMD if it should be advised. */
+static struct folio *madvise_lru_huge_pmd_folio(struct vm_area_struct *vma,
+		unsigned long addr, pmd_t orig_pmd, bool pageout_anon_only)
+{
+	struct folio *folio;
 
-		folio = vm_normal_folio_pmd(vma, addr, orig_pmd);
-		if (!folio)
-			goto huge_unlock;
+	if (unlikely(!pmd_present(orig_pmd))) {
+		VM_WARN_ON_ONCE(!pmd_is_valid_softleaf(orig_pmd));
+		return NULL;
+	}
 
-		if (folio_is_zone_device(folio))
-			goto huge_unlock;
+	folio = vm_normal_folio_pmd(vma, addr, orig_pmd);
+	if (!folio || folio_is_zone_device(folio))
+		return NULL;
+	if (madvise_lru_folio_is_filtered(folio, pageout_anon_only))
+		return NULL;
+	return folio;
+}
 
-		/* Do not interfere with other mappings of this folio */
-		if (folio_maybe_mapped_shared(folio))
-			goto huge_unlock;
+/*
+ * Return false only when the folio was split and the caller must walk the
+ * new PTEs.
+ */
+static bool madvise_lru_huge_pmd(pmd_t *pmd, unsigned long addr,
+		unsigned long next, struct mm_walk *walk,
+		bool pageout_anon_only)
+{
+	const struct madvise_walk_private *private = walk->private;
+	const bool spans_pmd = next - addr == HPAGE_PMD_SIZE;
+	struct mmu_gather *tlb = private->tlb;
+	struct vm_area_struct *vma = walk->vma;
+	bool pageout = private->pageout;
+	LIST_HEAD(folio_list);
+	struct folio *folio;
+	spinlock_t *ptl;
+	pmd_t orig_pmd;
 
-		if (pageout_anon_only_filter && !folio_test_anon(folio))
-			goto huge_unlock;
+	tlb_change_page_size(tlb, HPAGE_PMD_SIZE);
+	ptl = pmd_trans_huge_lock(pmd, vma);
+	if (!ptl)
+		return true;
 
-		if (next - addr != HPAGE_PMD_SIZE) {
-			int err;
+	orig_pmd = *pmd;
+	folio = madvise_lru_huge_pmd_folio(vma, addr, orig_pmd,
+			pageout_anon_only);
+	if (!folio)
+		goto unlock;
 
-			if (!folio_trylock(folio))
-				goto huge_unlock;
-			folio_get(folio);
-			spin_unlock(ptl);
-			err = split_folio(folio);
-			folio_unlock(folio);
-			folio_put(folio);
-			if (!err)
-				goto regular_folio;
-			return 0;
-		}
-
-		if (!pageout && pmd_young(orig_pmd)) {
-			pmdp_test_and_clear_young(vma, addr, pmd);
-			tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
-		}
-
-		folio_clear_referenced(folio);
-		folio_test_clear_young(folio);
-		if (folio_test_active(folio))
-			folio_set_workingset(folio);
-		if (pageout) {
-			if (folio_isolate_lru(folio)) {
-				if (folio_test_unevictable(folio))
-					folio_putback_lru(folio);
-				else
-					list_add(&folio->lru, &folio_list);
-			}
-		} else
-			folio_deactivate(folio);
-huge_unlock:
+	if (!spans_pmd) {
+		if (!folio_trylock(folio))
+			goto unlock;
+		folio_get(folio);
 		spin_unlock(ptl);
-		if (pageout)
-			reclaim_pages(&folio_list);
-		cond_resched();
-		return 0;
+		return madvise_lru_split_folio(folio) != 0;
 	}
 
-regular_folio:
-#endif
-	tlb_change_page_size(tlb, PAGE_SIZE);
-restart:
-	start_pte = pte = pte_offset_map_lock(vma->vm_mm, pmd, addr, &ptl);
-	if (!start_pte)
-		goto out;
-	flush_tlb_batched_pending(mm);
-	lazy_mmu_mode_enable();
-	for (; addr < end; pte += nr, addr += nr * PAGE_SIZE) {
-		nr = 1;
-		ptent = ptep_get(pte);
-
-		if (++batch_count == SWAP_CLUSTER_MAX) {
-			batch_count = 0;
-			if (need_resched()) {
-				lazy_mmu_mode_disable();
-				pte_unmap_unlock(start_pte, ptl);
-				cond_resched();
-				goto restart;
-			}
-		}
-
-		if (pte_none(ptent))
-			continue;
-
-		if (!pte_present(ptent))
-			continue;
-
-		folio = vm_normal_folio(vma, addr, ptent);
-		if (!folio || folio_is_zone_device(folio))
-			continue;
-
-		/*
-		 * If we encounter a large folio, only split it if it is not
-		 * fully mapped within the range we are operating on. Otherwise
-		 * leave it as is so that it can be swapped out whole. If we
-		 * fail to split a folio, leave it in place and advance to the
-		 * next pte in the range.
-		 */
-		if (folio_test_large(folio)) {
-			nr = madvise_folio_pte_batch(addr, end, folio, pte, &ptent);
-			if (nr < folio_nr_pages(folio)) {
-				int err;
-
-				if (folio_maybe_mapped_shared(folio))
-					continue;
-				if (pageout_anon_only_filter && !folio_test_anon(folio))
-					continue;
-				if (!folio_trylock(folio))
-					continue;
-				folio_get(folio);
-				lazy_mmu_mode_disable();
-				pte_unmap_unlock(start_pte, ptl);
-				start_pte = NULL;
-				err = split_folio(folio);
-				folio_unlock(folio);
-				folio_put(folio);
-				start_pte = pte =
-					pte_offset_map_lock(mm, pmd, addr, &ptl);
-				if (!start_pte)
-					break;
-				flush_tlb_batched_pending(mm);
-				lazy_mmu_mode_enable();
-				if (!err)
-					nr = 0;
-				continue;
-			}
-		}
-
-		/*
-		 * Do not interfere with other mappings of this folio and
-		 * non-LRU folio. If we have a large folio at this point, we
-		 * know it is fully mapped so if its mapcount is the same as its
-		 * number of pages, it must be exclusive.
-		 */
-		if (!folio_test_lru(folio) ||
-		    folio_mapcount(folio) != folio_nr_pages(folio))
-			continue;
-
-		if (pageout_anon_only_filter && !folio_test_anon(folio))
-			continue;
-
-		if (!pageout && pte_young(ptent)) {
-			clear_young_dirty_ptes(vma, addr, pte, nr,
-					       CYDP_CLEAR_YOUNG);
-			tlb_remove_tlb_entries(tlb, pte, nr, addr);
-		}
-
-		/*
-		 * We are deactivating a folio for accelerating reclaiming.
-		 * VM couldn't reclaim the folio unless we clear PG_young.
-		 * As a side effect, it makes confuse idle-page tracking
-		 * because they will miss recent referenced history.
-		 */
-		folio_clear_referenced(folio);
-		folio_test_clear_young(folio);
-		if (folio_test_active(folio))
-			folio_set_workingset(folio);
-		if (pageout) {
-			if (folio_isolate_lru(folio)) {
-				if (folio_test_unevictable(folio))
-					folio_putback_lru(folio);
-				else
-					list_add(&folio->lru, &folio_list);
-			}
-		} else
-			folio_deactivate(folio);
-	}
-
-out:
-	if (start_pte) {
-		lazy_mmu_mode_disable();
-		pte_unmap_unlock(start_pte, ptl);
-	}
+	if (!pageout)
+		madvise_cold_pmd(tlb, vma, pmd, addr, orig_pmd);
+	madvise_lru_folio(folio, pageout, &folio_list);
+unlock:
+	spin_unlock(ptl);
 	if (pageout)
 		reclaim_pages(&folio_list);
 	cond_resched();
+	return true;
+}
+#else
+/* pmd_trans_huge() is always false without THP, so this is never called. */
+static bool madvise_lru_huge_pmd(pmd_t *pmd, unsigned long addr,
+		unsigned long next, struct mm_walk *walk,
+		bool pageout_anon_only)
+{
+	return false;
+}
+#endif
+
+/*
+ * Scan PTEs under the PTE lock until a folio needs splitting, and return it
+ * locked and referenced. Return NULL at the end of the range, or earlier
+ * when the caller should reschedule. *addr is left at the PTE where the
+ * scan stopped.
+ */
+static struct folio *madvise_lru_pte_range_locked(pte_t *pte,
+		unsigned long *addr, unsigned long end, struct mm_walk *walk,
+		struct list_head *folio_list, bool pageout_anon_only, int *nr,
+		unsigned int *batch_count)
+{
+	struct folio *folio;
+
+	for (; *addr < end; pte += *nr, *addr += *nr * PAGE_SIZE) {
+		if (++(*batch_count) == SWAP_CLUSTER_MAX) {
+			*batch_count = 0;
+			if (need_resched())
+				return NULL;
+		}
+		folio = madvise_lru_pte_batch_locked(pte, *addr, end, walk,
+				folio_list, pageout_anon_only, nr);
+		if (folio)
+			return folio;
+	}
+	return NULL;
+}
+
+static void madvise_lru_pte_range(pmd_t *pmd, unsigned long addr,
+		unsigned long end, struct mm_walk *walk,
+		bool pageout_anon_only)
+{
+	const struct madvise_walk_private *private = walk->private;
+	struct mm_struct *mm = private->tlb->mm;
+	LIST_HEAD(folio_list);
+	unsigned int batch_count = 0;
+	struct folio *folio;
+	pte_t *start_pte;
+	spinlock_t *ptl;
+	int nr;
+
+	tlb_change_page_size(private->tlb, PAGE_SIZE);
+	while (addr < end) {
+		start_pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
+		if (!start_pte)
+			break;
+		flush_tlb_batched_pending(mm);
+		lazy_mmu_mode_enable();
+		folio = madvise_lru_pte_range_locked(start_pte, &addr, end,
+				walk, &folio_list, pageout_anon_only, &nr,
+				&batch_count);
+		lazy_mmu_mode_disable();
+		pte_unmap_unlock(start_pte, ptl);
+
+		if (folio) {
+			if (!madvise_lru_split_folio(folio))
+				nr = 0;
+			addr += nr * PAGE_SIZE;
+		} else if (addr < end) {
+			cond_resched();
+		}
+	}
+	if (private->pageout)
+		reclaim_pages(&folio_list);
+	cond_resched();
+}
+
+static int madvise_lru_pmd_entry(pmd_t *pmd, unsigned long addr,
+		unsigned long next, struct mm_walk *walk)
+{
+	const struct madvise_walk_private *private = walk->private;
+	struct vm_area_struct *vma = walk->vma;
+	bool pageout_anon_only;
+
+	if (fatal_signal_pending(current))
+		return -EINTR;
+	pageout_anon_only = private->pageout && !vma_is_anonymous(vma) &&
+			    !can_do_file_pageout(vma);
+
+	if (pmd_trans_huge(*pmd) &&
+	    madvise_lru_huge_pmd(pmd, addr, next, walk, pageout_anon_only))
+		return 0;
+	madvise_lru_pte_range(pmd, addr, next, walk, pageout_anon_only);
 
 	return 0;
 }
 
 static const struct mm_walk_ops cold_walk_ops = {
-	.pmd_entry = madvise_cold_or_pageout_pte_range,
+	.pmd_entry = madvise_lru_pmd_entry,
 	.walk_lock = PGWALK_RDLOCK,
 };
 
-static void madvise_cold_page_range(struct mmu_gather *tlb,
-		struct madvise_behavior *madv_behavior)
-
+static void madvise_lru_vma_range(struct madvise_behavior *madv_behavior,
+		bool pageout)
 {
 	struct vm_area_struct *vma = madv_behavior->vma;
 	struct madvise_behavior_range *range = &madv_behavior->range;
+	struct mmu_gather *tlb = madv_behavior->tlb;
 	struct madvise_walk_private walk_private = {
-		.pageout = false,
+		.pageout = pageout,
 		.tlb = tlb,
 	};
 
+	tlb_gather_mmu(tlb, madv_behavior->mm);
 	tlb_start_vma(tlb, vma);
 	walk_page_range_vma(vma, range->start, range->end, &cold_walk_ops,
-			&walk_private);
+			    &walk_private);
 	tlb_end_vma(tlb, vma);
+	tlb_finish_mmu(tlb);
 }
 
 static inline bool can_madv_lru_vma(struct vm_area_struct *vma)
@@ -607,37 +683,18 @@ static inline bool can_madv_lru_vma(struct vm_area_struct *vma)
 static long madvise_cold(struct madvise_behavior *madv_behavior)
 {
 	struct vm_area_struct *vma = madv_behavior->vma;
-	struct mmu_gather tlb;
 
 	if (!can_madv_lru_vma(vma))
 		return -EINVAL;
 
 	lru_add_drain();
-	tlb_gather_mmu(&tlb, madv_behavior->mm);
-	madvise_cold_page_range(&tlb, madv_behavior);
-	tlb_finish_mmu(&tlb);
+	madvise_lru_vma_range(madv_behavior, false);
 
 	return 0;
 }
 
-static void madvise_pageout_page_range(struct mmu_gather *tlb,
-		struct vm_area_struct *vma,
-		struct madvise_behavior_range *range)
-{
-	struct madvise_walk_private walk_private = {
-		.pageout = true,
-		.tlb = tlb,
-	};
-
-	tlb_start_vma(tlb, vma);
-	walk_page_range_vma(vma, range->start, range->end, &cold_walk_ops,
-			    &walk_private);
-	tlb_end_vma(tlb, vma);
-}
-
 static long madvise_pageout(struct madvise_behavior *madv_behavior)
 {
-	struct mmu_gather tlb;
 	struct vm_area_struct *vma = madv_behavior->vma;
 
 	if (!can_madv_lru_vma(vma))
@@ -649,14 +706,12 @@ static long madvise_pageout(struct madvise_behavior *madv_behavior)
 	 * owner nor write capable of the file. We allow private file mappings
 	 * further to pageout dirty anon pages.
 	 */
-	if (!vma_is_anonymous(vma) && (!can_do_file_pageout(vma) &&
-				(vma->vm_flags & VM_MAYSHARE)))
+	if (!vma_is_anonymous(vma) && !can_do_file_pageout(vma) &&
+	    (vma->vm_flags & VM_MAYSHARE))
 		return 0;
 
 	lru_add_drain();
-	tlb_gather_mmu(&tlb, madv_behavior->mm);
-	madvise_pageout_page_range(&tlb, vma, &madv_behavior->range);
-	tlb_finish_mmu(&tlb);
+	madvise_lru_vma_range(madv_behavior, true);
 
 	return 0;
 }
