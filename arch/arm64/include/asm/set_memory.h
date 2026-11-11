@@ -3,11 +3,15 @@
 #ifndef _ASM_ARM64_SET_MEMORY_H
 #define _ASM_ARM64_SET_MEMORY_H
 
+#include <linux/init.h>
+
 #include <asm/mem_encrypt.h>
 #include <asm-generic/set_memory.h>
 
 bool can_set_direct_map(void);
 #define can_set_direct_map can_set_direct_map
+
+bool __init direct_map_is_ptemap(struct page *page, unsigned int numpages);
 
 int set_memory_valid(unsigned long addr, int numpages, int enable);
 
