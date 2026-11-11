@@ -85,7 +85,7 @@ static char *__mmap_and_merge_range(char val, unsigned long size, int prot,
 		return err_map;
 	}
 
-	if (ksm_get_self_merging_pages() > 0) {
+	if (ksm_get_self_stat("ksm_merging_pages") > 0) {
 		ksft_print_msg("Still pages merged\n");
 		return err_map;
 	}
@@ -144,7 +144,7 @@ static char *__mmap_and_merge_range(char val, unsigned long size, int prot,
 	 * Check if anything was merged at all. Ignore the zero page that is
 	 * accounted differently (depending on kernel support).
 	 */
-	if (val && !ksm_get_self_merging_pages()) {
+	if (val && !ksm_get_self_stat("ksm_merging_pages")) {
 		ksft_print_msg("No pages got merged\n");
 		goto unmap;
 	}
@@ -204,7 +204,7 @@ static void test_unmerge_zero_pages(void)
 
 	ksft_print_msg("[RUN] %s\n", __func__);
 
-	if (ksm_get_self_zero_pages() < 0) {
+	if (ksm_get_self_stat("ksm_zero_pages") < 0) {
 		ksft_test_result_skip("accessing \"/proc/self/ksm_stat\" failed\n");
 		return;
 	}
@@ -221,7 +221,7 @@ static void test_unmerge_zero_pages(void)
 
 	/* Check if ksm_zero_pages is updated correctly after KSM merging */
 	pages_expected = size / pagesize;
-	if (pages_expected != ksm_get_self_zero_pages()) {
+	if (pages_expected != ksm_get_self_stat("ksm_zero_pages")) {
 		ksft_test_result_fail("'ksm_zero_pages' updated after merging\n");
 		goto unmap;
 	}
@@ -234,7 +234,7 @@ static void test_unmerge_zero_pages(void)
 
 	/* Check if ksm_zero_pages is updated correctly after unmerging */
 	pages_expected /= 2;
-	if (pages_expected != ksm_get_self_zero_pages()) {
+	if (pages_expected != ksm_get_self_stat("ksm_zero_pages")) {
 		ksft_test_result_fail("'ksm_zero_pages' updated after unmerging\n");
 		goto unmap;
 	}
@@ -244,7 +244,7 @@ static void test_unmerge_zero_pages(void)
 		*((unsigned int *)&map[offs]) = offs;
 
 	/* Now we should have no zeropages remaining. */
-	if (ksm_get_self_zero_pages()) {
+	if (ksm_get_self_stat("ksm_zero_pages")) {
 		ksft_test_result_fail("'ksm_zero_pages' updated after write fault\n");
 		goto unmap;
 	}
@@ -255,6 +255,122 @@ static void test_unmerge_zero_pages(void)
 unmap:
 	ksm_stop();
 	munmap(map, size);
+}
+
+/*
+ * Enable or disable /sys/kernel/mm/ksm/only_merge_zero_pages. Returns 0 on
+ * success, -errno on failure.
+ */
+static int ksm_set_only_merge_zero_pages(int enable)
+{
+	int fd;
+	ssize_t ret;
+
+	fd = open("/sys/kernel/mm/ksm/only_merge_zero_pages", O_RDWR);
+	if (fd < 0)
+		return -errno;
+
+	ret = write(fd, enable ? "1" : "0", 1);
+	close(fd);
+	return ret == 1 ? 0 : -errno;
+}
+
+static void test_only_merge_zero_pages(void)
+{
+	const unsigned int size = 2 * MiB;
+	const unsigned int half = size / 2;
+	const unsigned int half_pages = half / pagesize;
+	char *map;
+	int i;
+	long zero_pages, merging_pages, rmap_items;
+
+	ksft_print_msg("[RUN] %s\n", __func__);
+
+	if (ksm_use_zero_pages() < 0) {
+		ksft_test_result_skip("write /sys/kernel/mm/ksm/use_zero_pages failed\n");
+		return;
+	}
+	if (ksm_set_only_merge_zero_pages(1) < 0) {
+		ksft_test_result_skip("write /sys/kernel/mm/ksm/only_merge_zero_pages failed\n");
+		return;
+	}
+
+	/* Stabilize accounting by disabling KSM completely. */
+	if (ksm_stop() < 0) {
+		ksft_test_result_fail("Disabling (unmerging) KSM failed\n");
+		goto restore;
+	}
+
+	map = mmap(NULL, size, PROT_READ | PROT_WRITE,
+		   MAP_PRIVATE | MAP_ANON, -1, 0);
+	if (map == MAP_FAILED) {
+		ksft_test_result_fail("mmap() failed\n");
+		goto restore;
+	}
+
+	/* Don't use THP. Ignore if THP are not around on a kernel. */
+	if (madvise(map, size, MADV_NOHUGEPAGE) && errno != EINVAL) {
+		ksft_test_result_fail("MADV_NOHUGEPAGE failed\n");
+		goto unmap;
+	}
+
+	/*
+	 * Fill the first half with non-zero data (all 0x01) and the second
+	 * half with zeroes. Under only_merge_zero_pages the zero half should
+	 * be merged with the kernel zero page, while the non-zero half must be
+	 * skipped entirely (no rmap_item allocated, no stable-tree insertion).
+	 */
+	memset(map, 0x01, half);
+	memset(map + half, 0x00, half);
+
+	if (madvise(map, size, MADV_MERGEABLE)) {
+		ksft_test_result_fail("MADV_MERGEABLE failed\n");
+		goto unmap;
+	}
+
+	/*
+	 * Run KSM until steady state. Each ksm_start() waits for two full
+	 * scans: the first records the checksums, the second merges the zero
+	 * half with the kernel zero page. The second ksm_start() waits for
+	 * more scans so that the rmap_items of the (now merged, no longer
+	 * anonymous) zero pages are freed and ksm_rmap_items settles at 0.
+	 */
+	for (i = 0; i < 2; i++) {
+		if (ksm_start() < 0) {
+			ksft_test_result_fail("Running KSM failed\n");
+			goto unmap;
+		}
+	}
+
+	/*
+	 * Expected results (steady state):
+	 *  - ksm_zero_pages: the zero half (size/2 pages) is merged with the
+	 *    kernel zero page.
+	 *  - ksm_merging_pages: 0, because the non-zero half is skipped before
+	 *    it can reach the stable tree, and zero pages are accounted in
+	 *    ksm_zero_pages, not ksm_merging_pages.
+	 *  - ksm_rmap_items: 0. The non-zero half is skipped before
+	 *    get_next_rmap_item(), so it never allocates an rmap_item; and the
+	 *    zero half's rmap_items are freed once a scan finds the (now
+	 *    merged) pages are no longer anonymous.
+	 */
+	zero_pages = ksm_get_self_stat("ksm_zero_pages");
+	merging_pages = ksm_get_self_stat("ksm_merging_pages");
+	rmap_items = ksm_get_self_stat("ksm_rmap_items");
+
+	ksft_print_msg("ksm_zero_pages=%ld ksm_merging_pages=%ld ksm_rmap_items=%ld"
+		       " (expected %u/0/0)\n", zero_pages, merging_pages, rmap_items,
+		       half_pages);
+
+	ksft_test_result(zero_pages == half_pages && merging_pages == 0 &&
+			 rmap_items == 0, "only_merge_zero_pages: zero half merged, "
+			 "non-zero half skipped\n");
+
+unmap:
+	ksm_stop();
+	munmap(map, size);
+restore:
+	ksm_set_only_merge_zero_pages(0);
 }
 
 static void test_unmerge_discarded(void)
@@ -671,7 +787,7 @@ static void test_fork_ksm_merging_page_count(void)
 	child_pid = fork();
 	if (!child_pid) {
 		init_global_file_handles();
-		exit(ksm_get_self_merging_pages());
+		exit(ksm_get_self_stat("ksm_merging_pages"));
 	} else if (child_pid < 0) {
 		ksft_test_result_fail("fork() failed\n");
 		goto unmap;
@@ -771,7 +887,7 @@ static void test_merge_aged_pairs(void)
 		goto unmap;
 	}
 
-	ksft_test_result(ksm_get_self_merging_pages() == 2 * pairs,
+	ksft_test_result(ksm_get_self_stat("ksm_merging_pages") == 2 * pairs,
 			 "Pages aged by smart scan got merged\n");
 unmap:
 	ksm_stop();
@@ -793,7 +909,7 @@ static void init_global_file_handles(void)
 	pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
 	if (pagemap_fd < 0)
 		ksft_exit_skip("open(\"/proc/self/pagemap\") failed\n");
-	if (ksm_get_self_merging_pages() < 0)
+	if (ksm_get_self_stat("ksm_merging_pages") < 0)
 		ksft_exit_skip("accessing \"/proc/self/ksm_merging_pages\") failed\n");
 
 	pages_to_scan_fd = open("/sys/kernel/mm/ksm/pages_to_scan", O_RDWR);
@@ -827,6 +943,7 @@ int main(int argc, char **argv)
 
 	test_unmerge();
 	test_unmerge_zero_pages();
+	test_only_merge_zero_pages();
 	test_unmerge_discarded();
 #ifdef __NR_userfaultfd
 	test_unmerge_uffd_wp();

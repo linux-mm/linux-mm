@@ -904,13 +904,19 @@ bool detect_huge_zeropage(void)
 	return enabled;
 }
 
-long ksm_get_self_zero_pages(void)
+long ksm_get_self_stat(const char *key)
 {
 	int proc_self_ksm_stat_fd;
 	char buf[200];
-	char *substr_ksm_zero;
+	char *substr;
 	size_t value_pos;
 	ssize_t read_size;
+
+	/* Only the keys actually used by the tests are accepted. */
+	if (strcmp(key, "ksm_rmap_items") &&
+	    strcmp(key, "ksm_zero_pages") &&
+	    strcmp(key, "ksm_merging_pages"))
+		return -EINVAL;
 
 	proc_self_ksm_stat_fd = open("/proc/self/ksm_stat", O_RDONLY);
 	if (proc_self_ksm_stat_fd < 0)
@@ -925,34 +931,12 @@ long ksm_get_self_zero_pages(void)
 
 	buf[read_size] = 0;
 
-	substr_ksm_zero = strstr(buf, "ksm_zero_pages");
-	if (!substr_ksm_zero)
+	substr = strstr(buf, key);
+	if (!substr)
 		return 0;
 
-	value_pos = strcspn(substr_ksm_zero, "0123456789");
-	return strtol(substr_ksm_zero + value_pos, NULL, 10);
-}
-
-long ksm_get_self_merging_pages(void)
-{
-	int proc_self_ksm_merging_pages_fd;
-	char buf[10];
-	ssize_t ret;
-
-	proc_self_ksm_merging_pages_fd = open("/proc/self/ksm_merging_pages",
-						O_RDONLY);
-	if (proc_self_ksm_merging_pages_fd < 0)
-		return -errno;
-
-	ret = pread(proc_self_ksm_merging_pages_fd, buf, sizeof(buf) - 1, 0);
-	close(proc_self_ksm_merging_pages_fd);
-	if (ret < 0)
-		return -errno;
-	if (!ret)
-		return -EIO;
-	buf[ret] = 0;
-
-	return strtol(buf, NULL, 10);
+	value_pos = strcspn(substr, "0123456789");
+	return strtol(substr + value_pos, NULL, 10);
 }
 
 long ksm_get_full_scans(void)

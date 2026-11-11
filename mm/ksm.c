@@ -295,6 +295,13 @@ static unsigned int zero_checksum __read_mostly;
 /* Whether to merge empty (zeroed) pages with actual zero pages */
 static bool ksm_use_zero_pages __read_mostly;
 
+/*
+ * When set, ksmd only merges empty (zeroed) anonymous pages with the kernel
+ * zero page and skips the stable/unstable tree entirely for pages that carry
+ * data. This requires ksm_use_zero_pages to be enabled.
+ */
+static bool ksm_only_merge_zero_pages __read_mostly;
+
 /* Skip pages that couldn't be de-duplicated previously */
 /* Default to true at least temporarily, for testing */
 static bool ksm_smart_scan = true;
@@ -2323,6 +2330,14 @@ static void cmp_and_merge_page(struct page *page, struct ksm_rmap_item *rmap_ite
 
 		if (!try_to_merge_with_zero_page(rmap_item, page))
 			return;
+
+		/*
+		 * A page that reached here was not merged with the zero page this
+		 * round. Under only_merge_zero_pages we do not insert it into the
+		 * stable/unstable trees.
+		 */
+		if (ksm_only_merge_zero_pages)
+			return;
 	}
 
 	/* Start by searching for the folio in the stable tree */
@@ -2517,6 +2532,69 @@ static bool should_skip_rmap_item(struct folio *folio,
 	/* Skip this page */
 	ksm_pages_skipped++;
 	remove_rmap_item_from_tree(rmap_item);
+	return true;
+}
+
+/*
+ * Determines whether a candidate page should be skipped entirely when
+ * only_merge_zero_pages is enabled, before an rmap_item is allocated for
+ * it.
+ *
+ * A page that is not all zeros carries data and can never be merged with
+ * the kernel zero page, so there is no point in allocating an rmap_item
+ * for it. Skipping it here avoids the rmap_item metadata cost that full
+ * KSM would otherwise pay for every non-mergeable page.
+ *
+ * @rmap_list: head of the per-mm pending rmap_item list
+ * @addr:      address of the candidate page
+ * @folio:     folio containing the candidate page
+ * @page:      the candidate page
+ *
+ * Returns true if the page should be skipped (and any stale pending
+ * rmap_items below @addr are freed), false if it should be processed.
+ */
+static bool should_skip_non_zero_page(struct ksm_rmap_item **rmap_list,
+			     unsigned long addr, struct folio *folio,
+			     struct page *page)
+{
+	struct ksm_rmap_item *rmap_item;
+
+	if (!ksm_only_merge_zero_pages)
+		return false;
+
+	/*
+	 * Pages already merged by KSM are handled by cmp_and_merge_page();
+	 * do not skip them here.
+	 */
+	if (folio_test_ksm(folio))
+		return false;
+
+	/*
+	 * An all-zero page is exactly what we want to merge with the kernel
+	 * zero page; process it.
+	 */
+	if (pages_identical(page, ZERO_PAGE(0)))
+		return false;
+
+	/*
+	 * The page carries data: free any pending rmap_items that are below
+	 * it (they are stale, as get_next_rmap_item() would), and skip it so
+	 * no rmap_item is allocated for it.
+	 *
+	 * Compare the masked address, unlike get_next_rmap_item() which
+	 * compares the raw rmap_item->address (which may carry the
+	 * UNSTABLE/STABLE_FLAG bits). That is intentional: a pending
+	 * rmap_item at the same address as a non-zero page is stale and must
+	 * be freed here, not returned for processing.
+	 */
+	while (*rmap_list) {
+		rmap_item = *rmap_list;
+		if ((rmap_item->address & PAGE_MASK) > addr)
+			break;
+		*rmap_list = rmap_item->rmap_list;
+		remove_rmap_item_from_tree(rmap_item);
+		free_rmap_item(rmap_item);
+	}
 	return true;
 }
 
@@ -2722,6 +2800,16 @@ next_mm:
 			if (tmp_page) {
 				flush_anon_page(vma, tmp_page, ksm_scan.address);
 				flush_dcache_page(tmp_page);
+
+				if (should_skip_non_zero_page(ksm_scan.rmap_list,
+						     ksm_scan.address, folio,
+						     tmp_page)) {
+					folio_put(folio);
+					ksm_scan.address += PAGE_SIZE;
+					mmap_read_unlock(mm);
+					return ERR_PTR(-EAGAIN);
+				}
+
 				rmap_item = get_next_rmap_item(mm_slot,
 					ksm_scan.rmap_list, ksm_scan.address);
 				if (rmap_item) {
@@ -2824,6 +2912,15 @@ static void ksm_do_scan(unsigned int scan_npages)
 		rmap_item = scan_get_next_rmap_item(&page);
 		if (!rmap_item)
 			return;
+		if (rmap_item == ERR_PTR(-EAGAIN)) {
+			/*
+			 * A non-zero page was skipped under
+			 * only_merge_zero_pages: it was examined but not
+			 * merged, so count it as scanned and keep going.
+			 */
+			ksm_pages_scanned++;
+			continue;
+		}
 		cmp_and_merge_page(page, rmap_item);
 		put_page(page);
 		ksm_pages_scanned++;
@@ -3697,11 +3794,62 @@ static ssize_t use_zero_pages_store(struct kobject *kobj,
 	if (err)
 		return -EINVAL;
 
+	/*
+	 * only_merge_zero_pages depends on use_zero_pages: refuse to turn
+	 * the latter off while the former is active, so the two cannot
+	 * silently diverge. Take ksm_thread_mutex so that this check-and-set
+	 * is serialized against only_merge_zero_pages_store(), which reads
+	 * ksm_use_zero_pages under the same lock.
+	 */
+	mutex_lock(&ksm_thread_mutex);
+	if (!value && ksm_only_merge_zero_pages) {
+		mutex_unlock(&ksm_thread_mutex);
+		return -EBUSY;
+	}
 	ksm_use_zero_pages = value;
+	mutex_unlock(&ksm_thread_mutex);
 
 	return count;
 }
 KSM_ATTR(use_zero_pages);
+
+static ssize_t only_merge_zero_pages_show(struct kobject *kobj,
+					  struct kobj_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", ksm_only_merge_zero_pages);
+}
+static ssize_t only_merge_zero_pages_store(struct kobject *kobj,
+					   struct kobj_attribute *attr,
+					   const char *buf, size_t count)
+{
+	int err;
+	bool value;
+
+	err = kstrtobool(buf, &value);
+	if (err)
+		return -EINVAL;
+
+	/*
+	 * Take ksm_thread_mutex so that this check-and-set is serialized
+	 * against use_zero_pages_store(), which reads ksm_only_merge_zero_pages
+	 * under the same lock. Without it, a concurrent write to the two
+	 * attributes could leave use_zero_pages=0 and only_merge_zero_pages=1,
+	 * a state in which ksmd would scan and checksum pages but never merge
+	 * any.
+	 */
+	mutex_lock(&ksm_thread_mutex);
+	if (value && !ksm_use_zero_pages) {
+		mutex_unlock(&ksm_thread_mutex);
+		pr_warn_once("ksm: only_merge_zero_pages can only be enabled "
+			     "when use_zero_pages is 1\n");
+		return -EINVAL;
+	}
+	ksm_only_merge_zero_pages = value;
+	mutex_unlock(&ksm_thread_mutex);
+
+	return count;
+}
+KSM_ATTR(only_merge_zero_pages);
 
 static ssize_t max_page_sharing_show(struct kobject *kobj,
 				     struct kobj_attribute *attr, char *buf)
@@ -4028,6 +4176,7 @@ static struct attribute *ksm_attrs[] = {
 	&stable_node_dups_attr.attr,
 	&stable_node_chains_prune_millisecs_attr.attr,
 	&use_zero_pages_attr.attr,
+	&only_merge_zero_pages_attr.attr,
 	&general_profit_attr.attr,
 	&smart_scan_attr.attr,
 	&advisor_mode_attr.attr,
