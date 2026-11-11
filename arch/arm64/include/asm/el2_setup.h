@@ -380,7 +380,8 @@
 	ubfx	x1, x1, #ID_AA64MMFR3_EL1_S1POE_SHIFT, #4
 	cbz	x1, .Lskip_poe_fgt_\@
 
-	/* Disable trapping of POR_EL0 */
+	/* Disable trapping of POR_ELx */
+	orr	x0, x0, #HFGRTR_EL2_nPOR_EL1
 	orr	x0, x0, #HFGRTR_EL2_nPOR_EL0
 
 .Lskip_poe_fgt_\@:
