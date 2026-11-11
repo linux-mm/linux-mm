@@ -19,6 +19,9 @@ unsigned int check_preemption_disabled(const char *what1, const char *what2)
 	if (irqs_disabled())
 		goto out;
 
+	if (nr_cpu_ids == 1)
+		goto out;
+
 	if (is_percpu_thread())
 		goto out;
 
