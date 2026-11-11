@@ -63,12 +63,16 @@ static inline int get_count_order(unsigned int count)
 }
 
 #define atomic_long_read(v)			READ_ONCE((v)->counter)
+#define atomic_long_read_acquire(v)		READ_ONCE((v)->counter)
 #define atomic_long_set(v, i)			WRITE_ONCE((v)->counter, (i))
 #define atomic_long_add(i, v)			((void)((v)->counter += (i)))
 #define atomic_long_add_return_relaxed(i, v)	((v)->counter += (i))
-#define atomic_long_add_return_release(i, v)	((v)->counter += (i))
-#define smp_rmb()				barrier()
+#define atomic_long_sub(i, v)			((void)((v)->counter -= (i)))
 /* The harness runs on one thread: ordering primitives are plain accesses. */
+#define smp_rmb()				barrier()
+#define smp_mb()				barrier()	/* One thread: no reordering. */
+#define preempt_disable()			barrier()
+#define preempt_enable()			barrier()
 #define smp_load_acquire(p)			READ_ONCE(*(p))
 #define smp_store_release(p, v)			WRITE_ONCE(*(p), (v))
 
@@ -82,11 +86,17 @@ static inline bool atomic_long_try_cmpxchg_relaxed(atomic_long_t *v, long *old, 
 	return false;
 }
 
+#define atomic_long_add_return(i, v)		((v)->counter += (i))
+#define atomic_long_add_return_release(i, v)	((v)->counter += (i))
+#define atomic_long_try_cmpxchg(v, old, new)	atomic_long_try_cmpxchg_relaxed(v, old, new)
+
 /* Simulated topology, and CPU on which the current code runs. */
 extern unsigned int nr_cpu_ids;
 extern unsigned int hpcc_current_cpu;
 
 #define raw_smp_processor_id()		hpcc_current_cpu
+#define smp_processor_id()		hpcc_current_cpu
+#define in_task()			true
 #define for_each_possible_cpu(cpu)	for ((cpu) = 0; (cpu) < (int)nr_cpu_ids; (cpu)++)
 
 /*
@@ -193,6 +203,10 @@ static inline bool __hpcc_this_cpu_try_cmpxchg(s8 *pcp, s8 *old, s8 new)
 }
 
 #define this_cpu_read(pcp)	(*per_cpu_ptr(&(pcp), hpcc_current_cpu))
+#define this_cpu_write(pcp, v)	((void)(*per_cpu_ptr(&(pcp), hpcc_current_cpu) = (v)))
+#define this_cpu_ptr(ptr)	per_cpu_ptr(ptr, hpcc_current_cpu)
+#define __this_cpu_read(pcp)	this_cpu_read(pcp)
+#define __this_cpu_write(pcp, v)	this_cpu_write(pcp, v)
 #define this_cpu_try_cmpxchg(pcp, ovalp, nval)	\
 	__hpcc_this_cpu_try_cmpxchg(&(pcp), (ovalp), (nval))
 
