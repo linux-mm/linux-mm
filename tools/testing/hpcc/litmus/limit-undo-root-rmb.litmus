@@ -1,0 +1,30 @@
+C limit-undo-root-rmb
+
+(*
+ * Result: Never
+ *
+ * Like limit-undo-root, with a read barrier between the two reads
+ * instead of the acquire.
+ *)
+
+{}
+
+P0(atomic_t *p, atomic_t *n)
+{
+	int r;
+
+	r = atomic_add_return(1, p);
+	r = atomic_add_return_release(1, n);
+}
+
+P1(atomic_t *p, atomic_t *n)
+{
+	int r0;
+	int r1;
+
+	r0 = atomic_read(n);
+	smp_rmb();
+	r1 = atomic_read(p);
+}
+
+exists (1:r0=1 /\ 1:r1=0)

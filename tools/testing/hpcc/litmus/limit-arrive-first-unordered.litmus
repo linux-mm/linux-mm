@@ -1,0 +1,37 @@
+C limit-arrive-first-unordered
+
+(*
+ * Result: Sometimes
+ *
+ * Like limit-arrive-first, with an unordered add at the root. The sum
+ * can miss the carry.
+ *)
+
+{
+	l0 = 1;
+}
+
+P0(int *l0, atomic_t *item, atomic_t *root)
+{
+	int r;
+
+	r = atomic_cmpxchg(item, 0, 1);
+	atomic_add(1, root);
+	atomic_sub(1, item);
+	WRITE_ONCE(*l0, 0);
+}
+
+P1(int *l0, atomic_t *item, atomic_t *root)
+{
+	int r0;
+	int r1;
+	int r2;
+
+	r0 = READ_ONCE(*l0);
+	smp_rmb();
+	r1 = atomic_read(item);
+	smp_rmb();
+	r2 = atomic_read(root);
+}
+
+exists (1:r0=0 /\ 1:r1=0 /\ 1:r2=0)

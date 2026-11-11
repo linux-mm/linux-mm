@@ -552,7 +552,9 @@ EXPORT_SYMBOL_GPL(percpu_counter_tree_init_many_lazy);
  * The read barriers between the levels of the precise sum are unrelated
  * to the publication: they order carries, see
  * percpu_counter_tree_precise_sum_unbiased().
-
+ *
+ * The litmus tests in tools/testing/hpcc/litmus check these orderings
+ * with the Linux kernel memory model, and those of the carries.
  */
 
 /**
@@ -1261,7 +1263,9 @@ EXPORT_SYMBOL_GPL(percpu_counter_tree_batch_for_accuracy);
  * retries once when the value leaves room for it.
  *
  * Both counters wrap around: all the arithmetic is modular.
-
+ *
+ * The litmus tests in tools/testing/hpcc/litmus check these orderings
+ * with the Linux kernel memory model.
  */
 
 /*

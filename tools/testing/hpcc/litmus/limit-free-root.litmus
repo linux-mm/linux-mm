@@ -1,0 +1,42 @@
+C limit-free-root
+
+(*
+ * Result: Never
+ *
+ * CPU 0 adds to the root of the additions p, then publishes the page it
+ * charged. CPU 1 finds the page and frees it: its carry reaches the root
+ * of the subtractions n with a release. CPU 2 checks: it reads n with an
+ * acquire, then p. It never sees the subtraction without the
+ * addition.
+ *)
+
+{}
+
+P0(atomic_t *p, int *page)
+{
+	int r;
+
+	r = atomic_add_return(1, p);
+	smp_store_release(page, 1);
+}
+
+P1(atomic_t *n, int *page)
+{
+	int r0;
+	int r;
+
+	r0 = smp_load_acquire(page);
+	if (r0 == 1)
+		r = atomic_add_return_release(1, n);
+}
+
+P2(atomic_t *p, atomic_t *n)
+{
+	int r0;
+	int r1;
+
+	r0 = atomic_read_acquire(n);
+	r1 = atomic_read(p);
+}
+
+exists (1:r0=1 /\ 2:r0=1 /\ 2:r1=0)
