@@ -548,6 +548,20 @@ static inline bool pte_is_marker(pte_t pte)
 }
 
 /**
+ * pte_is_guard_marker() - Does this PTE entry encode a guard region marker
+ * leaf entry?
+ * @pte: PTE entry.
+ *
+ * Returns: true if this PTE is a guard marker leaf entry, otherwise false.
+ */
+static inline bool pte_is_guard_marker(pte_t pte)
+{
+	const softleaf_t entry = softleaf_from_pte(pte);
+
+	return softleaf_is_guard_marker(entry);
+}
+
+/**
  * pte_is_uffd_wp_marker() - Does this PTE entry encode a userfaultfd write
  * protect marker leaf entry?
  * @pte: PTE entry.

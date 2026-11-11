@@ -2434,6 +2434,13 @@ static void make_uffd_wp_pte(struct vm_area_struct *vma,
 	} else if (pte_none(ptent)) {
 		set_pte_at(vma->vm_mm, addr, pte,
 			   make_pte_marker(PTE_MARKER_UFFD_WP));
+	} else if (!vma_is_anonymous(vma) && pte_is_guard_marker(ptent)) {
+		/* Keep the protection in the marker, as mprotect does. */
+		const softleaf_t entry = softleaf_from_pte(ptent);
+
+		set_pte_at(vma->vm_mm, addr, pte,
+			   make_pte_marker(softleaf_to_marker(entry) |
+					   PTE_MARKER_UFFD_WP));
 	} else {
 		ptent = set_uffd_wp_swp_pte(ptent);
 		set_pte_at(vma->vm_mm, addr, pte, ptent);

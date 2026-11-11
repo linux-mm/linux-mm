@@ -261,7 +261,10 @@ static long change_softleaf_pte(struct vm_area_struct *vma,
 			const pte_marker old = softleaf_to_marker(entry);
 			pte_marker marker = old;
 
-			if (uffd_prot_resolve)
+			if ((cp_flags & MM_CP_UFFD_WP) &&
+			    !vma_is_anonymous(vma))
+				marker |= PTE_MARKER_UFFD_WP;
+			else if (uffd_prot_resolve)
 				marker &= ~PTE_MARKER_UFFD_WP;
 
 			if (marker == old)
