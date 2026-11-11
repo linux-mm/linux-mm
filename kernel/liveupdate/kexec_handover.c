@@ -624,9 +624,14 @@ static int __init kho_preserved_memory_reserve(unsigned long key, void *data)
 	sz = 1UL << (order + PAGE_SHIFT);
 	page = kho_get_preserved_page(phys, order);
 
-	/* Reserve the memory preserved in KHO in memblock */
-	memblock_reserve(phys, sz);
-	memblock_reserved_mark_noinit(phys, sz);
+	/*
+	 * Reserve the memory preserved in KHO in memblock. It's too late to
+	 * drop the handover if that fails: reserve_mem may already have revived
+	 * regions from it.
+	 */
+	if (memblock_reserve(phys, sz) || memblock_reserved_mark_noinit(phys, sz))
+		panic("KHO: failed to reserve preserved memory %pa+%#llx\n",
+		      &phys, sz);
 	info.magic = KHO_PAGE_MAGIC;
 	info.order = order;
 	page->private = info.page_private;
