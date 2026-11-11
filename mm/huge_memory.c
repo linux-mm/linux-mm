@@ -1403,7 +1403,8 @@ void map_anon_folio_pmd_nopf(struct folio *folio, pmd_t *pmd,
 	folio_add_lru_vma(folio, vma);
 	set_pmd_at(vma->vm_mm, haddr, pmd, entry);
 	update_mmu_cache_pmd(vma, haddr, pmd);
-	deferred_split_folio(folio, false);
+	if (split_underused_thp)
+		deferred_split_folio(folio, false);
 }
 
 static void map_anon_folio_pmd_pf(struct folio *folio, pmd_t *pmd,
@@ -4625,9 +4626,6 @@ void deferred_split_folio(struct folio *folio, bool partially_mapped)
 	 * won't waste much memory by not adding them to the deferred list.
 	 */
 	if (folio_order(folio) <= 1)
-		return;
-
-	if (!partially_mapped && !split_underused_thp)
 		return;
 
 	/*
