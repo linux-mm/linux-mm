@@ -318,9 +318,92 @@ static inline int private_mapping_ok(struct vm_area_desc *desc)
 }
 #endif
 
-static const struct vm_operations_struct mmap_mem_ops = {
+#ifdef CONFIG_MMU
+/*
+ * Populate /dev/mem mappings on fault, using a PMD or PUD mapping where the
+ * architecture, the fault address and the pfn allow it.
+ */
+static vm_fault_t mmap_mem_huge_fault(struct vm_fault *vmf, unsigned int order)
+{
+	unsigned long addr = vmf->address & ~((PAGE_SIZE << order) - 1);
+	struct vm_area_struct *vma = vmf->vma;
+	unsigned long pfn;
+
+	/*
+	 * COW mappings are mapped eagerly at mmap() time and only lose their
+	 * pages to revoke_iomem(); keep them unmapped, as without a fault
+	 * handler. vmf_insert_pfn*() would also BUG_ON them.
+	 */
+	if (vma_is_cow_mapping(vma))
+		return VM_FAULT_SIGBUS;
+
+	/*
+	 * vm_pgoff is the base pfn of the mapping. vmf_pfn_order_ok() ignores
+	 * pfn if the window starts below vm_start.
+	 */
+	pfn = vma->vm_pgoff + ((addr - vma->vm_start) >> PAGE_SHIFT);
+	if (!vmf_pfn_order_ok(vmf, pfn, order))
+		return VM_FAULT_FALLBACK;
+
+	/*
+	 * Access was checked at mmap() time, but with CONFIG_IO_STRICT_DEVMEM
+	 * revoke_iomem() zaps the mapping once a driver claims part of the
+	 * range. Re-check here so a revoked page is not faulted back in. Like
+	 * the mmap()-time check, it is not serialised against revoke_iomem(),
+	 * so a fault that passed it can still install a page revoked right
+	 * after.
+	 */
+	if (!range_is_allowed(pfn, PAGE_SIZE << order))
+		return order ? VM_FAULT_FALLBACK : VM_FAULT_SIGBUS;
+
+	return vmf_insert_pfn_order(vmf, pfn, order);
+}
+
+static vm_fault_t mmap_mem_fault(struct vm_fault *vmf)
+{
+	return mmap_mem_huge_fault(vmf, 0);
+}
+#endif /* CONFIG_MMU */
+
 #ifdef CONFIG_HAVE_IOREMAP_PROT
-	.access = generic_access_phys
+/*
+ * generic_access_phys() only follows present PTEs, and a lazily populated
+ * mapping has none for pages the target has not touched yet. Fault the page in
+ * first, so that remote access (ptrace, /proc/pid/mem) keeps working.
+ *
+ * fixup_user_fault() refuses a fault the vma does not permit, so an untouched
+ * page of a mapping without VM_READ stays unreadable, where the eager mapping
+ * left a present PTE.
+ */
+static int mmap_mem_access(struct vm_area_struct *vma, unsigned long addr,
+			   void *buf, int len, int write)
+{
+	unsigned int fault_flags = FAULT_FLAG_REMOTE;
+
+	if (write)
+		fault_flags |= FAULT_FLAG_WRITE;
+
+	/*
+	 * COW mappings are populated at mmap() time, and a write fault would
+	 * copy the page instead. With unlocked == NULL, fixup_user_fault()
+	 * keeps the mmap lock held and the vma valid.
+	 */
+	if (!vma_is_cow_mapping(vma))
+		fixup_user_fault(vma->vm_mm, addr, fault_flags, NULL);
+
+	return generic_access_phys(vma, addr, buf, len, write);
+}
+#endif
+
+static const struct vm_operations_struct mmap_mem_ops = {
+#ifdef CONFIG_MMU
+	.fault = mmap_mem_fault,
+#endif
+#ifdef CONFIG_ARCH_SUPPORTS_HUGE_PFNMAP
+	.huge_fault = mmap_mem_huge_fault,
+#endif
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+	.access = mmap_mem_access,
 #endif
 };
 
@@ -356,10 +439,22 @@ static int mmap_mem_prepare(struct vm_area_desc *desc)
 					       desc->page_prot);
 
 	desc->vm_ops = &mmap_mem_ops;
-
-	/* Remap-pfn-range will mark the range with the I/O flag. */
-	mmap_action_remap_full(desc, desc->pgoff);
 	desc->action.error_override = -EAGAIN;
+
+	if (vma_desc_is_cow_mapping(desc)) {
+		/*
+		 * vmf_insert_pfn*() cannot populate COW mappings: map them now.
+		 * Remap-pfn-range will mark the range with the I/O flag.
+		 */
+		mmap_action_remap_full(desc, desc->pgoff);
+		return 0;
+	}
+
+	/*
+	 * Populate on fault (see mmap_mem_huge_fault()). Tracking the PFN range
+	 * keeps its memory type reserved, for PAT conflict detection.
+	 */
+	mmap_action_pfn_track(desc, desc->pgoff);
 
 	return 0;
 }
