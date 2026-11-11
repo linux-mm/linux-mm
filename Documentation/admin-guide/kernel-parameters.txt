@@ -5342,6 +5342,20 @@ Kernel parameters
 			allocator.  This parameter is primarily	for debugging
 			and performance comparison.
 
+	percpu_counter_tree.arity=	[KNL,SMP]
+			Format: <fan-out>[,<fan-out>...]
+			Override the shape of the hierarchical per-cpu
+			counter trees (used for the RSS counters), listing
+			the fan-out of each tree level from the per-cpu
+			counters to the root. Each fan-out is a power of 2
+			and their product must be nr_cpu_ids (the highest
+			possible CPU number plus one) rounded up to a power
+			of 2, e.g. "16" (flat) or "4,4" when nr_cpu_ids
+			is 16. An invalid shape is ignored with a warning.
+			The shape in use is shown in
+			/sys/module/percpu_counter_tree/parameters/arity.
+			This parameter is meant for performance comparison.
+
 	pirq=		[SMP,APIC] Manual mp-table setup
 			See Documentation/arch/x86/i386/IO-APIC.rst.
 
@@ -6777,6 +6791,16 @@ Kernel parameters
 	rseq_debug=	[KNL] Enable or disable restartable sequence
 			debug mode. Defaults to CONFIG_RSEQ_DEBUG_DEFAULT_ENABLE.
 			Format: <bool>
+
+	rss_stat_batch=	[KNL,SMP]
+			Format: <integer>
+			Batch size of the per-mm RSS counters: the number of
+			pages a CPU accumulates before propagating them into
+			the counter tree. A power of 2 between 2 and 128.
+			A smaller batch improves the accuracy of the
+			approximate RSS, a larger batch reduces the update
+			cost. Default: 32.
+			This parameter is meant for performance comparison.
 
 	rt_group_sched=	[KNL] Enable or disable SCHED_RR/FIFO group scheduling
 			when CONFIG_RT_GROUP_SCHED=y. Defaults to

@@ -1,0 +1,40 @@
+C publish-approximate-sum
+
+(*
+ * Result: Never
+ *
+ * percpu_counter_tree_activate_many() zeroes the per-CPU counter l0mem
+ * and the root rootmem, which held stale values, then publishes approx_sum
+ * and level0 with releases. See "Publication of the tree" in
+ * lib/percpu_counter_tree.c.
+ *
+ * The approximate sum reads approx_sum, then the root through it. The
+ * address dependency orders the two reads. It never sees the stale
+ * root.
+ *)
+
+{
+	level0=nolevel0;
+	approx_sum=noroot;
+	l0mem=1;
+	rootmem=1;
+}
+
+P0(int **level0, int **approx_sum, int *l0mem, int *rootmem)
+{
+	WRITE_ONCE(*l0mem, 0);
+	WRITE_ONCE(*rootmem, 0);
+	smp_store_release(approx_sum, rootmem);
+	smp_store_release(level0, l0mem);
+}
+
+P1(int **level0, int **approx_sum)
+{
+	int *r0;
+	int r1;
+
+	r0 = READ_ONCE(*approx_sum);
+	r1 = READ_ONCE(*r0);
+}
+
+exists (1:r0=rootmem /\ 1:r1=1)

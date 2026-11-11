@@ -1,0 +1,61 @@
+Litmus tests of lib/percpu_counter_tree.c. They check its memory
+ordering arguments with the Linux kernel memory model. Each test models
+one argument. A test with the result "Sometimes" drops one ordering of
+the code, to show that the argument needs it.
+
+The model has no atomic_long_t: the tests use atomic_t, with the same
+ordering. The per-CPU counters are plain int.
+
+Run them from tools/memory-model, with herd7 installed:
+
+  cd tools/memory-model
+  for f in ../testing/hpcc/litmus/*.litmus; do
+	herd7 -conf linux-kernel.cfg $f | grep Observation
+  done
+
+Each observation must match the "Result" in the comment of its test.
+
+Publication of the tree, see "Publication of the tree":
+
+  publish-update.litmus, publish-update-norelease.litmus
+    The update fast path reads level0, then its per-CPU counter.
+
+  publish-carry.litmus, publish-carry-normb.litmus
+    The carry slow path reads approx_sum after a read barrier.
+
+  publish-precise-sum.litmus, publish-precise-sum-noacquire.litmus
+    The precise sum reads level0 with an acquire.
+
+  publish-approximate-sum.litmus
+    The approximate sum reads the root through approx_sum.
+
+Carries of percpu_counter_tree_add(), see
+percpu_counter_tree_precise_sum_unbiased():
+
+  leave-first-precise-sum.litmus, leave-first-precise-sum-relaxed.litmus
+    A carry leaves each level before it arrives at the next one. The
+    precise sum, read from the root down, never counts it twice.
+
+Limit counters, see "Limit counters":
+
+  limit-arrive-first.litmus, limit-arrive-first-acquire.litmus,
+  limit-arrive-first-unordered.litmus
+    A carry of the additions arrives at each level before it leaves the
+    level below. The precise sum, read from level 0 up, never misses it.
+    The root update must be fully ordered.
+
+  limit-undo-root.litmus, limit-undo-root-rmb.litmus,
+  limit-undo-root-unordered.litmus, limit-undo-level0.litmus
+    An addition undone on the same CPU. The check reads the
+    subtractions, then the additions. It never sees the subtraction
+    without the addition.
+
+  limit-free-root.litmus, limit-free-level0.litmus,
+  limit-free-level0-nomb.litmus
+    An amount added on one CPU and subtracted on another one, which
+    found it through a release and an acquire. The full barrier after
+    the addition orders it before a subtraction which stays in level 0.
+
+  limit-last-checker.litmus, limit-last-checker-nomb.litmus
+    Two concurrent additions, each checked after a full barrier. At
+    least one check sees the other addition.
