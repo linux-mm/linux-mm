@@ -3327,7 +3327,16 @@ static struct inode *__shmem_get_inode(const struct mnt_idmap *idmap,
 	cache_no_acl(inode);
 	if (sbinfo->noswap)
 		mapping_set_unevictable(inode->i_mapping);
-	mapping_set_large_folios(inode->i_mapping);
+	/*
+	 * shmem large folios currently depend on THP:
+	 * shmem_alloc_and_add_folio() forces order 0 without it, and
+	 * advertising a larger mapping size makes
+	 * generic_perform_write() pass a length that shmem_write_begin()
+	 * rejects wholesale for F_SEAL_GROW before the folio size is
+	 * known.
+	 */
+	if (IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE))
+		mapping_set_large_folios(inode->i_mapping);
 
 	switch (mode & S_IFMT) {
 	default:

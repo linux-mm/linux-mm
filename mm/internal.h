@@ -779,6 +779,7 @@ static inline void folio_set_order(struct folio *folio, unsigned int order)
 #endif
 }
 
+void folio_reset_partially_mapped(struct folio *folio);
 bool __folio_unqueue_deferred_split(struct folio *folio);
 static inline bool folio_unqueue_deferred_split(struct folio *folio)
 {

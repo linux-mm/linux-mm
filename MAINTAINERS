@@ -17940,6 +17940,7 @@ F:	include/linux/khugepaged.h
 F:	include/trace/events/huge_memory.h
 F:	include/trace/events/thp.h
 F:	mm/collapse.h
+F:	mm/folio_split.c
 F:	mm/huge_memory.c
 F:	mm/khugepaged.c
 F:	mm/mm_slot.h

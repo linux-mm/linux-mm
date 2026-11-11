@@ -1864,6 +1864,8 @@ xfs_fs_fill_super(
 			xfs_warn(mp,
 "block size (%u bytes) not supported; Only block size (%zu) or less is supported",
 				mp->m_sb.sb_blocksize, max_folio_size);
+			if (!IS_ENABLED(CONFIG_LARGE_FOLIO))
+				xfs_warn(mp, "CONFIG_LARGE_FOLIO is not set");
 			error = -ENOSYS;
 			goto out_free_sb;
 		}
