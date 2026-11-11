@@ -130,6 +130,28 @@ long percpu_counter_tree_approximate_sum(struct percpu_counter_tree *counter)
 }
 
 unsigned long percpu_counter_tree_approximate_accuracy(struct percpu_counter_tree *counter);
+unsigned long percpu_counter_tree_batch_for_accuracy(unsigned long accuracy);
+
+/*
+ * A value kept below a limit, such as the blocks used by a file system
+ * with a size limit. It is split by sign into two counters which only
+ * grow: the additions and the subtractions. Each one carries in the
+ * direction that keeps the limit check strict. See "Limit counters" in
+ * lib/percpu_counter_tree.c.
+ */
+struct percpu_counter_tree_limit {
+	/* [0]: the additions, [1]: the subtractions. */
+	struct percpu_counter_tree counters[2];
+};
+
+int percpu_counter_tree_limit_init(struct percpu_counter_tree_limit *limit,
+				   unsigned long batch_size, gfp_t gfp_flags);
+void percpu_counter_tree_limit_destroy(struct percpu_counter_tree_limit *limit);
+bool percpu_counter_tree_limit_add(struct percpu_counter_tree_limit *limit,
+				   unsigned long max, unsigned long amount);
+void percpu_counter_tree_limit_sub(struct percpu_counter_tree_limit *limit,
+				   unsigned long amount);
+unsigned long percpu_counter_tree_limit_precise_sum(struct percpu_counter_tree_limit *limit);
 
 #if IS_ENABLED(CONFIG_KUNIT)
 unsigned int percpu_counter_tree_check_config(void);
@@ -282,6 +304,57 @@ static inline
 int percpu_counter_tree_subsystem_init(void)
 {
 	return 0;
+}
+
+static inline
+unsigned long percpu_counter_tree_batch_for_accuracy(unsigned long accuracy)
+{
+	return PERCPU_COUNTER_TREE_MAX_BATCH;
+}
+
+/* On UP, the value is a single atomic: the first counter. The second is unused. */
+struct percpu_counter_tree_limit {
+	struct percpu_counter_tree counters[2];
+};
+
+static inline
+int percpu_counter_tree_limit_init(struct percpu_counter_tree_limit *limit,
+				   unsigned long batch_size, gfp_t gfp_flags)
+{
+	return percpu_counter_tree_init(&limit->counters[0], batch_size, gfp_flags);
+}
+
+static inline
+void percpu_counter_tree_limit_destroy(struct percpu_counter_tree_limit *limit)
+{
+}
+
+static inline
+bool percpu_counter_tree_limit_add(struct percpu_counter_tree_limit *limit,
+				   unsigned long max, unsigned long amount)
+{
+	atomic_long_t *count = &limit->counters[0].count;
+	long old = atomic_long_read(count);
+
+	/* Add only an amount which fits. */
+	do {
+		if ((unsigned long)old + amount > max)
+			return false;
+	} while (!atomic_long_try_cmpxchg(count, &old, old + amount));
+	return true;
+}
+
+static inline
+void percpu_counter_tree_limit_sub(struct percpu_counter_tree_limit *limit,
+				   unsigned long amount)
+{
+	atomic_long_sub(amount, &limit->counters[0].count);
+}
+
+static inline
+unsigned long percpu_counter_tree_limit_precise_sum(struct percpu_counter_tree_limit *limit)
+{
+	return atomic_long_read(&limit->counters[0].count);
 }
 
 #endif	/* CONFIG_SMP */
