@@ -1085,13 +1085,6 @@ static bool is_valid_guard_vma(const struct vm_area_struct *vma,
 	return true;
 }
 
-static bool is_guard_pte_marker(pte_t ptent)
-{
-	const softleaf_t entry = softleaf_from_pte(ptent);
-
-	return softleaf_is_guard_marker(entry);
-}
-
 static int guard_install_pud_entry(pud_t *pud, unsigned long addr,
 				   unsigned long next, struct mm_walk *walk)
 {
@@ -1117,7 +1110,24 @@ static int guard_install_pte_entry(pte_t *pte, unsigned long addr,
 	unsigned long *nr_pages = (unsigned long *)walk->private;
 
 	/* If there is already a guard page marker, we have nothing to do. */
-	if (is_guard_pte_marker(pteval)) {
+	if (pte_is_guard_marker(pteval)) {
+		(*nr_pages)++;
+
+		return 0;
+	}
+
+	/*
+	 * Zapping keeps uffd-wp markers on file-backed VMAs, so add the guard
+	 * to the marker instead. The slot stays write-protected once the guard
+	 * is removed.
+	 */
+	if (!vma_is_anonymous(walk->vma) && pte_is_uffd_wp_marker(pteval)) {
+		const softleaf_t entry = softleaf_from_pte(pteval);
+
+		set_pte_at(walk->mm, addr, pte,
+			   make_pte_marker(softleaf_to_marker(entry) |
+					   PTE_MARKER_GUARD));
+		update_mmu_cache(walk->vma, addr, pte);
 		(*nr_pages)++;
 
 		return 0;
@@ -1155,6 +1165,29 @@ static long madvise_guard_install(struct madvise_behavior *madv_behavior)
 
 	if (!is_valid_guard_vma(vma, /* allow_locked = */false))
 		return -EINVAL;
+
+	/*
+	 * Installing guards zaps the range, so report it to a userfaultfd
+	 * manager like MADV_DONTNEED does. The VMA can change while the mmap
+	 * lock is dropped for the event, so look it up again.
+	 */
+	if (!userfaultfd_remove(vma, range->start, range->end)) {
+		mark_mmap_lock_dropped(madv_behavior);
+		mmap_read_lock(madv_behavior->mm);
+		madv_behavior->vma = vma = vma_lookup(madv_behavior->mm,
+						      range->start);
+		if (!vma)
+			return -ENOMEM;
+		if (!is_valid_guard_vma(vma, /* allow_locked = */false))
+			return -EINVAL;
+		/*
+		 * The VMA may have been split while the lock was dropped.
+		 * Handle the part in this VMA. The remainder is handled by the
+		 * next iteration of madvise_walk_vmas().
+		 */
+		if (range->end > vma->vm_end)
+			range->end = vma->vm_end;
+	}
 
 	/*
 	 * Set atomically under read lock. All pertinent readers will need to
@@ -1258,9 +1291,16 @@ static int guard_remove_pte_entry(pte_t *pte, unsigned long addr,
 {
 	pte_t ptent = ptep_get(pte);
 
-	if (is_guard_pte_marker(ptent)) {
-		/* Simply clear the PTE marker. */
-		pte_clear(walk->mm, addr, pte);
+	if (pte_is_guard_marker(ptent)) {
+		const softleaf_t entry = softleaf_from_pte(ptent);
+		const pte_marker marker = softleaf_to_marker(entry) &
+					  ~PTE_MARKER_GUARD;
+
+		/* Clear the guard bit and keep the uffd-wp bit, if set. */
+		if (marker)
+			set_pte_at(walk->mm, addr, pte, make_pte_marker(marker));
+		else
+			pte_clear(walk->mm, addr, pte);
 		update_mmu_cache(walk->vma, addr, pte);
 	}
 

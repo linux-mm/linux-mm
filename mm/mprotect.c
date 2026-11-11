@@ -249,9 +249,31 @@ static long change_softleaf_pte(struct vm_area_struct *vma,
 		 * because any access should sigbus/sigsegv
 		 * anyway.
 		 */
-		if (softleaf_is_poison_marker(entry) ||
-		    softleaf_is_guard_marker(entry))
+		if (softleaf_is_poison_marker(entry))
 			return 0;
+
+		/*
+		 * A guard marker on a file-backed VMA carries the
+		 * uffd-wp state of the slot for when the guard is
+		 * removed.
+		 */
+		if (softleaf_is_guard_marker(entry)) {
+			const pte_marker old = softleaf_to_marker(entry);
+			pte_marker marker = old;
+
+			if ((cp_flags & MM_CP_UFFD_WP) &&
+			    !vma_is_anonymous(vma))
+				marker |= PTE_MARKER_UFFD_WP;
+			else if (uffd_prot_resolve)
+				marker &= ~PTE_MARKER_UFFD_WP;
+
+			if (marker == old)
+				return 0;
+			set_pte_at(vma->vm_mm, addr, pte,
+				   make_pte_marker(marker));
+			return 1;
+		}
+
 		/*
 		 * If this is uffd-wp pte marker and we'd like
 		 * to unprotect it, drop it; the next page
