@@ -231,13 +231,13 @@ int shmem_inode_acct_blocks(struct inode *inode, long pages)
 
 	might_sleep();	/* when quotas */
 	if (sbinfo->max_blocks) {
-		if (!percpu_counter_limited_add(&sbinfo->used_blocks,
-						sbinfo->max_blocks, pages))
+		if (!percpu_counter_tree_limit_add(&sbinfo->used_blocks,
+						   sbinfo->max_blocks, pages))
 			goto unacct;
 
 		err = dquot_alloc_block_nodirty(inode, pages);
 		if (err) {
-			percpu_counter_sub(&sbinfo->used_blocks, pages);
+			percpu_counter_tree_limit_sub(&sbinfo->used_blocks, pages);
 			goto unacct;
 		}
 	} else {
@@ -262,7 +262,7 @@ static void shmem_inode_unacct_blocks(struct inode *inode, long pages)
 	dquot_free_block_nodirty(inode, pages);
 
 	if (sbinfo->max_blocks)
-		percpu_counter_sub(&sbinfo->used_blocks, pages);
+		percpu_counter_tree_limit_sub(&sbinfo->used_blocks, pages);
 	shmem_unacct_blocks(info->flags, pages);
 }
 
@@ -4055,9 +4055,11 @@ static int shmem_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_namelen = NAME_MAX;
 	if (sbinfo->max_blocks) {
 		buf->f_blocks = sbinfo->max_blocks;
+		/* Under concurrent allocations, the sum can be above the size. */
 		buf->f_bavail =
 		buf->f_bfree  = sbinfo->max_blocks -
-				percpu_counter_sum(&sbinfo->used_blocks);
+				min(percpu_counter_tree_limit_precise_sum(&sbinfo->used_blocks),
+				    sbinfo->max_blocks);
 	}
 	if (sbinfo->max_inodes) {
 		buf->f_files = sbinfo->max_inodes;
@@ -5027,8 +5029,8 @@ static int shmem_reconfigure(struct fs_context *fc)
 			err = "Cannot retroactively limit size";
 			goto out;
 		}
-		if (percpu_counter_compare(&sbinfo->used_blocks,
-					   ctx->blocks) > 0) {
+		if (percpu_counter_tree_limit_precise_sum(&sbinfo->used_blocks) >
+		    ctx->blocks) {
 			err = "Too small a size for current use";
 			goto out;
 		}
@@ -5194,7 +5196,7 @@ static void shmem_put_super(struct super_block *sb)
 	shmem_disable_quotas(sb);
 #endif
 	free_percpu(sbinfo->ino_batch);
-	percpu_counter_destroy(&sbinfo->used_blocks);
+	percpu_counter_tree_limit_destroy(&sbinfo->used_blocks);
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	list_lru_destroy(&sbinfo->shrinklist);
 #endif
@@ -5219,6 +5221,7 @@ static int shmem_fill_super(struct super_block *sb, struct fs_context *fc)
 	static struct lock_class_key shmem_unused_huge_lock_key;
 #endif
 	struct shmem_options *ctx = fc->fs_private;
+	unsigned long batch;
 	struct inode *inode;
 	struct shmem_sb_info *sbinfo;
 	int error = -ENOMEM;
@@ -5293,8 +5296,18 @@ static int shmem_fill_super(struct super_block *sb, struct fs_context *fc)
 	ctx->mpol = NULL;
 
 	raw_spin_lock_init(&sbinfo->stat_lock);
-	if (percpu_counter_init(&sbinfo->used_blocks, 0, GFP_KERNEL))
-		goto failed;
+	/*
+	 * A mount without a size limit never counts its blocks. A remount
+	 * cannot add a limit. Otherwise, pick the batch size from the size.
+	 * When the size allows, its accuracy is within 1/4 of the size. A
+	 * block allocation then sums all CPUs only within the last 1/4 of the
+	 * size. A remount keeps the batch size.
+	 */
+	if (sbinfo->max_blocks) {
+		batch = percpu_counter_tree_batch_for_accuracy(sbinfo->max_blocks / 4);
+		if (percpu_counter_tree_limit_init(&sbinfo->used_blocks, batch, GFP_KERNEL))
+			goto failed;
+	}
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 	if (list_lru_init_memcg_key(&sbinfo->shrinklist, sb->s_shrink,
