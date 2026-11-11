@@ -456,6 +456,7 @@ struct node_barn {
 	struct slab_sheaf *sheaf_partial;
 	unsigned int nr_full;
 	unsigned int nr_empty;
+	unsigned int nr_alloc;
 };
 
 struct slab_sheaf {
@@ -3331,6 +3332,7 @@ static void barn_init(struct node_barn *barn)
 	barn->sheaf_partial = NULL;
 	barn->nr_full = 0;
 	barn->nr_empty = 0;
+	barn->nr_alloc = 0;
 }
 
 static void barn_shrink(struct kmem_cache *s, struct node_barn *barn)
@@ -4750,7 +4752,9 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
 	struct slab_sheaf *empty = NULL;
 	struct slab_sheaf *full;
 	struct node_barn *barn;
+	unsigned long flags;
 	bool allow_spin;
+	bool alloc_new = false;
 
 	slab_lockdep_assert_held(this_cpu_ptr(&s->cpu_sheaves->lock));
 
@@ -4792,6 +4796,19 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
 		}
 	}
 
+	if (allow_spin && !empty) {
+		/* The limit is advisory; concurrent reservations may exceed it. */
+		if (data_race(barn->nr_alloc) > MAX_EMPTY_SHEAVES) {
+			local_unlock(&s->cpu_sheaves->lock);
+			return NULL;
+		}
+
+		spin_lock_irqsave(&barn->lock, flags);
+		barn->nr_alloc++;
+		spin_unlock_irqrestore(&barn->lock, flags);
+		alloc_new = true;
+	}
+
 	local_unlock(&s->cpu_sheaves->lock);
 	pcs = NULL;
 
@@ -4801,7 +4818,7 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
 	if (!empty) {
 		empty = alloc_empty_sheaf(s, gfp, alloc_flags);
 		if (!empty)
-			return NULL;
+			goto out;
 	}
 
 	if (refill_sheaf(s, empty, gfp | __GFP_NOMEMALLOC | __GFP_NOWARN)) {
@@ -4812,7 +4829,7 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
 		sheaf_flush_unused(s, empty);
 		free_empty_sheaf(s, empty);
 
-		return NULL;
+		goto out;
 	}
 
 	full = empty;
@@ -4835,23 +4852,30 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
 		else
 			barn_put_empty_sheaf(barn, pcs->main);
 		pcs->main = full;
-		return pcs;
+		goto out;
 	}
 
 	if (!pcs->spare) {
 		pcs->spare = full;
-		return pcs;
+		goto out;
 	}
 
 	if (pcs->spare->size == 0) {
 		barn_put_empty_sheaf(barn, pcs->spare);
 		pcs->spare = full;
-		return pcs;
+		goto out;
 	}
 
 barn_put:
 	barn_put_full_sheaf(barn, full);
 	stat(s, BARN_PUT);
+
+out:
+	if (alloc_new) {
+		spin_lock_irqsave(&barn->lock, flags);
+		barn->nr_alloc--;
+		spin_unlock_irqrestore(&barn->lock, flags);
+	}
 
 	return pcs;
 }
