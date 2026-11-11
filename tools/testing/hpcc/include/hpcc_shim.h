@@ -68,6 +68,9 @@ static inline int get_count_order(unsigned int count)
 #define atomic_long_add_return_relaxed(i, v)	((v)->counter += (i))
 #define atomic_long_add_return_release(i, v)	((v)->counter += (i))
 #define smp_rmb()				barrier()
+/* The harness runs on one thread: ordering primitives are plain accesses. */
+#define smp_load_acquire(p)			READ_ONCE(*(p))
+#define smp_store_release(p, v)			WRITE_ONCE(*(p), (v))
 
 static inline bool atomic_long_try_cmpxchg_relaxed(atomic_long_t *v, long *old, long new)
 {
@@ -92,15 +95,32 @@ extern unsigned int hpcc_current_cpu;
  */
 #define HPCC_PCPU_UNIT	64
 
+/* Outstanding allocations, to check for leaks. */
+extern long hpcc_nr_allocs;
+
+static inline void *hpcc_alloc_account(void *p)
+{
+	if (p)
+		hpcc_nr_allocs++;
+	return p;
+}
+
+static inline void hpcc_free_account(void *p)
+{
+	if (p)
+		hpcc_nr_allocs--;
+}
+
 static inline void *__alloc_percpu_gfp(size_t size, size_t align, gfp_t gfp)
 {
 	if (size > HPCC_PCPU_UNIT || align > HPCC_PCPU_UNIT)
 		return NULL;
-	return calloc(nr_cpu_ids, HPCC_PCPU_UNIT);
+	return hpcc_alloc_account(calloc(nr_cpu_ids, HPCC_PCPU_UNIT));
 }
 
 static inline void free_percpu(void *ptr)
 {
+	hpcc_free_account(ptr);
 	free(ptr);
 }
 
@@ -136,21 +156,23 @@ static inline void *kmem_cache_zalloc(struct kmem_cache *s, gfp_t gfp)
 
 	if (p)
 		memset(p, 0, s->size);
-	return p;
+	return hpcc_alloc_account(p);
 }
 
 static inline void kmem_cache_free(struct kmem_cache *s, void *p)
 {
+	hpcc_free_account(p);
 	free(p);
 }
 
 static inline void *kzalloc(size_t size, gfp_t gfp)
 {
-	return calloc(1, size);
+	return hpcc_alloc_account(calloc(1, size));
 }
 
 static inline void kfree(void *p)
 {
+	hpcc_free_account(p);
 	free(p);
 }
 
