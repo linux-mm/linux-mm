@@ -1123,6 +1123,23 @@ static int guard_install_pte_entry(pte_t *pte, unsigned long addr,
 		return 0;
 	}
 
+	/*
+	 * Zapping keeps uffd-wp markers on file-backed VMAs, so add the guard
+	 * to the marker instead. The slot stays write-protected once the guard
+	 * is removed.
+	 */
+	if (!vma_is_anonymous(walk->vma) && pte_is_uffd_wp_marker(pteval)) {
+		const softleaf_t entry = softleaf_from_pte(pteval);
+
+		set_pte_at(walk->mm, addr, pte,
+			   make_pte_marker(softleaf_to_marker(entry) |
+					   PTE_MARKER_GUARD));
+		update_mmu_cache(walk->vma, addr, pte);
+		(*nr_pages)++;
+
+		return 0;
+	}
+
 	/* If populated return >0 so we abort the operation + zap. */
 	return 1;
 }
@@ -1259,8 +1276,15 @@ static int guard_remove_pte_entry(pte_t *pte, unsigned long addr,
 	pte_t ptent = ptep_get(pte);
 
 	if (is_guard_pte_marker(ptent)) {
-		/* Simply clear the PTE marker. */
-		pte_clear(walk->mm, addr, pte);
+		const softleaf_t entry = softleaf_from_pte(ptent);
+		const pte_marker marker = softleaf_to_marker(entry) &
+					  ~PTE_MARKER_GUARD;
+
+		/* Clear the guard bit and keep the uffd-wp bit, if set. */
+		if (marker)
+			set_pte_at(walk->mm, addr, pte, make_pte_marker(marker));
+		else
+			pte_clear(walk->mm, addr, pte);
 		update_mmu_cache(walk->vma, addr, pte);
 	}
 

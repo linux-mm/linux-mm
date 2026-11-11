@@ -578,6 +578,10 @@ static inline bool pte_is_uffd_marker(pte_t pte)
 	if (!softleaf_is_marker(entry))
 		return false;
 
+	/* A guard marker stays a guard, even with the uffd-wp bit set. */
+	if (softleaf_is_guard_marker(entry))
+		return false;
+
 	/* UFFD WP, poisoned swap entries are UFFD-handled. */
 	if (softleaf_is_uffd_wp_marker(entry))
 		return true;
