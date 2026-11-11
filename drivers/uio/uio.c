@@ -733,9 +733,80 @@ static int uio_mmap_logical(struct vm_area_struct *vma)
 	return 0;
 }
 
+/*
+ * Populate UIO physical mappings on fault, using a PMD or PUD mapping where the
+ * architecture, the fault address and the pfn allow it.
+ */
+static vm_fault_t uio_physical_huge_fault(struct vm_fault *vmf,
+					  unsigned int order)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	unsigned long addr = vmf->address & ~((PAGE_SIZE << order) - 1);
+	struct uio_device *idev = vma->vm_private_data;
+	vm_fault_t ret = VM_FAULT_SIGBUS;
+	unsigned long pfn;
+
+	/*
+	 * vm_pgoff is the base pfn of the mapping (see uio_mmap_physical()).
+	 * vmf_pfn_order_ok() ignores pfn if the window starts below vm_start.
+	 */
+	pfn = vma->vm_pgoff + ((addr - vma->vm_start) >> PAGE_SHIFT);
+	if (!vmf_pfn_order_ok(vmf, pfn, order))
+		return VM_FAULT_FALLBACK;
+
+	mutex_lock(&idev->info_lock);
+
+	if (idev->info)
+		ret = vmf_insert_pfn_order(vmf, pfn, order);
+
+	mutex_unlock(&idev->info_lock);
+
+	return ret;
+}
+
+static vm_fault_t uio_physical_fault(struct vm_fault *vmf)
+{
+	return uio_physical_huge_fault(vmf, 0);
+}
+
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+/*
+ * generic_access_phys() only follows present PTEs, and a lazily populated
+ * mapping has none for pages the target has not touched yet. Fault the page in
+ * first (through the handlers above, so info_lock is honoured), so that remote
+ * access (ptrace, /proc/pid/mem) keeps working.
+ *
+ * fixup_user_fault() refuses a fault the vma does not permit, so an untouched
+ * page of a mapping without VM_READ stays unreadable, where the eager mapping
+ * left a present PTE.
+ */
+static int uio_physical_access(struct vm_area_struct *vma, unsigned long addr,
+			       void *buf, int len, int write)
+{
+	unsigned int fault_flags = FAULT_FLAG_REMOTE;
+
+	if (write)
+		fault_flags |= FAULT_FLAG_WRITE;
+
+	/*
+	 * COW mappings are populated at mmap() time, and a write fault would
+	 * copy the page instead. With unlocked == NULL, fixup_user_fault()
+	 * keeps the mmap lock held and the vma valid.
+	 */
+	if (!vma_is_cow_mapping(vma))
+		fixup_user_fault(vma->vm_mm, addr, fault_flags, NULL);
+
+	return generic_access_phys(vma, addr, buf, len, write);
+}
+#endif
+
 static const struct vm_operations_struct uio_physical_vm_ops = {
 #ifdef CONFIG_HAVE_IOREMAP_PROT
-	.access = generic_access_phys,
+	.access = uio_physical_access,
+#endif
+	.fault = uio_physical_fault,
+#ifdef CONFIG_ARCH_SUPPORTS_HUGE_PFNMAP
+	.huge_fault = uio_physical_huge_fault,
 #endif
 };
 
@@ -767,11 +838,30 @@ static int uio_mmap_physical(struct vm_area_struct *vma)
 	 * So we just do the physical mmap without a page
 	 * offset.
 	 */
-	return remap_pfn_range(vma,
-			       vma->vm_start,
-			       mem->addr >> PAGE_SHIFT,
-			       vma->vm_end - vma->vm_start,
-			       vma->vm_page_prot);
+	if (vma_is_cow_mapping(vma)) {
+		/* COW mappings cannot be populated on fault: map them now. */
+		return remap_pfn_range(vma,
+				       vma->vm_start,
+				       mem->addr >> PAGE_SHIFT,
+				       vma->vm_end - vma->vm_start,
+				       vma->vm_page_prot);
+	}
+
+	/*
+	 * Populate on fault (see uio_physical_huge_fault()). Tracking the PFN
+	 * range keeps its memory type reserved, for PAT conflict detection.
+	 *
+	 * vm_pgoff holds the map index, which the fault handler cannot use:
+	 * splitting the VMA adds the page offset of the split to vm_pgoff of
+	 * the upper part, so uio_find_mem_index() then returns the wrong map,
+	 * or none, and the start of that part would be mapped to mem->addr.
+	 * Store the base pfn instead, as remap_pfn_range() does for COW
+	 * mappings; VMA splits then keep vm_pgoff correct for each part.
+	 */
+	vma->vm_pgoff = mem->addr >> PAGE_SHIFT;
+
+	return pfn_range_track(vma, vma->vm_start, mem->addr >> PAGE_SHIFT,
+			       vma->vm_end - vma->vm_start);
 }
 
 static int uio_mmap_dma_coherent(struct vm_area_struct *vma)
