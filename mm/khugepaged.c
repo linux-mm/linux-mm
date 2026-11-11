@@ -2597,8 +2597,12 @@ xa_locked:
 xa_unlocked:
 
 	/*
-	 * Flush before copying the folios, or releasing them in rollback.
-	 * This is a no-op if out_unlock already flushed the batch.
+	 * try_to_unmap() flush must be done now before copying, regardless
+	 * of success or not. In case of success, folios are about to be
+	 * copied and collapsed onto a single large folio. In that case,
+	 * stale TLB entries need to be flushed out, so no racing write may
+	 * get lost. In case of failure, stale TLB entries need to be flushed
+	 * out before putting the folio (which can possibly free it).
 	 */
 	try_to_unmap_flush();
 
