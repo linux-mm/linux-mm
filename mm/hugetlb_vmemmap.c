@@ -158,10 +158,8 @@ static int vmemmap_remap_range(unsigned long start, unsigned long end,
 
 	VM_BUG_ON(!PAGE_ALIGNED(start | end));
 
-	mmap_read_lock(&init_mm);
 	ret = walk_kernel_page_table_range(start, end, &vmemmap_remap_ops,
 				    NULL, walk);
-	mmap_read_unlock(&init_mm);
 	if (ret)
 		return ret;
 
@@ -308,6 +306,9 @@ static inline int vmemmap_restore_range(unsigned long start, unsigned long end,
  * is skipped, the caller must flush TLBs after all pteify operations are complete
  * before remapping the folio's vmemmap pages.
  *
+ * Note: The caller must hold init_mm's mmap write lock for all pteify operations
+ * and the final TLB flush.
+ *
  * Return: %0 on success, negative error code otherwise.
  */
 static int vmemmap_pteify_folio(const struct folio *folio, unsigned long flags)
@@ -317,6 +318,8 @@ static int vmemmap_pteify_folio(const struct folio *folio, unsigned long flags)
 	struct vmemmap_remap_walk walk = {
 		.flags		= flags,
 	};
+
+	mmap_assert_write_locked(&init_mm);
 
 	return vmemmap_remap_range(start, end, &walk);
 }
@@ -358,6 +361,7 @@ static int vmemmap_optimize_folio(const struct folio *folio,
 	if (ret)
 		return ret;
 
+	guard(mmap_read_lock)(&init_mm);
 	ret = vmemmap_remap_range(start, end, &walk);
 	if (!ret || !walk.nr_walked)
 		return ret;
@@ -391,6 +395,8 @@ static int vmemmap_restore_folio(const struct folio *folio, unsigned long flags)
 				      nid, GFP_KERNEL);
 	if (ret)
 		return ret;
+
+	guard(mmap_read_lock)(&init_mm);
 
 	return vmemmap_restore_range(start, end, &vmemmap_pages, flags);
 }
@@ -559,6 +565,7 @@ void hugetlb_vmemmap_optimize_folios(struct hstate *h, struct list_head *folio_l
 	if (list_empty(folio_list))
 		return;
 
+	mmap_write_lock(&init_mm);
 	list_for_each_entry(folio, folio_list, lru) {
 		int ret;
 
@@ -583,10 +590,12 @@ void hugetlb_vmemmap_optimize_folios(struct hstate *h, struct list_head *folio_l
 			break;
 	}
 
+	if (nr_to_optimize)
+		flush_tlb_all();
+	mmap_write_unlock(&init_mm);
+
 	if (!nr_to_optimize)
 		return;
-
-	flush_tlb_all();
 
 	list_for_each_entry(folio, folio_list, lru) {
 		int ret;
