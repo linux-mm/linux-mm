@@ -550,18 +550,21 @@ static void wb_domain_writeout_add(struct wb_domain *dom,
 				   struct fprop_local_percpu *completions,
 				   unsigned int max_prop_frac, long nr)
 {
+	unsigned long period_time;
+
 	__fprop_add_percpu_max(&dom->completions, completions,
 			       max_prop_frac, nr);
 	/* First event after period switching was turned off? */
-	if (unlikely(!dom->period_time)) {
+	if (unlikely(!READ_ONCE(dom->period_time))) {
 		/*
 		 * We can race with other wb_domain_writeout_add calls here but
 		 * it does not cause any harm since the resulting time when
 		 * timer will fire and what is in writeout_period_time will be
 		 * roughly the same.
 		 */
-		dom->period_time = wp_next_time(jiffies);
-		mod_timer(&dom->period_timer, dom->period_time);
+		period_time = wp_next_time(jiffies);
+		WRITE_ONCE(dom->period_time, period_time);
+		mod_timer(&dom->period_timer, period_time);
 	}
 }
 
@@ -590,19 +593,21 @@ static inline void __wb_writeout_add(struct bdi_writeback *wb, long nr)
 static void writeout_period(struct timer_list *t)
 {
 	struct wb_domain *dom = timer_container_of(dom, t, period_timer);
-	int miss_periods = (jiffies - dom->period_time) /
+	unsigned long period_time = READ_ONCE(dom->period_time);
+	int miss_periods = (jiffies - period_time) /
 						 VM_COMPLETIONS_PERIOD_LEN;
 
 	if (fprop_new_period(&dom->completions, miss_periods + 1)) {
-		dom->period_time = wp_next_time(dom->period_time +
+		period_time = wp_next_time(period_time +
 				miss_periods * VM_COMPLETIONS_PERIOD_LEN);
-		mod_timer(&dom->period_timer, dom->period_time);
+		WRITE_ONCE(dom->period_time, period_time);
+		mod_timer(&dom->period_timer, period_time);
 	} else {
 		/*
 		 * Aging has zeroed all fractions. Stop wasting CPU on period
 		 * updates.
 		 */
-		dom->period_time = 0;
+		WRITE_ONCE(dom->period_time, 0);
 	}
 }
 
