@@ -53,6 +53,21 @@ config PERCPU_COUNTER_TREE_KUNIT_TEST
 
 	  When in doubt, say N.
 
+config PERCPU_COUNTER_TREE_BENCH
+	tristate "Benchmark of hierarchical per-cpu counters"
+	depends on KUNIT && SMP
+	help
+	  This builds a KUnit benchmark comparing the hierarchical per-cpu
+	  counters with struct percpu_counter: update cost with all online
+	  CPUs updating shared and private counters, and init/destroy cost.
+	  It runs for a few minutes on large machines.
+
+	  The batch size and the tree shape can be changed with the
+	  percpu_counter_tree_bench.batch= and percpu_counter_tree.arity=
+	  parameters, see lib/tests/percpu_counter_tree_bench.c.
+
+	  When in doubt, say N.
+
 config BITREVERSE
 	tristate
 	select GENERIC_BITREVERSE if !HAVE_ARCH_BITREVERSE
