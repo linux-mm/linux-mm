@@ -1205,6 +1205,15 @@ static void __migrate_device_pages(unsigned long *src_pfns,
 		}
 
 
+		/*
+		 * KSM doesn't know not to try to read device private pages, so
+		 * disallow the combination.
+		 */
+		if (folio_is_device_private(newfolio) && folio_test_ksm(folio)) {
+			src_pfns[i] &= ~MIGRATE_PFN_MIGRATE;
+			goto next;
+		}
+
 		if (folio_is_device_private(newfolio) ||
 		    folio_is_device_coherent(newfolio)) {
 			if (mapping) {
