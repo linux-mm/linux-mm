@@ -126,7 +126,7 @@ static unsigned long release_free_list(struct list_head *freepages)
  */
 static void defer_compaction(struct zone *zone, int order)
 {
-	zone->compact_considered = 0;
+	WRITE_ONCE(zone->compact_considered, 0);
 	zone->compact_defer_shift++;
 
 	if (order < zone->compact_order_failed)
@@ -142,15 +142,16 @@ static void defer_compaction(struct zone *zone, int order)
 static bool compaction_deferred(struct zone *zone, int order)
 {
 	unsigned long defer_limit = 1UL << zone->compact_defer_shift;
+	unsigned long considered;
 
 	if (order < zone->compact_order_failed)
 		return false;
 
-	/* Avoid possible overflow */
-	if (++zone->compact_considered >= defer_limit) {
-		zone->compact_considered = defer_limit;
+	/* This is a heuristic; concurrent updates may be lost. */
+	considered = READ_ONCE(zone->compact_considered) + 1;
+	WRITE_ONCE(zone->compact_considered, min(considered, defer_limit));
+	if (considered >= defer_limit)
 		return false;
-	}
 
 	trace_mm_compaction_deferred(zone, order);
 
@@ -166,7 +167,7 @@ void compaction_defer_reset(struct zone *zone, int order,
 		bool alloc_success)
 {
 	if (alloc_success) {
-		zone->compact_considered = 0;
+		WRITE_ONCE(zone->compact_considered, 0);
 		zone->compact_defer_shift = 0;
 	}
 	if (order >= zone->compact_order_failed)
@@ -182,7 +183,7 @@ static bool compaction_restarting(struct zone *zone, int order)
 		return false;
 
 	return zone->compact_defer_shift == COMPACT_MAX_DEFER_SHIFT &&
-		zone->compact_considered >= 1UL << zone->compact_defer_shift;
+		READ_ONCE(zone->compact_considered) >= 1UL << zone->compact_defer_shift;
 }
 
 /* Returns true if the pageblock should be scanned for pages to isolate. */
