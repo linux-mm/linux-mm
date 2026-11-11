@@ -1799,7 +1799,7 @@ void folio_add_file_rmap_pud(struct folio *folio, struct page *page,
 
 static __always_inline void __folio_remove_rmap(struct folio *folio,
 		struct page *page, int nr_pages, struct vm_area_struct *vma,
-		enum pgtable_level level)
+		enum pgtable_level level, bool may_defer_split)
 {
 	atomic_t *mapped = &folio->_nr_pages_mapped;
 	int last = 0, nr = 0, nr_pmdmapped = 0;
@@ -1888,8 +1888,13 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 	 *
 	 * Device private folios do not support deferred splitting and
 	 * shrinker based scanning of the folios to free.
+	 *
+	 * Skip this if the caller is only replacing the mappings with
+	 * migration entries. The folio is not really becoming partially
+	 * mapped. Once the split or migration finishes, every migration
+	 * entry becomes a mapping again.
 	 */
-	if (partially_mapped && folio_test_anon(folio) &&
+	if (may_defer_split && partially_mapped && folio_test_anon(folio) &&
 	    !folio_test_partially_mapped(folio) &&
 	    !folio_is_device_private(folio))
 		deferred_split_folio(folio, true);
@@ -1921,7 +1926,7 @@ static __always_inline void __folio_remove_rmap(struct folio *folio,
 void folio_remove_rmap_ptes(struct folio *folio, struct page *page,
 		int nr_pages, struct vm_area_struct *vma)
 {
-	__folio_remove_rmap(folio, page, nr_pages, vma, PGTABLE_LEVEL_PTE);
+	__folio_remove_rmap(folio, page, nr_pages, vma, PGTABLE_LEVEL_PTE, true);
 }
 
 /**
@@ -1938,7 +1943,8 @@ void folio_remove_rmap_pmd(struct folio *folio, struct page *page,
 		struct vm_area_struct *vma)
 {
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
-	__folio_remove_rmap(folio, page, HPAGE_PMD_NR, vma, PGTABLE_LEVEL_PMD);
+	__folio_remove_rmap(folio, page, HPAGE_PMD_NR, vma, PGTABLE_LEVEL_PMD,
+			    true);
 #else
 	WARN_ON_ONCE(true);
 #endif
@@ -1959,7 +1965,8 @@ void folio_remove_rmap_pud(struct folio *folio, struct page *page,
 {
 #if defined(CONFIG_TRANSPARENT_HUGEPAGE) && \
 	defined(CONFIG_HAVE_ARCH_TRANSPARENT_HUGEPAGE_PUD)
-	__folio_remove_rmap(folio, page, HPAGE_PUD_NR, vma, PGTABLE_LEVEL_PUD);
+	__folio_remove_rmap(folio, page, HPAGE_PUD_NR, vma, PGTABLE_LEVEL_PUD,
+			    true);
 #else
 	WARN_ON_ONCE(true);
 #endif
@@ -2516,6 +2523,8 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 	mmu_notifier_invalidate_range_start(&range);
 
 	while (page_vma_mapped_walk(&pvmw)) {
+		bool may_defer_split = true;
+
 		/* PMD-mapped THP migration entry */
 		if (!pvmw.pte) {
 			__maybe_unused unsigned long pfn;
@@ -2772,12 +2781,20 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			 * No need to invalidate here it will synchronize on
 			 * against the special swap migration pte.
 			 */
+
+			/*
+			 * The folio only looks partially unmapped while this PTE
+			 * holds a migration entry, which is later turned back
+			 * into a mapping. Don't queue it for deferred split.
+			 */
+			may_defer_split = false;
 		}
 
 		if (unlikely(folio_test_hugetlb(folio)))
 			hugetlb_remove_rmap(folio);
 		else
-			folio_remove_rmap_pte(folio, subpage, vma);
+			__folio_remove_rmap(folio, subpage, 1, vma,
+					    PGTABLE_LEVEL_PTE, may_defer_split);
 		if (vma_test_any_mask(vma, VMA_LOCKED_MASK))
 			mlock_drain_local();
 		folio_put(folio);
