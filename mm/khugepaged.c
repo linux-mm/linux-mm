@@ -2314,7 +2314,8 @@ prepare_collapse_file_folio(pgoff_t index, struct collapse_file_state *state)
 		 * will not succeed.
 		 */
 		lru_add_drain();
-		goto xa_unlocked;
+		state->folio = folio;
+		return SCAN_SUCCEED;
 	}
 
 	if (!is_shmem) {
@@ -2337,31 +2338,19 @@ prepare_collapse_file_folio(pgoff_t index, struct collapse_file_state *state)
 			xas_unlock_irq(state->xas);
 			if (dirty && !inode_is_open_for_write(mapping->host))
 				filemap_flush(mapping);
-			result = SCAN_PAGE_DIRTY_OR_WRITEBACK;
-			goto xa_unlocked;
+			return SCAN_PAGE_DIRTY_OR_WRITEBACK;
 		}
 	}
 
-	if (is_shmem) {
-		if (folio_trylock(folio)) {
-			folio_get(folio);
-		} else {
-			result = SCAN_PAGE_LOCK;
-			goto xa_locked;
-		}
-	} else {	/* !is_shmem */
-		if (folio_trylock(folio)) {
-			folio_get(folio);
-		} else {
-			result = SCAN_PAGE_LOCK;
-			goto xa_locked;
-		}
-	}
-
-xa_locked:
+	/*
+	 * Note: trylock + simple folio_get() is safe here due to the i_pages
+	 * lock being held; this excludes truncation happening in parallel.
+	 */
+	if (!folio_trylock(folio))
+		result = SCAN_PAGE_LOCK;
+	else
+		folio_get(folio);
 	xas_unlock_irq(state->xas);
-xa_unlocked:
-	state->folio = folio;
 	return result;
 }
 
