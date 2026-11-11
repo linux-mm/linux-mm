@@ -2866,10 +2866,25 @@ static vm_fault_t insert_pfn(struct vm_area_struct *vma, unsigned long addr,
 	struct mm_struct *mm = vma->vm_mm;
 	pte_t *pte, entry;
 	spinlock_t *ptl;
+	pmd_t *pmd;
 
-	pte = get_locked_pte(mm, addr, &ptl);
-	if (!pte)
+	pmd = walk_to_pmd(mm, addr);
+	if (!pmd)
 		return VM_FAULT_OOM;
+
+	pte = pte_alloc_map_lock(mm, pmd, addr, &ptl);
+	if (!pte) {
+		/*
+		 * A concurrent ->huge_fault may have installed a PMD leaf over
+		 * addr, which pte_offset_map_lock() refuses to walk. The
+		 * mapping is fine, so let the access refault instead of
+		 * reporting a failed allocation.
+		 */
+		if (pmd_trans_huge(pmdp_get_lockless(pmd)))
+			return VM_FAULT_NOPAGE;
+		return VM_FAULT_OOM;
+	}
+
 	entry = ptep_get(pte);
 	if (!pte_none(entry)) {
 		if (mkwrite) {
