@@ -28,5 +28,9 @@ binfmt_transparent_interp
 binfmt_misc_loader
 binfmt_loader_payload
 binfmt_loader_payload_static
+binfmt_bind_interp
+binfmt_misc_delim
+binfmt_misc_disabled
+binfmt_misc_selfpin
 *.bpf.o
 vmlinux.h
