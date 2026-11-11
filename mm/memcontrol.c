@@ -391,7 +391,14 @@ ino_t page_cgroup_ino(const struct page *page)
 }
 EXPORT_SYMBOL_GPL(page_cgroup_ino);
 
-/* Subset of node_stat_item for memcg stats */
+/*
+ * Subset of node_stat_item for memcg stats.
+ *
+ * Stats whose node counters can also count memory that isn't charged to a memcg
+ * must be listed in node_stat_includes_unaccounted(). Otherwise,
+ * lruvec_page_state() returns the node counter for them for the root memcg,
+ * which can be larger than the root memcg's actual value.
+ */
 static const unsigned int memcg_node_stat_items[] = {
 	NR_INACTIVE_ANON,
 	NR_ACTIVE_ANON,
@@ -506,13 +513,52 @@ struct lruvec_stats {
 	long state_pending[NR_MEMCG_NODE_STAT_ITEMS];
 };
 
+/*
+ * Whether the node counter for @idx can also count memory that isn't charged
+ * to a memcg (eg kernel memory that isn't accounted). For these stats, the
+ * node counter can be larger than the root memcg's value, so the root memcg
+ * has to read its rstat value instead.
+ */
+static bool node_stat_includes_unaccounted(enum node_stat_item idx)
+{
+	switch (idx) {
+	case NR_SLAB_RECLAIMABLE_B:
+	case NR_SLAB_UNRECLAIMABLE_B:
+	case WORKINGSET_NODERECLAIM:
+	case NR_VMALLOC:
+	case NR_KERNEL_STACK_KB:
+	case NR_PAGETABLE:
+	case NR_SECONDARY_PAGETABLE:
+#ifdef CONFIG_HUGETLB_PAGE
+	case NR_HUGETLB:
+#endif
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * Whether @lruvec should read the node counter for @idx instead of its rstat
+ * value. For the root memcg, stats that only count memory charged to a memcg
+ * have the same hierarchical value as the node counter. The node counter is
+ * preferred since it is always up to date, whereas the rstat value needs a
+ * flush, which for the root memcg flushes every cgroup in the system.
+ */
+static bool lruvec_use_node_stat(const struct lruvec *lruvec,
+				 enum node_stat_item idx)
+{
+	return mem_cgroup_is_root(lruvec_memcg(lruvec)) &&
+	       !node_stat_includes_unaccounted(idx);
+}
+
 unsigned long lruvec_page_state(const struct lruvec *lruvec, enum node_stat_item idx)
 {
 	const struct mem_cgroup_per_node *pn;
 	long x;
 	int i;
 
-	if (mem_cgroup_disabled())
+	if (mem_cgroup_disabled() || lruvec_use_node_stat(lruvec, idx))
 		return node_page_state(lruvec_pgdat(lruvec), idx);
 
 	i = memcg_stats_index(idx);
@@ -553,7 +599,7 @@ unsigned long lruvec_page_state_monotonic(const struct lruvec *lruvec,
 	const struct mem_cgroup_per_node *pn;
 	int i;
 
-	if (mem_cgroup_disabled())
+	if (mem_cgroup_disabled() || lruvec_use_node_stat(lruvec, idx))
 		return node_page_state_monotonic(lruvec_pgdat(lruvec), idx);
 
 	i = memcg_stats_index(idx);
