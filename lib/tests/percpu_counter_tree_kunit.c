@@ -612,6 +612,177 @@ static void hpcc_test_contended_carries(struct kunit *test)
 		do_hpcc_test_contended_carries(test, 1UL << batch_size_order);
 }
 
+#define LIMIT_NR_OPS	100000
+
+struct limit_shared {
+	struct percpu_counter_tree_limit limit;
+	unsigned long max;
+	unsigned long target;		/* Amount each worker tries to hold. */
+	unsigned long batch_size;
+	atomic_long_t charged;		/* Exact total of the successful additions held. */
+	atomic_long_t nr_over;		/* Times charged exceeded max. */
+	atomic_long_t nr_added, nr_failed;
+	atomic_t nr_ready;
+	unsigned int nr_workers;
+	bool started;
+};
+
+struct limit_data {
+	struct limit_shared *sh;
+	unsigned long held;
+	u32 seed;
+} ____cacheline_aligned_in_smp;
+
+static DECLARE_WAIT_QUEUE_HEAD(limit_wq);
+
+static u32 limit_rnd(struct limit_data *ld)
+{
+	u32 x = ld->seed;
+
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	ld->seed = x;
+	return x;
+}
+
+/*
+ * Each worker adds to the limit counter until it holds its target. Then
+ * it frees part of what it holds. Together, the workers hold about 1.5
+ * times the limit, so additions fail. A successful addition is added to
+ * charged after it succeeds. A free subtracts from charged before it
+ * reaches the limit counter. So charged is never above the value of the
+ * limit counter. Charged above max means the limit was exceeded.
+ */
+static int limit_worker_fn(void *data)
+{
+	struct limit_data *ld = data;
+	struct limit_shared *sh = ld->sh;
+	unsigned int i;
+
+	/* Pairs with the release of started: max, target and nr_workers are set. */
+	wait_event(limit_wq, smp_load_acquire(&sh->started));
+	/* Start together, so that the workers hold their amounts at the same time. */
+	atomic_inc(&sh->nr_ready);
+	while (atomic_read(&sh->nr_ready) < sh->nr_workers)
+		cpu_relax();
+	for (i = 0; i < LIMIT_NR_OPS; i++) {
+		u32 x = limit_rnd(ld);
+		unsigned long amount;
+
+		if (ld->held < sh->target) {
+			/* Mostly small amounts, and one in 16 of a huge page. */
+			if ((x >> 4) & 15)
+				amount = 1 + (x >> 8) % (4 * sh->batch_size);
+			else
+				amount = 512;
+			if (percpu_counter_tree_limit_add(&sh->limit, sh->max, amount)) {
+				unsigned long charged;
+
+				charged = atomic_long_add_return(amount, &sh->charged);
+				if (charged > sh->max)
+					atomic_long_inc(&sh->nr_over);
+				ld->held += amount;
+				atomic_long_inc(&sh->nr_added);
+			} else {
+				atomic_long_inc(&sh->nr_failed);
+			}
+		} else if (ld->held) {
+			amount = 1 + (x >> 8) % ld->held;
+			atomic_long_sub(amount, &sh->charged);
+			percpu_counter_tree_limit_sub(&sh->limit, amount);
+			ld->held -= amount;
+		}
+		if (!(i & 63))
+			cond_resched();
+	}
+	atomic_long_sub(ld->held, &sh->charged);
+	percpu_counter_tree_limit_sub(&sh->limit, ld->held);
+	ld->held = 0;
+	complete_work();
+	return 0;
+}
+
+static void do_hpcc_test_limit(struct kunit *test, unsigned long batch_size)
+{
+	struct limit_shared *sh;
+	struct limit_data *ld;
+	struct task_struct **task;
+	const struct cpumask *cpus;
+	unsigned int nr_workers = 0;
+	unsigned long accuracy;
+	int ret, cpu;
+
+	sh = kzalloc_obj(*sh);
+	ld = kvcalloc(nr_cpu_ids, sizeof(*ld), GFP_KERNEL);
+	task = kvcalloc(nr_cpu_ids, sizeof(*task), GFP_KERNEL);
+	KUNIT_EXPECT_NOT_NULL(test, sh);
+	KUNIT_EXPECT_NOT_NULL(test, ld);
+	KUNIT_EXPECT_NOT_NULL(test, task);
+	if (!sh || !ld || !task)
+		goto free;
+	ret = percpu_counter_tree_limit_init(&sh->limit, batch_size, GFP_KERNEL);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	if (ret)
+		goto free;
+	accuracy = percpu_counter_tree_approximate_accuracy(&sh->limit.counters[0]);
+	/* A limit of twice the accuracy, oversubscribed twice: mostly within its accuracy. */
+	sh->max = 2 * accuracy + 1;
+	sh->batch_size = batch_size;
+	init_kthreads();
+	cpus_read_lock();
+	cpus = select_worker_cpus();
+	sh->target = 2 * sh->max / cpumask_weight(cpus) + 512;
+	for_each_cpu(cpu, cpus) {
+		ld[cpu].sh = sh;
+		ld[cpu].seed = get_random_u32() | 1;
+		task[cpu] = kthread_create_on_cpu(limit_worker_fn, &ld[cpu], cpu,
+						  "kunit_hpcc_limit/%u");
+		KUNIT_EXPECT_FALSE(test, IS_ERR(task[cpu]));
+		if (IS_ERR(task[cpu]))
+			break;
+		atomic_inc(&kernel_threads_to_run);
+		get_task_struct(task[cpu]);
+		wake_up_process(task[cpu]);
+		nr_workers++;
+	}
+	sh->nr_workers = nr_workers;
+	/* Start the workers once their number is known, see limit_worker_fn(). */
+	smp_store_release(&sh->started, true);
+	wake_up_all(&limit_wq);
+	fini_kthreads();
+	for_each_cpu(cpu, cpus) {
+		if (!IS_ERR_OR_NULL(task[cpu]))
+			kthread_stop_put(task[cpu]);
+	}
+	cpus_read_unlock();
+
+	kunit_info(test, "batch_size=%lu workers=%u max=%lu added=%ld failed=%ld over=%ld\n",
+		   batch_size, nr_workers, sh->max, atomic_long_read(&sh->nr_added),
+		   atomic_long_read(&sh->nr_failed), atomic_long_read(&sh->nr_over));
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&sh->nr_over), 0);
+	KUNIT_EXPECT_GT(test, atomic_long_read(&sh->nr_failed), 0);
+	KUNIT_EXPECT_EQ(test, percpu_counter_tree_limit_precise_sum(&sh->limit), 0);
+	percpu_counter_tree_limit_destroy(&sh->limit);
+free:
+	kvfree(task);
+	kvfree(ld);
+	kfree(sh);
+}
+
+/*
+ * Workers on all the worker CPUs add to and subtract from a limit counter
+ * held near its limit. The limit is never exceeded, and the value is back
+ * to 0 once all the workers freed what they held.
+ */
+static void hpcc_test_limit(struct kunit *test)
+{
+	if (num_online_cpus() < 2)
+		kunit_skip(test, "needs at least 2 online CPUs");
+	do_hpcc_test_limit(test, 2);
+	do_hpcc_test_limit(test, 32);
+}
+
 static void hpcc_test_init_one(struct kunit *test)
 {
 	struct percpu_counter_tree pct, zeroed = {};
@@ -1038,6 +1209,7 @@ static struct kunit_case hpcc_test_cases[] = {
 	KUNIT_CASE(hpcc_test_set),
 	KUNIT_CASE(hpcc_test_saturated_compare),
 	KUNIT_CASE(hpcc_test_contended_carries),
+	KUNIT_CASE_SLOW(hpcc_test_limit),
 	KUNIT_CASE(hpcc_test_lazy),
 	KUNIT_CASE(hpcc_test_lazy_activation_race),
 	{}
