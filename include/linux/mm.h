@@ -4733,6 +4733,23 @@ static inline void mmap_action_ioremap_full(struct vm_area_desc *desc,
 }
 
 /**
+ * mmap_action_pfn_track - helper for mmap_prepare hook to specify that the PFN
+ * range backing the entirety of a VMA should be tracked, but not mapped.
+ * @desc: The VMA descriptor for the VMA.
+ * @start_pfn: The first PFN in the range.
+ *
+ * The VMA is set up as for mmap_action_remap_full(), but no page tables are
+ * populated: the mapping is populated on demand from the driver's fault
+ * handler. Must not be used for a COW mapping. See pfn_range_track().
+ */
+static inline void mmap_action_pfn_track(struct vm_area_desc *desc,
+					 unsigned long start_pfn)
+{
+	mmap_action_remap_full(desc, start_pfn);
+	desc->action.type = MMAP_PFN_TRACK;
+}
+
+/**
  * mmap_action_simple_ioremap - helper for mmap_prepare hook to specify that the
  * physical range in [start_phys_addr, start_phys_addr + size) should be I/O
  * remapped.
@@ -4953,6 +4970,8 @@ struct vm_area_struct *find_extend_vma_locked(struct mm_struct *,
 		unsigned long addr);
 int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
 		    unsigned long pfn, unsigned long size, pgprot_t pgprot);
+int pfn_range_track(struct vm_area_struct *vma, unsigned long addr,
+		    unsigned long pfn, unsigned long size);
 
 int vm_insert_page(struct vm_area_struct *, unsigned long addr, struct page *);
 int vm_insert_pages(struct vm_area_struct *vma, unsigned long addr,
@@ -4971,6 +4990,34 @@ vm_fault_t vmf_insert_mixed(struct vm_area_struct *vma, unsigned long addr,
 			unsigned long pfn);
 vm_fault_t vmf_insert_mixed_mkwrite(struct vm_area_struct *vma,
 		unsigned long addr, unsigned long pfn);
+vm_fault_t vmf_insert_pfn_order(struct vm_fault *vmf, unsigned long pfn,
+				unsigned int order);
+
+/**
+ * vmf_pfn_order_ok - check that a pfn can be mapped at a given fault order
+ * @vmf: The fault being handled.
+ * @pfn: The pfn to map at the start of the order-aligned fault window.
+ * @order: The fault order (0 for a single page).
+ *
+ * For a huge (order > 0) fault, the order-aligned window around @vmf->address
+ * must lie within the VMA and @pfn must be aligned to @order. @pfn is only
+ * looked at once the window is known to lie within the VMA, so a caller may
+ * compute it before calling, even when the window starts below vm_start.
+ *
+ * Return: true if vmf_insert_pfn_order() may map @pfn at @order, false if the
+ * fault should fall back to a smaller order.
+ */
+static inline bool vmf_pfn_order_ok(const struct vm_fault *vmf,
+				    unsigned long pfn, unsigned int order)
+{
+	const struct vm_area_struct *vma = vmf->vma;
+	unsigned long addr = vmf->address & ~((PAGE_SIZE << order) - 1);
+
+	return !order || (addr >= vma->vm_start &&
+			  addr + (PAGE_SIZE << order) <= vma->vm_end &&
+			  IS_ALIGNED(pfn, 1UL << order));
+}
+
 int vm_iomap_memory(struct vm_area_struct *vma, phys_addr_t start, unsigned long len);
 
 static inline vm_fault_t vmf_insert_page(struct vm_area_struct *vma,

@@ -3002,6 +3002,55 @@ vm_fault_t vmf_insert_pfn(struct vm_area_struct *vma, unsigned long addr,
 }
 EXPORT_SYMBOL(vmf_insert_pfn);
 
+/**
+ * vmf_insert_pfn_order - insert a pfn mapping of a given fault order
+ * @vmf: The fault being handled.
+ * @pfn: The pfn to map at the start of the order-aligned fault window.
+ * @order: The fault order (0 for a single page).
+ *
+ * Helper for ->fault and ->huge_fault handlers of VM_PFNMAP mappings: maps @pfn
+ * with a PTE for order 0, or with a PMD/PUD for PMD_ORDER/PUD_ORDER where the
+ * architecture supports huge PFN mappings. The caller must have checked the
+ * window and the pfn alignment with vmf_pfn_order_ok().
+ *
+ * vma cannot be a COW mapping.
+ *
+ * Return: vm_fault_t value; %VM_FAULT_FALLBACK if @order cannot be mapped, so
+ * that the fault is retried at a smaller order.
+ */
+vm_fault_t vmf_insert_pfn_order(struct vm_fault *vmf, unsigned long pfn,
+				unsigned int order)
+{
+	struct vm_area_struct *vma = vmf->vma;
+	bool write = vmf->flags & FAULT_FLAG_WRITE;
+
+	if (!order)
+		return vmf_insert_pfn(vma, vmf->address, pfn);
+
+	/*
+	 * vmf_insert_pfn_pmd() refuses the huge zero folio's pfn with SIGBUS,
+	 * while a PTE mapping of it is fine, so fall back to a smaller order.
+	 */
+	if (is_huge_zero_pfn(pfn))
+		return VM_FAULT_FALLBACK;
+
+	/*
+	 * vmf_insert_pfn_pmd()/_pud() don't call pfn_modify_allowed(), unlike
+	 * the order-0 path, so check it explicitly for the L1TF mitigation.
+	 */
+	if (!pfn_modify_allowed(pfn, vma->vm_page_prot))
+		return VM_FAULT_FALLBACK;
+
+	if (IS_ENABLED(CONFIG_ARCH_SUPPORTS_PMD_PFNMAP) && order == PMD_ORDER)
+		return vmf_insert_pfn_pmd(vmf, pfn, write);
+
+	if (IS_ENABLED(CONFIG_ARCH_SUPPORTS_PUD_PFNMAP) && order == PUD_ORDER)
+		return vmf_insert_pfn_pud(vmf, pfn, write);
+
+	return VM_FAULT_FALLBACK;
+}
+EXPORT_SYMBOL_GPL(vmf_insert_pfn_order);
+
 static bool vm_mixed_ok(struct vm_area_struct *vma, unsigned long pfn,
 			bool mkwrite)
 {
@@ -3418,6 +3467,99 @@ int remap_pfn_range_complete(struct vm_area_struct *vma,
 	const pgprot_t prot = action->remap.pgprot;
 
 	return do_remap_pfn_range(vma, start, pfn, size, prot);
+}
+
+#ifdef __HAVE_PFNMAP_TRACKING
+static int do_pfn_range_track(struct vm_area_struct *vma, unsigned long pfn,
+			      unsigned long size)
+{
+	pgprot_t prot = vma->vm_page_prot;
+	struct pfnmap_track_ctx *ctx;
+
+	if (vma->pfnmap_track_ctx)
+		return -EINVAL;
+
+	/*
+	 * prot only receives the reserved cachemode here; the fault-time
+	 * vmf_insert_pfn*() helpers look it up again via
+	 * pfnmap_setup_cachemode_pfn().
+	 */
+	ctx = pfnmap_track_ctx_alloc(pfn, PAGE_ALIGN(size), &prot);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
+
+	vma->pfnmap_track_ctx = ctx;
+	return 0;
+}
+#else
+static int do_pfn_range_track(struct vm_area_struct *vma, unsigned long pfn,
+			      unsigned long size)
+{
+	/* No PFN tracking on this arch; cachemode is left as-is. */
+	return 0;
+}
+#endif
+
+/**
+ * pfn_range_track - reserve and track a PFN range for a VMA without populating
+ * @vma: user vma to track the range for
+ * @addr: target page aligned user address to start at
+ * @pfn: page frame number of kernel physical memory address
+ * @size: size of mapping area
+ *
+ * Reserves the PFN range's memory type (PAT on x86) and attaches a tracking
+ * context to @vma for its lifetime, so that conflicting cache-attribute
+ * mappings of the same physical range are detected, but does not create any
+ * page table entries. Intended for drivers that populate the mapping lazily
+ * from a fault handler (e.g. via vmf_insert_pfn()), where the fault helpers
+ * only look up the cachemode and do not perform the reservation themselves. The
+ * VMA flags remap_pfn_range() would have set are set here too.
+ *
+ * Must cover the whole VMA. Must not be a COW mapping: the fault-driven
+ * vmf_insert_pfn*() helpers cannot populate one. Must be called with the mmap
+ * lock held for writing: it sets VMA flags and attaches the tracking context.
+ *
+ * Return: %0 on success, negative error code otherwise.
+ */
+int pfn_range_track(struct vm_area_struct *vma, unsigned long addr,
+		    unsigned long pfn, unsigned long size)
+{
+	int err;
+
+	if (vma_is_cow_mapping(vma))
+		return -EINVAL;
+
+	if (addr != vma->vm_start || addr + PAGE_ALIGN(size) != vma->vm_end)
+		return -EINVAL;
+
+	err = remap_pfn_range_prepare_vma(vma, addr, pfn, size);
+	if (err)
+		return err;
+
+	return do_pfn_range_track(vma, pfn, size);
+}
+EXPORT_SYMBOL_GPL(pfn_range_track);
+
+int pfn_range_track_prepare(struct vm_area_desc *desc)
+{
+	const struct mmap_action *action = &desc->action;
+
+	/* See pfn_range_track(). */
+	if (vma_desc_is_cow_mapping(desc))
+		return -EINVAL;
+
+	if (action->remap.start != desc->start ||
+	    action->remap.size != vma_desc_size(desc))
+		return -EINVAL;
+
+	return remap_pfn_range_prepare(desc);
+}
+
+int pfn_range_track_complete(struct vm_area_struct *vma,
+			     struct mmap_action *action)
+{
+	return do_pfn_range_track(vma, action->remap.start_pfn,
+				  action->remap.size);
 }
 
 static int __simple_ioremap_prep(unsigned long vm_len, pgoff_t vm_pgoff,
