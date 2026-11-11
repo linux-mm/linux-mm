@@ -3976,6 +3976,11 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 
 	for (index = start; index < end; ) {
 		struct folio *folio;
+		bool unswapped;
+
+		spin_lock(&inode->i_lock);
+		unswapped = shmem_falloc.nr_unswapped > shmem_falloc.nr_falloced;
+		spin_unlock(&inode->i_lock);
 
 		/*
 		 * Check for fatal signal so that we abort early in OOM
@@ -3986,7 +3991,7 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 		 */
 		if (fatal_signal_pending(current))
 			error = -EINTR;
-		else if (shmem_falloc.nr_unswapped > shmem_falloc.nr_falloced)
+		else if (unswapped)
 			error = -ENOMEM;
 		else
 			error = shmem_get_folio(inode, index, offset + len,
@@ -4014,11 +4019,13 @@ static long shmem_fallocate(struct file *file, int mode, loff_t offset,
 
 		/*
 		 * Inform shmem_writeout() how far we have reached.
-		 * No need for lock or barrier: we have the page lock.
+		 * Other folios can be written out while this folio is locked.
 		 */
+		spin_lock(&inode->i_lock);
 		if (!folio_test_uptodate(folio))
 			shmem_falloc.nr_falloced += index - shmem_falloc.next;
 		shmem_falloc.next = index;
+		spin_unlock(&inode->i_lock);
 
 		/*
 		 * If !uptodate, leave it that way so that freeable folios
