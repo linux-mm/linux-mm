@@ -295,7 +295,7 @@ restart:
 			pvmw->ptl = NULL;
 		} else if (!pmd_present(pmde)) {
 			if (pvmw->flags & PVMW_SYNC)
-				sync_with_folio_pmd_zap(mm, pvmw->pmd);
+				sync_with_folio_pmd_zap(mm, pvmw->pmd, pvmw->nr_pages);
 
 			goto next_pmd;
 		}
