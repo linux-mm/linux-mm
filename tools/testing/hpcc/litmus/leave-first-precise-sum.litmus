@@ -1,0 +1,41 @@
+C leave-first-precise-sum
+
+(*
+ * Result: Never
+ *
+ * A carry of percpu_counter_tree_add(), from the level 0 counter l0 to
+ * the root through a middle item. It leaves each level before it
+ * arrives at the next one, with a release. The precise sum reads the
+ * root, the item and level 0, with read barriers. It never counts the
+ * carry twice. This also keeps the sum of the subtractions of a limit
+ * counter from being above their value.
+ *)
+
+{
+	l0=1;
+}
+
+P0(int *l0, atomic_t *item, atomic_t *root)
+{
+	int r;
+
+	r = cmpxchg_relaxed(l0, 1, 0);
+	r = atomic_add_return_release(1, item);
+	r = atomic_cmpxchg_relaxed(item, 1, 0);
+	r = atomic_add_return_release(1, root);
+}
+
+P1(int *l0, atomic_t *item, atomic_t *root)
+{
+	int r0;
+	int r1;
+	int r2;
+
+	r2 = atomic_read(root);
+	smp_rmb();
+	r1 = atomic_read(item);
+	smp_rmb();
+	r0 = READ_ONCE(*l0);
+}
+
+exists ((1:r2=1 /\ 1:r1=1) \/ (1:r2=1 /\ 1:r0=1) \/ (1:r1=1 /\ 1:r0=1))
