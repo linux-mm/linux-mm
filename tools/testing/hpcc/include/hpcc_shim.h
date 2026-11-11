@@ -86,9 +86,45 @@ static inline bool atomic_long_try_cmpxchg_relaxed(atomic_long_t *v, long *old, 
 	return false;
 }
 
-#define atomic_long_add_return(i, v)		((v)->counter += (i))
-#define atomic_long_add_return_release(i, v)	((v)->counter += (i))
-#define atomic_long_try_cmpxchg(v, old, new)	atomic_long_try_cmpxchg_relaxed(v, old, new)
+/*
+ * Stall hook. hpcc_stall_fn() runs once, right after the next ordered
+ * update of hpcc_stall_item. An ordered update is fully ordered or a
+ * release, not relaxed. This simulates an updater interrupted there while
+ * the other CPUs keep running.
+ */
+extern atomic_long_t *hpcc_stall_item;
+extern void (*hpcc_stall_fn)(void);
+
+static inline void hpcc_stall(atomic_long_t *v)
+{
+	void (*fn)(void) = hpcc_stall_fn;
+
+	if (fn && v == hpcc_stall_item) {
+		hpcc_stall_fn = NULL;
+		fn();
+	}
+}
+
+static inline long atomic_long_add_return(long i, atomic_long_t *v)
+{
+	long r = (v->counter += i);
+
+	hpcc_stall(v);
+	return r;
+}
+
+static inline long atomic_long_add_return_release(long i, atomic_long_t *v)
+{
+	return atomic_long_add_return(i, v);
+}
+
+static inline bool atomic_long_try_cmpxchg(atomic_long_t *v, long *old, long new)
+{
+	if (!atomic_long_try_cmpxchg_relaxed(v, old, new))
+		return false;
+	hpcc_stall(v);
+	return true;
+}
 
 /* Simulated topology, and CPU on which the current code runs. */
 extern unsigned int nr_cpu_ids;
