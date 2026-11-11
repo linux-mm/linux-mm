@@ -22,6 +22,7 @@ static int page_size;
 #define PATH_ZSWAP_ENABLED "/sys/module/zswap/parameters/enabled"
 #define PATH_ZSWAP_SHRINKER_ENABLED "/sys/module/zswap/parameters/shrinker_enabled"
 #define PATH_ZSWAP_STORED_PAGES "/sys/kernel/debug/zswap/stored_pages"
+#define PATH_ZSWAP_WRITTEN_BACK_PAGES "/sys/kernel/debug/zswap/written_back_pages"
 
 static int read_int(const char *path, size_t *value)
 {
@@ -241,6 +242,105 @@ static int test_swapin_nozswap(const char *root)
 out:
 	cg_destroy(test_group);
 	free(test_group);
+	return ret;
+}
+
+/* Lowering the limit must also stop stores when old entries can be reclaimed. */
+static int pageout_zero_limit(const char *cgroup, void *arg)
+{
+	const char *limit_group = arg;
+	size_t stored_before, stored_after, wb_before, wb_after;
+	size_t size = 3 * page_size;
+	int fd, ret = -1;
+	char *mem;
+
+	fd = memfd_create("zswap_max_zero", 0);
+	if (fd < 0)
+		return -1;
+	if (ftruncate(fd, size))
+		goto out_close;
+	mem = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (mem == MAP_FAILED)
+		goto out_close;
+	for (int i = 0; i < size; i++)
+		mem[i] = 'a' + i / page_size;
+
+	if (get_zswap_stored_pages(&stored_before))
+		goto out;
+	if (madvise(mem, page_size, MADV_PAGEOUT))
+		goto out;
+	if (get_zswap_stored_pages(&stored_after))
+		goto out;
+	if (stored_after != stored_before + 1) {
+		ksft_print_msg("Failed to seed an old zswap entry\n");
+		goto out;
+	}
+	stored_before = stored_after;
+	if (read_int(PATH_ZSWAP_WRITTEN_BACK_PAGES, &wb_before))
+		goto out;
+	if (cg_write(limit_group, "memory.zswap.max", "0"))
+		goto out;
+
+	/* The first attempt can give the old entry a second chance. */
+	for (int i = 1; i < 3; i++)
+		if (madvise(mem + i * page_size, page_size, MADV_PAGEOUT))
+			goto out;
+
+	if (get_zswap_stored_pages(&stored_after))
+		goto out;
+	if (read_int(PATH_ZSWAP_WRITTEN_BACK_PAGES, &wb_after))
+		goto out;
+	/* Writing back old entries must not hide newly admitted entries. */
+	if (stored_after + wb_after != stored_before + wb_before) {
+		ksft_print_msg("New zswap entry after setting memory.zswap.max to zero\n");
+		goto out;
+	}
+	for (int i = 0; i < size; i++) {
+		if (mem[i] != 'a' + i / page_size) {
+			ksft_print_msg("Invalid data after zero-limit pageout\n");
+			goto out;
+		}
+	}
+	ret = 0;
+out:
+	munmap(mem, size);
+out_close:
+	close(fd);
+	return ret;
+}
+
+static int test_zswap_max_zero(const char *root)
+{
+	char *group = NULL, *child = NULL;
+	int ret = KSFT_FAIL;
+
+	if (access(PATH_ZSWAP_STORED_PAGES, R_OK) ||
+	    access(PATH_ZSWAP_WRITTEN_BACK_PAGES, R_OK))
+		return KSFT_SKIP;
+	if (cg_read_strcmp(root, "memory.zswap.writeback", "1"))
+		return KSFT_SKIP;
+
+	group = cg_name(root, "zswap_max_zero_test");
+	if (!group || cg_create(group))
+		goto out;
+	if (cg_run(group, pageout_zero_limit, group))
+		goto out;
+
+	if (cg_write(group, "memory.zswap.max", "max"))
+		goto out;
+	if (cg_write(group, "cgroup.subtree_control", "+memory"))
+		goto out;
+	child = cg_name(group, "child");
+	if (!child || cg_create(child))
+		goto out;
+	if (cg_run(child, pageout_zero_limit, group))
+		goto out;
+	ret = KSFT_PASS;
+out:
+	cg_destroy(child);
+	free(child);
+	cg_destroy(group);
+	free(group);
 	return ret;
 }
 
@@ -826,6 +926,7 @@ struct zswap_test {
 } tests[] = {
 	T(test_zswap_usage),
 	T(test_swapin_nozswap),
+	T(test_zswap_max_zero),
 	T(test_zswapin),
 	T(test_zswap_writeback_enabled),
 	T(test_zswap_writeback_disabled),
