@@ -3774,6 +3774,8 @@ static struct folio *next_uptodate_folio(struct xa_state *xas,
 			continue;
 		if (!folio_try_get(folio))
 			continue;
+		if (unlikely(folio_ref_count_over_limit(folio)))
+			goto skip;
 		if (folio_test_locked(folio))
 			goto skip;
 		/* Has the page moved or been split? */
