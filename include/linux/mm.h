@@ -2257,8 +2257,9 @@ bool folio_ref_count_over_limit_slowpath(const struct folio *folio,
 		unsigned int ref_count);
 
 /**
- * folio_ref_count_over_limit - Check whether to refuse more folio references.
+ * __folio_ref_count_over_limit - Check whether to refuse more folio references.
  * @folio: The folio.
+ * @ref_count: The sampled folio reference count.
  *
  * Check before adding page table mappings or other significant refcount users
  * to pagecache folios (!hugetlb), either before acquiring references or
@@ -2272,13 +2273,25 @@ bool folio_ref_count_over_limit_slowpath(const struct folio *folio,
  *
  * Return: True if the caller should refuse the operation, false otherwise.
  */
-static inline bool folio_ref_count_over_limit(const struct folio *folio)
+static inline bool __folio_ref_count_over_limit(const struct folio *folio,
+		unsigned int ref_count)
 {
-	const unsigned int ref_count = folio_ref_count(folio);
-
 	if (likely(ref_count < FOLIO_REF_COUNT_LIMIT))
 		return false;
 	return folio_ref_count_over_limit_slowpath(folio, ref_count);
+}
+
+/**
+ * folio_ref_count_over_limit - Check whether to refuse more folio references.
+ * @folio: The folio.
+ *
+ * See __folio_ref_count_over_limit().
+ *
+ * Return: True if the caller should refuse the operation, false otherwise.
+ */
+static inline bool folio_ref_count_over_limit(const struct folio *folio)
+{
+	return __folio_ref_count_over_limit(folio, folio_ref_count(folio));
 }
 
 /**
@@ -2305,13 +2318,33 @@ static inline void get_page(struct page *page)
 	folio_get(folio);
 }
 
+/**
+ * folio_get_checked - Try to acquire a reference to a live folio.
+ * @folio: The folio.
+ *
+ * The caller must already hold a reference to @folio. Warn and fail on a
+ * non-positive refcount, and refuse additional references at the limit.
+ *
+ * Use folio_try_get() for speculative reference acquisition where the
+ * refcount can legitimately be zero.
+ *
+ * Return: True if the refcount was incremented, false otherwise.
+ */
+static inline __must_check bool folio_get_checked(struct folio *folio)
+{
+	const int ref_count = folio_ref_count(folio);
+
+	if (WARN_ON_ONCE(ref_count <= 0))
+		return false;
+	if (unlikely(__folio_ref_count_over_limit(folio, ref_count)))
+		return false;
+	folio_ref_inc(folio);
+	return true;
+}
+
 static inline __must_check bool try_get_page(struct page *page)
 {
-	page = compound_head(page);
-	if (WARN_ON_ONCE(page_ref_count(page) <= 0))
-		return false;
-	page_ref_inc(page);
-	return true;
+	return folio_get_checked(page_folio(page));
 }
 
 /**
