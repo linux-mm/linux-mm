@@ -1632,7 +1632,7 @@ bool zswap_store(struct folio *folio)
 	objcg = get_obj_cgroup_from_folio(folio);
 	if (objcg && !obj_cgroup_may_zswap(objcg)) {
 		memcg = get_mem_cgroup_from_objcg(objcg);
-		if (shrink_memcg(memcg)) {
+		if (shrink_memcg(memcg) || mem_cgroup_zswap_disabled(memcg)) {
 			mem_cgroup_put(memcg);
 			goto put_objcg;
 		}

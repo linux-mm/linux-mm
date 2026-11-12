@@ -6290,6 +6290,23 @@ static struct cftype swap_files[] = {
 
 #ifdef CONFIG_ZSWAP
 /**
+ * mem_cgroup_zswap_disabled - check if a zero limit disables zswap
+ * @memcg: the memory cgroup
+ *
+ * Unlike obj_cgroup_may_zswap(), this ignores nonzero limits so that reclaim
+ * can replace cold entries even if usage is still above a nonzero limit.
+ */
+bool mem_cgroup_zswap_disabled(struct mem_cgroup *memcg)
+{
+	for (; !mem_cgroup_is_root(memcg);
+	     memcg = parent_mem_cgroup(memcg))
+		if (!READ_ONCE(memcg->zswap_max))
+			return true;
+
+	return false;
+}
+
+/**
  * obj_cgroup_may_zswap - check if this cgroup can zswap
  * @objcg: the object cgroup
  *
