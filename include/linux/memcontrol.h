@@ -984,6 +984,7 @@ unsigned long lruvec_page_state_local(const struct lruvec *lruvec,
 				      enum node_stat_item idx);
 
 void mem_cgroup_flush_stats(struct mem_cgroup *memcg);
+void mem_cgroup_flush_stats_force(struct mem_cgroup *memcg);
 void mem_cgroup_flush_stats_ratelimited(struct mem_cgroup *memcg);
 
 void mod_lruvec_kmem_state(void *p, enum node_stat_item idx, int val);
@@ -1452,6 +1453,10 @@ static inline unsigned long lruvec_page_state_local(const struct lruvec *lruvec,
 }
 
 static inline void mem_cgroup_flush_stats(struct mem_cgroup *memcg)
+{
+}
+
+static inline void mem_cgroup_flush_stats_force(struct mem_cgroup *memcg)
 {
 }
 

@@ -824,6 +824,23 @@ void mem_cgroup_flush_stats(struct mem_cgroup *memcg)
 	__mem_cgroup_flush_stats(memcg, false);
 }
 
+/**
+ * mem_cgroup_flush_stats_force - unconditionally flush memory cgroup statistics
+ * @memcg: root of the subtree to flush, or NULL for the root memory cgroup
+ *
+ * Flush the statistics regardless of the number of pending updates.
+ */
+void mem_cgroup_flush_stats_force(struct mem_cgroup *memcg)
+{
+	if (mem_cgroup_disabled())
+		return;
+
+	if (!memcg)
+		memcg = root_mem_cgroup;
+
+	__mem_cgroup_flush_stats(memcg, true);
+}
+
 void mem_cgroup_flush_stats_ratelimited(struct mem_cgroup *memcg)
 {
 	/* Only flush if the periodic flusher is one full cycle late */
