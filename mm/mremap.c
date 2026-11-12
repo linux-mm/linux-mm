@@ -14,6 +14,7 @@
 #include <linux/shm.h>
 #include <linux/ksm.h>
 #include <linux/mman.h>
+#include <linux/memfd.h>
 #include <linux/swap.h>
 #include <linux/capability.h>
 #include <linux/fs.h>
@@ -1814,6 +1815,17 @@ static int check_prep_vma(struct vma_remap_struct *vrm)
 
 	old_len = vrm->old_len;
 	new_len = vrm->new_len;
+	if (new_len > old_len && vma->vm_file &&
+	    vma_test_all(vma, VMA_SHARED_BIT, VMA_MAYWRITE_BIT)) {
+		vma_flags_t flags = vma->flags;
+		int err;
+
+		/* A larger VMA could become writable via mprotect(). */
+		vma_flags_set(&flags, VMA_WRITE_BIT);
+		err = memfd_check_seals_mmap(vma->vm_file, &flags);
+		if (err)
+			return err;
+	}
 
 	/*
 	 * !old_len is a special case where an attempt is made to 'duplicate'
