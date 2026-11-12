@@ -3210,6 +3210,14 @@ static bool __init alloc_bootmem_huge_page(struct hstate *h, int nid)
 	return true;
 }
 
+static void __init hugetlb_init_tail_page(struct page *page, unsigned long pfn,
+					  enum zone_type zone,
+					  const struct page *source)
+{
+	memcpy(page, source, sizeof(*page));
+	memmap_init_refresh_pfn_fields(page, pfn, zone);
+}
+
 /* Initialize [start_page:end_page_number] tail struct pages of a hugepage */
 static void __init hugetlb_folio_init_tail_vmemmap(struct folio *folio,
 					struct hstate *h,
@@ -3227,11 +3235,16 @@ static void __init hugetlb_folio_init_tail_vmemmap(struct folio *folio,
 	 * As we marked all tail pages with memblock_reserved_mark_noinit(),
 	 * we must initialize them ourselves here.
 	 */
-	for (pfn = head_pfn + start_page_number; pfn < end_pfn; page++, pfn++) {
-		__init_single_page(page, pfn, zone, nid);
-		prep_compound_tail(page, &folio->page, order);
-		set_page_count(page, 0);
-	}
+	if (start_page_number >= end_page_number)
+		return;
+
+	pfn = head_pfn + start_page_number;
+	__init_single_page(page, pfn, zone, nid);
+	prep_compound_tail(page, &folio->page, order);
+	set_page_count(page, 0);
+
+	for (pfn++; pfn < end_pfn; pfn++)
+		hugetlb_init_tail_page(pfn_to_page(pfn), pfn, zone, page);
 }
 
 static void __init hugetlb_folio_init_vmemmap(struct folio *folio,
