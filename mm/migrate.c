@@ -1220,11 +1220,28 @@ static void migrate_folio_done(struct folio *src,
 		folio_put(src);
 }
 
+/*
+ * Batching the TLB flush only helps when the rmap walk can clear more than
+ * one PTE.  A single small folio mapped once has nothing to batch, and the
+ * batched unmap would leave mm->tlb_flush_batched pending.
+ */
+static enum ttu_flags migrate_ttu_flags(struct folio *folio,
+					enum migrate_mode mode,
+					bool single_folio)
+{
+	if (mode != MIGRATE_ASYNC)
+		return 0;
+	if (single_folio && !folio_test_large(folio) &&
+	    !folio_maybe_mapped_shared(folio))
+		return 0;
+	return TTU_BATCH_FLUSH;
+}
+
 /* Obtain the lock on page, remove all ptes. */
 static int migrate_folio_unmap(new_folio_t get_new_folio,
 		free_folio_t put_new_folio, unsigned long private,
 		struct folio *src, struct folio **dstp, enum migrate_mode mode,
-		struct list_head *ret)
+		enum ttu_flags ttu, struct list_head *ret)
 {
 	struct folio *dst;
 	int rc = -EAGAIN;
@@ -1346,7 +1363,7 @@ static int migrate_folio_unmap(new_folio_t get_new_folio,
 		/* Establish migration ptes */
 		VM_BUG_ON_FOLIO(folio_test_anon(src) &&
 			       !folio_test_ksm(src) && !anon_vma, src);
-		try_to_migrate(src, mode == MIGRATE_ASYNC ? TTU_BATCH_FLUSH : 0);
+		try_to_migrate(src, ttu);
 		old_folio_state |= FOLIO_WAS_MAPPED;
 	}
 
@@ -1837,9 +1854,11 @@ static int migrate_pages_batch(struct list_head *from,
 	LIST_HEAD(unmap_folios);
 	LIST_HEAD(dst_folios);
 	bool nosplit = (reason == MR_NUMA_MISPLACED);
+	bool single_folio = list_is_singular(from);
+	enum ttu_flags ttu;
 
 	VM_WARN_ON_ONCE(mode != MIGRATE_ASYNC &&
-			!list_empty(from) && !list_is_singular(from));
+			!list_empty(from) && !single_folio);
 
 	for (pass = 0; pass < nr_pass && retry; pass++) {
 		retry = 0;
@@ -1926,8 +1945,10 @@ static int migrate_pages_batch(struct list_head *from,
 				continue;
 			}
 
+			ttu = migrate_ttu_flags(folio, mode, single_folio);
 			rc = migrate_folio_unmap(get_new_folio, put_new_folio,
-					private, folio, &dst, mode, ret_folios);
+					private, folio, &dst, mode, ttu,
+					ret_folios);
 			/*
 			 * The rules are:
 			 *	0: folio will be put on unmap_folios list,
