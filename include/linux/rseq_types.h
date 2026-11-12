@@ -140,12 +140,15 @@ struct rseq_data { };
 /**
  * struct sched_mm_cid - Storage for per task MM CID data
  * @active:	MM CID is active for the task
+ * @cpus_allowed_changed: Task affinity change needs propagation to the MM;
+ *			 protected by the task's runqueue lock
  * @cid:	The CID associated to the task either permanently or
  *		borrowed from the CPU
  * @node:	Queued in the per MM MMCID list
  */
 struct sched_mm_cid {
 	unsigned int		active;
+	bool			cpus_allowed_changed;
 	unsigned int		cid;
 	struct hlist_node	node;
 };

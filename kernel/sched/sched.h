@@ -3964,6 +3964,13 @@ extern const char *preempt_modes[];
 
 #ifdef CONFIG_SCHED_MM_CID
 
+void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk);
+
+static inline void mm_cid_notify_affinity_change(struct task_struct *p)
+{
+	p->mm_cid.cpus_allowed_changed = true;
+}
+
 static __always_inline bool cid_on_cpu(unsigned int cid)
 {
 	return cid & MM_CID_ONCPU;
@@ -4152,6 +4159,10 @@ static __always_inline void mm_cid_schedin(struct task_struct *next)
 
 	if (!next->mm_cid.active)
 		return;
+	if (unlikely(next->mm_cid.cpus_allowed_changed)) {
+		mm_update_cpus_allowed(mm, &next->cpus_mask);
+		next->mm_cid.cpus_allowed_changed = false;
+	}
 
 	cpu_cid = __this_cpu_read(mm->mm_cid.pcpu->cid);
 	mode = READ_ONCE(mm->mm_cid.mode);
@@ -4197,6 +4208,7 @@ static inline void mm_cid_switch_to(struct task_struct *prev, struct task_struct
 }
 
 #else /* !CONFIG_SCHED_MM_CID: */
+static inline void mm_cid_notify_affinity_change(struct task_struct *p) { }
 static inline void mm_cid_switch_to(struct task_struct *prev, struct task_struct *next) { }
 #endif /* !CONFIG_SCHED_MM_CID */
 
