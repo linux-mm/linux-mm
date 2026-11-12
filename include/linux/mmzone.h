@@ -551,6 +551,14 @@ struct lru_gen_folio {
 	unsigned long min_seq[ANON_AND_FILE];
 	/* the birth time of each generation in jiffies */
 	unsigned long timestamps[MAX_NR_GENS];
+	/* whether the multi-gen LRU is enabled */
+	bool enabled;
+	/* the memcg generation this lru_gen_folio belongs to */
+	u8 gen;
+	/* the list segment this lru_gen_folio belongs to */
+	u8 seg;
+	/* per-node lru_gen_folio list for global reclaim */
+	struct hlist_nulls_node list;
 	/* the multi-gen LRU lists, lazily sorted on eviction */
 	struct list_head folios[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
 	/* the multi-gen LRU sizes, eventually consistent */
@@ -562,16 +570,10 @@ struct lru_gen_folio {
 	/* can only be modified under the LRU lock */
 	unsigned long protected[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
 	/* can be modified without holding the LRU lock */
+	__cacheline_group_begin_aligned(lrugen_stats);
 	atomic_long_t evicted[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
 	atomic_long_t refaulted[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
-	/* whether the multi-gen LRU is enabled */
-	bool enabled;
-	/* the memcg generation this lru_gen_folio belongs to */
-	u8 gen;
-	/* the list segment this lru_gen_folio belongs to */
-	u8 seg;
-	/* per-node lru_gen_folio list for global reclaim */
-	struct hlist_nulls_node list;
+	__cacheline_group_end_aligned(lrugen_stats);
 };
 
 enum {
