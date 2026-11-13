@@ -1403,7 +1403,8 @@ void map_anon_folio_pmd_nopf(struct folio *folio, pmd_t *pmd,
 	folio_add_lru_vma(folio, vma);
 	set_pmd_at(vma->vm_mm, haddr, pmd, entry);
 	update_mmu_cache_pmd(vma, haddr, pmd);
-	deferred_split_folio(folio, false);
+	if (split_underused_thp)
+		deferred_split_folio(folio, false);
 }
 
 static void map_anon_folio_pmd_pf(struct folio *folio, pmd_t *pmd,
@@ -4666,7 +4667,8 @@ void deferred_split_folio(struct folio *folio, bool partially_mapped)
 	if (folio_order(folio) <= 1)
 		return;
 
-	if (!partially_mapped && !split_underused_thp)
+	/* Already queued, and there is no flag to set. */
+	if (!partially_mapped && !data_race(list_empty(&folio->_deferred_list)))
 		return;
 
 	/*
@@ -4692,9 +4694,6 @@ void deferred_split_folio(struct folio *folio, bool partially_mapped)
 			count_mthp_stat(folio_order(folio), MTHP_STAT_SPLIT_DEFERRED);
 			mod_mthp_stat(folio_order(folio), MTHP_STAT_NR_ANON_PARTIALLY_MAPPED, 1);
 		}
-	} else {
-		/* partially mapped folios cannot become non-partially mapped */
-		VM_WARN_ON_FOLIO(folio_test_partially_mapped(folio), folio);
 	}
 	__list_lru_add(&deferred_split_lru, lru, &folio->_deferred_list, nid, memcg);
 	list_lru_unlock_irqrestore(lru, &flags);
@@ -4735,6 +4734,72 @@ static bool thp_underused(struct folio *folio)
 		}
 	}
 	return false;
+}
+
+/*
+ * One bit per page of the folio being checked. Too big for the stack of a
+ * shrinker with large base pages, so there is a single one.
+ */
+static DEFINE_MUTEX(mapped_pages_lock);
+static DECLARE_BITMAP(mapped_pages, MAX_PTRS_PER_PTE);
+
+static bool folio_mapped_pages_one(struct folio *folio,
+		struct vm_area_struct *vma, unsigned long addr, void *arg)
+{
+	const unsigned long nr_pages = folio_nr_pages(folio);
+	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, addr, 0);
+	unsigned long *nr_mapped = arg;
+	pgoff_t idx;
+
+	while (page_vma_mapped_walk(&pvmw)) {
+		if (!pvmw.pte) {
+			*nr_mapped = nr_pages;
+			page_vma_mapped_walk_done(&pvmw);
+			break;
+		}
+		idx = linear_anon_page_index(vma, pvmw.address) -
+		      folio_pgoff(folio);
+		if (idx < nr_pages && !__test_and_set_bit(idx, mapped_pages))
+			(*nr_mapped)++;
+	}
+
+	return *nr_mapped < nr_pages;
+}
+
+/*
+ * Without per-page mapcounts, a partial unmap of a folio that is mapped by
+ * several MMs is only detected at unmap time if the total mapcount drops
+ * below the number of pages. Check the page tables to find out whether a
+ * page is mapped by nobody while another one is still mapped.
+ */
+static bool folio_mapped_shared_partially(struct folio *folio)
+{
+	const unsigned long nr_pages = folio_nr_pages(folio);
+	unsigned long nr_mapped = 0;
+	struct rmap_walk_control rwc = {
+		.rmap_one = folio_mapped_pages_one,
+		.arg = &nr_mapped,
+		.anon_lock = folio_lock_anon_vma_read,
+	};
+
+	VM_WARN_ON_FOLIO(!folio_test_locked(folio), folio);
+
+	if (nr_pages > MAX_PTRS_PER_PTE)
+		return false;
+
+	mutex_lock(&mapped_pages_lock);
+	bitmap_zero(mapped_pages, nr_pages);
+	rmap_walk(folio, &rwc);
+	mutex_unlock(&mapped_pages_lock);
+
+	return nr_mapped && nr_mapped < nr_pages;
+}
+
+static bool folio_needs_mapped_check(struct folio *folio)
+{
+	return IS_ENABLED(CONFIG_NO_PAGE_MAPCOUNT) && folio_test_anon(folio) &&
+	       !folio_test_swapcache(folio) && !folio_entire_mapcount(folio) &&
+	       folio_maybe_mapped_shared(folio);
 }
 
 static enum lru_status deferred_split_isolate(struct list_head *item,
@@ -4781,6 +4846,15 @@ static unsigned long deferred_split_scan(struct shrinker *shrink,
 		list_lru_unlock_irq(lru);
 		rcu_read_unlock();
 
+		if (!folio_test_partially_mapped(folio) &&
+		    folio_needs_mapped_check(folio)) {
+			if (!folio_trylock(folio))
+				goto requeue;
+			/* Sets PG_partially_mapped and puts it back on the queue. */
+			if (folio_mapped_shared_partially(folio))
+				deferred_split_folio(folio, true);
+			folio_unlock(folio);
+		}
 		if (!folio_test_partially_mapped(folio)) {
 			/*
 			 * See try_to_map_unused_to_zeropage(): we cannot
@@ -4789,7 +4863,7 @@ static unsigned long deferred_split_scan(struct shrinker *shrink,
 			 */
 			if (folio_test_mlocked(folio))
 				goto next;
-			underused = thp_underused(folio);
+			underused = split_underused_thp && thp_underused(folio);
 			if (!underused)
 				goto next;
 		}
