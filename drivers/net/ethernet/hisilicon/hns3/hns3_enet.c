@@ -4125,9 +4125,6 @@ static int hns3_alloc_skb(struct hns3_enet_ring *ring, unsigned int length,
 		return 0;
 	}
 
-	if (ring->page_pool)
-		skb_mark_for_recycle(skb);
-
 	hns3_ring_stats_update(ring, seg_pkt_cnt);
 
 	ring->pull_len = eth_get_headlen(netdev, va, HNS3_RX_HEAD_SIZE);
@@ -4164,9 +4161,6 @@ static int hns3_add_frag(struct hns3_enet_ring *ring)
 					    "alloc rx fraglist skb fail\n");
 				return -ENXIO;
 			}
-
-			if (ring->page_pool)
-				skb_mark_for_recycle(new_skb);
 
 			ring->frag_num = 0;
 

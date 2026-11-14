@@ -42,8 +42,7 @@
  * The API keeps track of in-flight pages, in order to let API users know when
  * it is safe to free a page_pool object, the API users must call
  * page_pool_put_page() or page_pool_free_va() to free the page_pool object, or
- * attach the page_pool object to a page_pool-aware object like skbs marked with
- * skb_mark_for_recycle().
+ * attach the page_pool object to a page_pool-aware object like an skb.
  *
  * page_pool_put_page() may be called multiple times on the same page if a page
  * is split into multiple fragments. For the last fragment, it will either
@@ -242,6 +241,11 @@ page_pool_get_dma_dir(const struct page_pool *pool)
 	return pool->p.dma_dir;
 }
 
+static inline long page_pool_ref_count(netmem_ref netmem)
+{
+	return atomic_long_read(netmem_get_pp_ref_count_ref(netmem));
+}
+
 static inline void page_pool_fragment_netmem(netmem_ref netmem, long nr)
 {
 	atomic_long_set(netmem_get_pp_ref_count_ref(netmem), nr);
@@ -255,7 +259,7 @@ static inline void page_pool_fragment_netmem(netmem_ref netmem, long nr)
  * pp_ref_count represents the number of outstanding references to the page,
  * which will be freed using page_pool APIs (rather than page allocator APIs
  * like put_page()). Such references are usually held by page_pool-aware
- * objects like skbs marked for page pool recycling.
+ * objects like skbs.
  *
  * This helper allows the caller to take (set) multiple references to a
  * freshly allocated page. The page must be freshly allocated (have a
@@ -268,6 +272,14 @@ static inline void page_pool_fragment_netmem(netmem_ref netmem, long nr)
 static inline void page_pool_fragment_page(struct page *page, long nr)
 {
 	page_pool_fragment_netmem(page_to_netmem(page), nr);
+}
+
+static inline bool page_pool_netmem_is_exclusively_owned(netmem_ref netmem)
+{
+	if (netmem_is_net_iov(netmem))
+		return true;
+
+	return page_ref_count(__netmem_to_page(netmem)) == 1;
 }
 
 static inline long page_pool_unref_netmem(netmem_ref netmem, long nr)
@@ -288,6 +300,13 @@ static inline long page_pool_unref_netmem(netmem_ref netmem, long nr)
 	 * handling by ensuring all pages have partitioned into only 1 piece
 	 * initially, and only overwrite it when the page is partitioned into
 	 * more than one piece.
+	 *
+	 * This non-RMW fast path is safe because pp_ref_count is only ever
+	 * incremented by callers that already hold an active pp_ref_count
+	 * (>= 1) on @netmem; a raw page_ref_count is never converted into a
+	 * pp_ref_count. Thus when pp_ref_count == nr, the caller holds all
+	 * remaining pp_ref_count references and no concurrent
+	 * page_pool_ref_netmem() / napi_pp_get_page() can occur.
 	 */
 	if (atomic_long_read(pp_ref_count) == nr) {
 		/* As we have ensured nr is always one for constant case using

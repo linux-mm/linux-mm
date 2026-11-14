@@ -563,7 +563,6 @@ mt76u_process_rx_entry(struct mt76_dev *dev, struct urb *urb,
 		nsgs++;
 	}
 
-	skb_mark_for_recycle(skb);
 	dev->drv->rx_skb(dev, MT_RXQ_MAIN, skb, NULL);
 
 	return nsgs;

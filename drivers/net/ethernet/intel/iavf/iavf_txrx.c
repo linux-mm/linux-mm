@@ -1229,8 +1229,6 @@ static struct sk_buff *iavf_build_skb(const struct libeth_fqe *rx_buffer,
 	if (unlikely(!skb))
 		return NULL;
 
-	skb_mark_for_recycle(skb);
-
 	/* update pointers within the skb to store the data */
 	skb_reserve(skb, hr);
 	__skb_put(skb, size);

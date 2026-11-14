@@ -6010,7 +6010,6 @@ read_again:
 			head_pad_len = ctx.xdp.data - ctx.xdp.data_hard_start;
 			skb_reserve(skb, head_pad_len);
 			skb_put(skb, buf1_len);
-			skb_mark_for_recycle(skb);
 			buf->page = NULL;
 		} else if (buf1_len) {
 			dma_sync_single_for_cpu(priv->device, buf->addr,

@@ -2437,8 +2437,6 @@ static unsigned int bcmgenet_desc_rx(struct bcmgenet_rx_ring *ring,
 			goto next;
 		}
 
-		skb_mark_for_recycle(skb);
-
 		/* Reserve the RSB + pad, then set the data length */
 		skb_reserve(skb, GENET_RSB_PAD);
 		__skb_put(skb, len - GENET_RSB_PAD);

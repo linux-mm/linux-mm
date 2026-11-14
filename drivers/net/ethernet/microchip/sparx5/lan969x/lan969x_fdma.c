@@ -120,7 +120,6 @@ static struct sk_buff *lan969x_fdma_rx_get_frame(struct sparx5 *sparx5,
 	if (unlikely(!skb))
 		goto free_page;
 
-	skb_mark_for_recycle(skb);
 	skb_put(skb, fdma_db_len_get(db));
 	skb_pull(skb, IFH_LEN * sizeof(u32));
 

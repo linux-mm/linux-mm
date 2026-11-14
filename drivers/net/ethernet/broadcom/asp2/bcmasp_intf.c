@@ -576,7 +576,6 @@ static int bcmasp_rx_poll(struct napi_struct *napi, int budget)
 		skb_reserve(skb, NET_SKB_PAD);
 		skb_put(skb, len);
 		memcpy(skb->data, data, len);
-		skb_mark_for_recycle(skb);
 
 		/* Skip the 2-byte hardware alignment pad. */
 		skb_pull(skb, 2);

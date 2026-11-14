@@ -1855,7 +1855,6 @@ static struct sk_buff *fec_build_skb(struct fec_enet_private *fep,
 
 	skb_reserve(skb, FEC_ENET_XDP_HEADROOM + fep->rx_shift);
 	skb_put(skb, len);
-	skb_mark_for_recycle(skb);
 
 	/* Get offloads from the enhanced buffer descriptor */
 	if (fep->bufdesc_ex) {

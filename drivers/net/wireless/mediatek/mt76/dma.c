@@ -1075,7 +1075,6 @@ mt76_dma_rx_process(struct mt76_dev *dev, struct mt76_queue *q, int budget)
 			goto free_frag;
 
 		skb_reserve(skb, q->buf_offset);
-		skb_mark_for_recycle(skb);
 
 		*(u32 *)skb->cb = info;
 

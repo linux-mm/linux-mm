@@ -310,7 +310,6 @@ static void iptfs_skb_head_to_frag(const struct sk_buff *skb, skb_frag_t *frag)
  * @nr_frags: number of fragments present in array
  * @initial_offset: the value passed in to skb_prepare_frag_walk()
  * @frags: the page fragments inc. room for head page
- * @pp_recycle: copy of skb->pp_recycle
  */
 struct iptfs_skb_frag_walk {
 	u32 fragi;
@@ -319,7 +318,6 @@ struct iptfs_skb_frag_walk {
 	u32 nr_frags;
 	u32 initial_offset;
 	skb_frag_t frags[MAX_SKB_FRAGS + 1];
-	bool pp_recycle;
 };
 
 /**
@@ -343,7 +341,6 @@ static void iptfs_skb_prepare_frag_walk(struct sk_buff *skb, u32 initial_offset,
 	walk->past = 0;
 	walk->total = 0;
 	walk->nr_frags = 0;
-	walk->pp_recycle = skb->pp_recycle;
 
 	if (skb->head_frag) {
 		if (initial_offset >= skb_headlen(skb)) {
@@ -413,7 +410,7 @@ static bool iptfs_skb_can_add_frags(const struct sk_buff *skb,
 	struct skb_shared_info *shinfo = skb_shinfo(skb);
 	u32 fragi, nr_frags, fraglen;
 
-	if (skb_has_frag_list(skb) || skb->pp_recycle != walk->pp_recycle)
+	if (skb_has_frag_list(skb))
 		return false;
 
 	/* Reject an @offset that is at or beyond the end of the walk's data
@@ -898,8 +895,7 @@ static u32 iptfs_reassem_cont(struct xfrm_iptfs_data *xtfs, u64 seq,
 
 	/* If we may have the opportunity to share prepare a fragwalk. */
 	if (!skb_has_frag_list(skb) && !skb_has_frag_list(newskb) &&
-	    (skb->head_frag || skb->len == skb->data_len) &&
-	    skb->pp_recycle == newskb->pp_recycle) {
+	    (skb->head_frag || skb->len == skb->data_len)) {
 		fragwalk = &_fragwalk;
 		iptfs_skb_prepare_frag_walk(skb, data, fragwalk);
 	}
@@ -2258,7 +2254,8 @@ static void iptfs_output_queued(struct xfrm_state *x, struct sk_buff_head *list)
 				nextp = &(*nextp)->next;
 		}
 
-		if (shi->frag_list || skb_cloned(skb) || skb_shared(skb))
+		if (shi->frag_list || skb_cloned(skb) || skb_shared(skb) ||
+		    skb_zcopy_managed(skb))
 			share_ok = false;
 
 		/* See if we have enough space to simply append.
@@ -2288,15 +2285,10 @@ static void iptfs_output_queued(struct xfrm_state *x, struct sk_buff_head *list)
 				}
 			}
 
-			/* skb->pp_recycle is passed to __skb_flag_unref for all
-			 * frag pages so we can only share pages with skb's who
-			 * match ourselves.
-			 */
 			shi2 = skb_shinfo(skb2);
 			if (share_ok &&
 			    (shi2->frag_list ||
 			     (!skb2->head_frag && skb_headlen(skb)) ||
-			     skb->pp_recycle != skb2->pp_recycle ||
 			     skb_zcopy(skb2) ||
 			     (shi->nr_frags + shi2->nr_frags + 1 > MAX_SKB_FRAGS)))
 				share_ok = false;

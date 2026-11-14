@@ -1930,8 +1930,6 @@ static struct sk_buff *receive_small_xdp(struct net_device *dev,
 	if (metasize)
 		skb_metadata_set(skb, metasize);
 
-	skb_mark_for_recycle(skb);
-
 	return skb;
 
 err_xdp:
@@ -1987,10 +1985,8 @@ static struct sk_buff *receive_small(struct net_device *dev,
 	}
 
 	skb = receive_small_build_skb(vi, xdp_headroom, buf, len, buflen);
-	if (likely(skb)) {
-		skb_mark_for_recycle(skb);
+	if (likely(skb))
 		return skb;
-	}
 
 	u64_stats_inc(&stats->alloc_fail);
 err:
@@ -2313,7 +2309,6 @@ static struct sk_buff *receive_mergeable_xdp(struct net_device *dev,
 			break;
 		}
 
-		skb_mark_for_recycle(head_skb);
 		return head_skb;
 
 	case XDP_TX:
@@ -2351,9 +2346,6 @@ static struct sk_buff *virtnet_skb_append_frag(struct receive_queue *rq,
 		if (unlikely(!nskb))
 			return NULL;
 
-		if (head_skb->pp_recycle)
-			skb_mark_for_recycle(nskb);
-
 		if (curr_skb == head_skb)
 			skb_shinfo(curr_skb)->frag_list = nskb;
 		else
@@ -2371,10 +2363,7 @@ static struct sk_buff *virtnet_skb_append_frag(struct receive_queue *rq,
 
 	offset = buf - page_address(page);
 	if (skb_can_coalesce(curr_skb, num_skb_frags, page, offset)) {
-		if (head_skb->pp_recycle)
-			page_pool_put_page(rq->page_pool, page, -1, true);
-		else
-			put_page(page);
+		netmem_dec_ref(page_to_netmem(page));
 		skb_coalesce_rx_frag(curr_skb, num_skb_frags - 1,
 				     len, truesize);
 	} else {
@@ -2431,7 +2420,6 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 		goto err_skb;
 	}
 
-	skb_mark_for_recycle(head_skb);
 	while (--num_buf) {
 		buf = virtnet_rq_get_buf(rq, &len, &ctx);
 		if (unlikely(!buf)) {
