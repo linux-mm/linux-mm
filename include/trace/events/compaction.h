@@ -255,7 +255,7 @@ DECLARE_EVENT_CLASS(mm_compaction_defer_template,
 		__entry->nid = zone_to_nid(zone);
 		__entry->idx = zone_idx(zone);
 		__entry->order = order;
-		__entry->considered = zone->compact_considered;
+		__entry->considered = READ_ONCE(zone->compact_considered);
 		__entry->defer_shift = zone->compact_defer_shift;
 		__entry->order_failed = zone->compact_order_failed;
 	),
