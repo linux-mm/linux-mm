@@ -725,7 +725,8 @@ static int vmap_pages_p4d_range(pgd_t *pgd, unsigned long addr,
  * may have contiguous chunks, as hinted by @shift.
  */
 static int vmap_pages_range_noflush_walk(unsigned long addr, unsigned long end,
-		pgprot_t prot, struct page **pages, unsigned int shift)
+		pgprot_t prot, struct page **pages, unsigned int shift,
+		unsigned int *mapped_pages)
 {
 	unsigned long start = addr;
 	pgd_t *pgd;
@@ -748,6 +749,7 @@ static int vmap_pages_range_noflush_walk(unsigned long addr, unsigned long end,
 	if (mask & ARCH_PAGE_TABLE_SYNC_MASK)
 		arch_sync_kernel_mappings(start, end);
 
+	*mapped_pages = nr;
 	return err;
 }
 
@@ -758,18 +760,36 @@ static int vmap_pages_range_noflush_walk(unsigned long addr, unsigned long end,
  * The caller is responsible for calling flush_cache_vmap() after this
  * function returns successfully and before the addresses are accessed.
  *
+ * On failure the PTEs installed by this call are torn down before
+ * returning, so a retry sees a clean range; PTEs that were already
+ * there when the walk failed are left alone. When @gfp_mask cannot
+ * block, the teardown skips cond_resched(), it may run in atomic
+ * context.
+ *
  * This is an internal function only. Do not use outside mm/.
  */
 int __vmap_pages_range_noflush(unsigned long addr, unsigned long end,
-		pgprot_t prot, struct page **pages, unsigned int page_shift)
+		pgprot_t prot, struct page **pages, unsigned int page_shift,
+		gfp_t gfp_mask)
 {
+	int err;
+	unsigned int mapped_pages = 0;
+
 	if (WARN_ON_ONCE(page_shift < PAGE_SHIFT))
 		return -EINVAL;
 
 	if (!IS_ENABLED(CONFIG_HAVE_ARCH_HUGE_VMALLOC))
 		page_shift = PAGE_SHIFT;
 
-	return vmap_pages_range_noflush_walk(addr, end, prot, pages, page_shift);
+	err = vmap_pages_range_noflush_walk(addr, end, prot, pages, page_shift,
+					    &mapped_pages);
+
+	/* Undo the PTEs installed before the failure. */
+	if (err && mapped_pages)
+		__vunmap_range_noflush(addr, addr + (mapped_pages * PAGE_SIZE),
+				       gfpflags_allow_blocking(gfp_mask));
+
+	return err;
 }
 
 int vmap_pages_range_noflush(unsigned long addr, unsigned long end,
@@ -781,7 +801,8 @@ int vmap_pages_range_noflush(unsigned long addr, unsigned long end,
 
 	if (ret)
 		return ret;
-	return __vmap_pages_range_noflush(addr, end, prot, pages, page_shift);
+	return __vmap_pages_range_noflush(addr, end, prot, pages, page_shift,
+					  gfp_mask);
 }
 
 static int __vmap_pages_range(unsigned long addr, unsigned long end,
@@ -3715,7 +3736,7 @@ static int vmap_pages_range_batched(unsigned long addr, unsigned long end,
 		pgprot_t prot, struct page **pages)
 {
 	const unsigned int nr_pages = (end - addr) >> PAGE_SHIFT;
-	unsigned int prev_shift = 0, batch_idx = 0;
+	unsigned int prev_shift = 0, batch_idx = 0, nr_mapped;
 	unsigned long batch_start = addr, batch_end = addr;
 	int err;
 
@@ -3734,7 +3755,8 @@ static int vmap_pages_range_batched(unsigned long addr, unsigned long end,
 
 		if (shift != prev_shift) {
 			err = vmap_pages_range_noflush_walk(batch_start, batch_end,
-					prot, pages + batch_idx, prev_shift);
+					prot, pages + batch_idx, prev_shift,
+					&nr_mapped);
 			if (err)
 				goto out;
 			prev_shift = shift;
@@ -3756,7 +3778,7 @@ static int vmap_pages_range_batched(unsigned long addr, unsigned long end,
 	/* Remaining */
 	if (batch_start < end)
 		err = vmap_pages_range_noflush_walk(batch_start, end, prot,
-				pages + batch_idx, prev_shift);
+				pages + batch_idx, prev_shift, &nr_mapped);
 
 out:
 	if (!err)
