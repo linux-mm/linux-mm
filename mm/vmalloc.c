@@ -3748,13 +3748,14 @@ static int vmap_pages_range_batched(unsigned long addr, unsigned long end,
 	const unsigned int nr_pages = (end - addr) >> PAGE_SHIFT;
 	unsigned int prev_shift = 0, batch_idx = 0, nr_mapped;
 	unsigned long batch_start = addr, batch_end = addr;
+	unsigned long mapped_end = addr;
 	int err;
 
 	err = kmsan_vmap_pages_range_noflush(addr, end, prot, pages,
 					     PAGE_SHIFT, GFP_KERNEL);
 
 	if (err)
-		goto out;
+		return err;
 
 	for (unsigned int i = 0; i < nr_pages; ) {
 		unsigned int shift = PAGE_SHIFT +
@@ -3764,9 +3765,10 @@ static int vmap_pages_range_batched(unsigned long addr, unsigned long end,
 			prev_shift = shift;
 
 		if (shift != prev_shift) {
-			err = vmap_pages_range_noflush_walk(batch_start, batch_end,
-					prot, pages + batch_idx, prev_shift,
-					&nr_mapped);
+			err = vmap_pages_range_noflush_walk(batch_start,
+					batch_end, prot, pages + batch_idx,
+					prev_shift, &nr_mapped);
+			mapped_end = batch_start + (nr_mapped * PAGE_SIZE);
 			if (err)
 				goto out;
 			prev_shift = shift;
@@ -3786,13 +3788,21 @@ static int vmap_pages_range_batched(unsigned long addr, unsigned long end,
 	}
 
 	/* Remaining */
-	if (batch_start < end)
+	if (batch_start < end) {
 		err = vmap_pages_range_noflush_walk(batch_start, end, prot,
 				pages + batch_idx, prev_shift, &nr_mapped);
+		mapped_end = batch_start + (nr_mapped * PAGE_SIZE);
+	}
 
 out:
-	if (!err)
+	if (err) {
+		/* Undo the part the batches installed before they failed. */
+		if (mapped_end > addr)
+			__vunmap_range_noflush(addr, mapped_end, true);
+		kmsan_vunmap_range_noflush(addr, end, true);
+	} else {
 		flush_cache_vmap(addr, end);
+	}
 	return err;
 }
 
