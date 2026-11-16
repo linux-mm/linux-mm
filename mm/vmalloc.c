@@ -117,7 +117,8 @@ static __always_inline unsigned long vmap_set_ptes(pte_t *ptep,
 
 static int vmap_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 			phys_addr_t phys_addr, pgprot_t prot,
-			unsigned int max_page_shift, pgtbl_mod_mask *mask)
+			unsigned int max_page_shift, pgtbl_mod_mask *mask,
+			unsigned long *mapped_end)
 {
 	pte_t *pte;
 	u64 pfn;
@@ -143,6 +144,7 @@ static int vmap_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 
 		size = vmap_set_ptes(pte, addr, end, pfn, prot, max_page_shift);
 		nr_pages = PFN_DOWN(size);
+		*mapped_end = addr + size;
 	} while (pte += nr_pages, pfn += nr_pages, addr += size, addr != end);
 
 	lazy_mmu_mode_disable();
@@ -188,7 +190,8 @@ static int vmap_try_huge_pmd(pmd_t *pmd, unsigned long addr, unsigned long end,
 
 static int vmap_pmd_range(pud_t *pud, unsigned long addr, unsigned long end,
 			phys_addr_t phys_addr, pgprot_t prot,
-			unsigned int max_page_shift, pgtbl_mod_mask *mask)
+			unsigned int max_page_shift, pgtbl_mod_mask *mask,
+			unsigned long *mapped_end)
 {
 	pmd_t *pmd;
 	unsigned long next;
@@ -203,10 +206,12 @@ static int vmap_pmd_range(pud_t *pud, unsigned long addr, unsigned long end,
 		if (vmap_try_huge_pmd(pmd, addr, next, phys_addr, prot,
 					max_page_shift)) {
 			*mask |= PGTBL_PMD_MODIFIED;
+			*mapped_end = next;
 			continue;
 		}
 
-		err = vmap_pte_range(pmd, addr, next, phys_addr, prot, max_page_shift, mask);
+		err = vmap_pte_range(pmd, addr, next, phys_addr, prot,
+				     max_page_shift, mask, mapped_end);
 		if (err)
 			break;
 	} while (pmd++, phys_addr += (next - addr), addr = next, addr != end);
@@ -245,7 +250,8 @@ static int vmap_try_huge_pud(pud_t *pud, unsigned long addr, unsigned long end,
 
 static int vmap_pud_range(p4d_t *p4d, unsigned long addr, unsigned long end,
 			phys_addr_t phys_addr, pgprot_t prot,
-			unsigned int max_page_shift, pgtbl_mod_mask *mask)
+			unsigned int max_page_shift, pgtbl_mod_mask *mask,
+			unsigned long *mapped_end)
 {
 	pud_t *pud;
 	unsigned long next;
@@ -260,10 +266,12 @@ static int vmap_pud_range(p4d_t *p4d, unsigned long addr, unsigned long end,
 		if (vmap_try_huge_pud(pud, addr, next, phys_addr, prot,
 					max_page_shift)) {
 			*mask |= PGTBL_PUD_MODIFIED;
+			*mapped_end = next;
 			continue;
 		}
 
-		err = vmap_pmd_range(pud, addr, next, phys_addr, prot, max_page_shift, mask);
+		err = vmap_pmd_range(pud, addr, next, phys_addr, prot,
+				     max_page_shift, mask, mapped_end);
 		if (err)
 			break;
 	} while (pud++, phys_addr += (next - addr), addr = next, addr != end);
@@ -302,7 +310,8 @@ static int vmap_try_huge_p4d(p4d_t *p4d, unsigned long addr, unsigned long end,
 
 static int vmap_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 			phys_addr_t phys_addr, pgprot_t prot,
-			unsigned int max_page_shift, pgtbl_mod_mask *mask)
+			unsigned int max_page_shift, pgtbl_mod_mask *mask,
+			unsigned long *mapped_end)
 {
 	p4d_t *p4d;
 	unsigned long next;
@@ -317,10 +326,12 @@ static int vmap_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 		if (vmap_try_huge_p4d(p4d, addr, next, phys_addr, prot,
 					max_page_shift)) {
 			*mask |= PGTBL_P4D_MODIFIED;
+			*mapped_end = next;
 			continue;
 		}
 
-		err = vmap_pud_range(p4d, addr, next, phys_addr, prot, max_page_shift, mask);
+		err = vmap_pud_range(p4d, addr, next, phys_addr, prot,
+				     max_page_shift, mask, mapped_end);
 		if (err)
 			break;
 	} while (p4d++, phys_addr += (next - addr), addr = next, addr != end);
@@ -329,7 +340,7 @@ static int vmap_p4d_range(pgd_t *pgd, unsigned long addr, unsigned long end,
 
 static int vmap_range_noflush(unsigned long addr, unsigned long end,
 			phys_addr_t phys_addr, pgprot_t prot,
-			unsigned int max_page_shift)
+			unsigned int max_page_shift, unsigned long *mapped_end)
 {
 	pgd_t *pgd;
 	unsigned long start;
@@ -346,11 +357,12 @@ static int vmap_range_noflush(unsigned long addr, unsigned long end,
 	BUG_ON(addr >= end);
 
 	start = addr;
+	*mapped_end = addr;
 	pgd = pgd_offset_k(addr);
 	do {
 		next = pgd_addr_end(addr, end);
 		err = vmap_p4d_range(pgd, addr, next, phys_addr, prot,
-					max_page_shift, &mask);
+					max_page_shift, &mask, mapped_end);
 		if (err)
 			break;
 	} while (pgd++, phys_addr += (next - addr), addr = next, addr != end);
@@ -364,18 +376,32 @@ static int vmap_range_noflush(unsigned long addr, unsigned long end,
 int vmap_page_range(unsigned long addr, unsigned long end,
 		    phys_addr_t phys_addr, pgprot_t prot)
 {
+	unsigned long mapped_end = addr;
 	int err;
 
 	if (WARN_ON_ONCE(!PAGE_ALIGNED(addr) || !PAGE_ALIGNED(end)))
 		return -EINVAL;
 
 	err = vmap_range_noflush(addr, end, phys_addr, pgprot_nx(prot),
-				 ioremap_max_page_shift);
-	if (!err)
+				 ioremap_max_page_shift, &mapped_end);
+	if (err) {
+		/* Undo the part the walk installed before it failed. */
+		if (mapped_end > addr)
+			__vunmap_range_noflush(addr, mapped_end, true);
+	} else {
 		err = kmsan_ioremap_page_range(addr, end, phys_addr, prot,
 					       ioremap_max_page_shift);
-	if (!err)
-		flush_cache_vmap(addr, end);
+		if (err) {
+			/*
+			 * Only the KMSAN metadata failed, the walk mapped
+			 * the whole range. Undo it all. The callers are
+			 * ioremap and arch setup code, always sleepable.
+			 */
+			__vunmap_range_noflush(addr, end, true);
+		} else {
+			flush_cache_vmap(addr, end);
+		}
+	}
 
 	return err;
 }
