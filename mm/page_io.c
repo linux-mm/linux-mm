@@ -258,6 +258,12 @@ int swap_writeout(struct swap_io_ctx *ctx, struct folio *folio)
 	}
 	rcu_read_unlock();
 
+	/* No backing store: keep the folio; ctx->sis is not set yet. */
+	if (unlikely(__swap_entry_to_info(folio->swap)->flags & SWP_XSWAP)) {
+		folio_mark_dirty(folio);
+		return AOP_WRITEPAGE_ACTIVATE;
+	}
+
 	__swap_writeout(ctx, folio);
 	return 0;
 out_unlock:
@@ -514,6 +520,13 @@ void swap_read_folio(struct swap_io_ctx *ctx, struct folio *folio)
 
 	if (zswap_load(folio) != -ENOENT)
 		return;
+
+	if (unlikely(sis->flags & SWP_XSWAP)) {
+		/* An xswap entry only lives in zswap: zswap_load() must hit. */
+		WARN_ON_ONCE(1);
+		folio_unlock(folio);
+		return;
+	}
 
 	/* We have to read from slower devices. Increase zswap protection. */
 	zswap_folio_swapin(folio);
