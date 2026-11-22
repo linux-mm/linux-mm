@@ -296,6 +296,8 @@ int vm_area_map_pages(struct vm_struct *area, unsigned long start,
 		      unsigned long end, struct page **pages);
 void vm_area_unmap_pages(struct vm_struct *area, unsigned long start,
 			 unsigned long end);
+int vm_area_grow_pages(struct vm_struct *area, unsigned long end, gfp_t gfp);
+void vm_area_shrink_pages(struct vm_struct *area, unsigned long end);
 void vunmap_range(unsigned long addr, unsigned long end);
 
 static inline void set_vm_flush_reset_perms(void *addr)
