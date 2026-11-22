@@ -77,9 +77,9 @@ static int xswap_destroy_by_name(const char *name);
 static DEFINE_MUTEX(xswap_ctl_lock);
 
 /*
- * Size of a new device: xswap.max= if given, otherwise the built-in
- * default.  A percentage unless bytes is set; "max" asks for the largest
- * size the device can address.
+ * Size of a new device: xswap.max= if given, otherwise
+ * CONFIG_XSWAP_DEFAULT_MAX.  A percentage unless bytes is set; "max" asks
+ * for the largest size the device can address.
  */
 static unsigned int xswap_size_pct = 200;
 static unsigned long xswap_size_bytes;
@@ -87,9 +87,12 @@ static bool xswap_size_max;
 static bool xswap_size_set;	/* xswap.max= was given */
 
 /*
- * Parse "200%", "2T" or "max".  @str is not modified.
+ * Parse "200%", "2T" or "max". @str is not modified. @cmdline tells an
+ * explicit xswap.max= from the build-time default, which is clamped
+ * instead of refused when it is too large.
  */
-static int __init xswap_parse_size(const char *str, const char *what)
+static int __init xswap_parse_size(const char *str, const char *what,
+				   bool cmdline)
 {
 	const char *pct;
 	char buf[16];
@@ -118,12 +121,16 @@ static int __init xswap_parse_size(const char *str, const char *what)
 		bytes = memparse(str, &end);
 		if (*end || bytes < PAGE_SIZE)
 			goto bad;
+		/* A default below one cluster would fail every create. */
+		if (!cmdline && bytes < (unsigned long)SWAPFILE_CLUSTER * PAGE_SIZE)
+			goto bad;
 		xswap_size_bytes = bytes;
 		xswap_size_pct = 0;
 		xswap_size_max = false;
 	}
 
-	xswap_size_set = true;
+	if (cmdline)
+		xswap_size_set = true;
 	return 0;
 bad:
 	pr_err("xswap: bad %s=%s\n", what, str);
@@ -132,7 +139,7 @@ bad:
 
 static int __init xswap_max_setup(char *str)
 {
-	xswap_parse_size(str, "xswap.max");
+	xswap_parse_size(str, "xswap.max", true);
 	return 1;
 }
 __setup("xswap.max=", xswap_max_setup);
@@ -4175,11 +4182,7 @@ err:
 }
 
 #ifdef CONFIG_XSWAP
-/*
- * Create the file-less xswap device, sized by xswap.max= or the built-in
- * default.  Called from swapon(2) with SWAP_FLAG_XSWAP; there is at most
- * one device per system.
- */
+/* Create the file-less xswap device from swapon(2). */
 static int xswap_create(int prio)
 {
 	struct swap_info_struct *si;
@@ -4693,6 +4696,13 @@ void __folio_throttle_swaprate(struct folio *folio, gfp_t gfp)
 static int __init swapfile_init(void)
 {
 	swapfile_maximum_size = arch_max_swapfile_size();
+
+#ifdef CONFIG_XSWAP
+	/* xswap.max= on the command line overrides the build-time default. */
+	if (!xswap_size_set)
+		xswap_parse_size(CONFIG_XSWAP_DEFAULT_MAX,
+				 "CONFIG_XSWAP_DEFAULT_MAX", false);
+#endif
 
 	/*
 	 * Once a cluster is freed, it's swap table content is read

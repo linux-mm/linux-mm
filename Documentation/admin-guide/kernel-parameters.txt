@@ -8733,8 +8733,10 @@ Kernel parameters
 			off	xmon is disabled.
 
 	xswap.max=	[KNL,SWAP]
-			Maximum size of a new xswap device. The value is a
+			Maximum size of a new xswap device, which is created
+			with swapon(2) and the spec "xswap". The value is a
 			size in bytes with an optional KMGTPE suffix, a
 			percentage of RAM, or "max" for the largest size
-			the device can address.
+			the device can address. The default is set by
+			CONFIG_XSWAP_DEFAULT_MAX.
 			Format: <size>[KMGTPE] | <percent>% | max
