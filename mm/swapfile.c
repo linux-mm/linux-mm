@@ -4089,6 +4089,10 @@ static int xswap_create(int prio)
 	unsigned int type;
 	int error;
 
+	/* xswap has no backing store, it relies on zswap. */
+	if (!zswap_is_enabled())
+		return -EOPNOTSUPP;
+
 	mutex_lock(&xswap_ctl_lock);
 
 	spin_lock(&swap_lock);
