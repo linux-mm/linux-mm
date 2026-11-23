@@ -57,6 +57,18 @@ fn allowed_relocations_for_machine(machine: u16) -> Option<AllowedRelocations<'s
             ..Default::default()
         }
         .into(),
+        bindings::EM_AARCH64 => AllowedRelocations {
+            in_object_file: &[
+                260, /* R_AARCH64_PREL64 */
+                261, /* R_AARCH64_PREL32 */
+                262, /* R_AARCH64_PREL16 */
+                273, /* R_AARCH64_LD_PREL_LO19 */
+                274, /* R_AARCH64_ADR_PREL_LO21 */
+                283, /* R_AARCH64_CALL26 */
+            ],
+            ..Default::default()
+        }
+        .into(),
         _ => None,
     }
 }
