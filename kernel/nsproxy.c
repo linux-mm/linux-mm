@@ -25,6 +25,7 @@
 #include <linux/proc_ns.h>
 #include <linux/file.h>
 #include <linux/syscalls.h>
+#include <linux/kap.h>
 #include <linux/cgroup.h>
 #include <linux/perf_event.h>
 #include <linux/nstree.h>
@@ -592,6 +593,10 @@ SYSCALL_DEFINE2(setns, int, fd, int, flags)
 	} else {
 		err = -EINVAL;
 	}
+	if (err)
+		goto out;
+
+	err = kap_check_namespace_flags(flags, "setns");
 	if (err)
 		goto out;
 
