@@ -1119,6 +1119,7 @@ static int page_vma_mkclean_one(struct page_vma_mapped_walk *pvmw)
 	struct vm_area_struct *vma = pvmw->vma;
 	struct mmu_notifier_range range;
 	unsigned long address = pvmw->address;
+	unsigned long flush_start = ULONG_MAX, flush_end = 0;
 
 	/*
 	 * We have to assume the worse case ie pmd for invalidation. Note that
@@ -1148,10 +1149,11 @@ static int page_vma_mkclean_one(struct page_vma_mapped_walk *pvmw)
 				continue;
 
 			flush_cache_page(vma, address, pte_pfn(entry));
-			entry = ptep_clear_flush(vma, address, pte);
-			entry = pte_wrprotect(entry);
-			entry = pte_mkclean(entry);
-			set_pte_at(vma->vm_mm, address, pte, entry);
+			entry = ptep_modify_prot_start(vma, address, pte);
+			ptep_modify_prot_commit(vma, address, pte, entry,
+						pte_mkclean(pte_wrprotect(entry)));
+			flush_start = min(flush_start, address);
+			flush_end = max(flush_end, address + PAGE_SIZE);
 			ret = 1;
 		} else {
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
@@ -1185,6 +1187,12 @@ static int page_vma_mkclean_one(struct page_vma_mapped_walk *pvmw)
 			cleaned++;
 	}
 
+	/*
+	 * Flush the write-protected PTEs once rather than one by one, before
+	 * the caller writes the folio back, as change_protection() does.
+	 */
+	if (flush_end)
+		flush_tlb_range(vma, flush_start, flush_end);
 	mmu_notifier_invalidate_range_end(&range);
 
 	return cleaned;
