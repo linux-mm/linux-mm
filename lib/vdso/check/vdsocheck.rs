@@ -157,6 +157,21 @@ fn allowed_relocations_for_machine(machine: u16) -> Option<AllowedRelocations<'s
             ..Default::default()
         }
         .into(),
+        bindings::EM_MIPS => AllowedRelocations {
+            ignored_object_file_sections: &[".rel.pdr", ".rela.pdr"],
+            in_object_file: &[
+                10,  /* R_MIPS_PC16 */
+                60,  /* R_MIPS_PC21_S2 */
+                61,  /* R_MIPS_PC26_S2 */
+                62,  /* R_MIPS_PC18_S3 */
+                63,  /* R_MIPS_PC19_S2 */
+                64,  /* R_MIPS_PCHI16 */
+                65,  /* R_MIPS_PCLO16 */
+                248, /* R_MIPS_PC32 */
+            ],
+            ..Default::default()
+        }
+        .into(),
         _ => None,
     }
 }
