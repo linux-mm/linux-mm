@@ -122,6 +122,32 @@ fn allowed_relocations_for_machine(machine: u16) -> Option<AllowedRelocations<'s
             ..Default::default()
         }
         .into(),
+        bindings::EM_LOONGARCH => AllowedRelocations {
+            in_object_file: &[
+                47,  /* R_LARCH_ADD8 */
+                48,  /* R_LARCH_ADD16 */
+                49,  /* R_LARCH_ADD24 */
+                50,  /* R_LARCH_ADD32 */
+                51,  /* R_LARCH_ADD64 */
+                52,  /* R_LARCH_SUB8 */
+                53,  /* R_LARCH_SUB16 */
+                54,  /* R_LARCH_SUB24 */
+                55,  /* R_LARCH_SUB32 */
+                56,  /* R_LARCH_SUB64 */
+                64,  /* R_LARCH_B16 */
+                65,  /* R_LARCH_B21 */
+                66,  /* R_LARCH_B26 */
+                71,  /* R_LARCH_PCALA_HI20 */
+                72,  /* R_LARCH_PCALA_LO12 */
+                73,  /* R_LARCH_PCALA64_LO20 */
+                74,  /* R_LARCH_PCALA64_HI12 */
+                99,  /* R_LARCH_32_PCREL */
+                128, /* R_LARCH_PCADD_HI20 */
+                128, /* R_LARCH_PCADD_LO12 */
+            ],
+            ..Default::default()
+        }
+        .into(),
         _ => None,
     }
 }
