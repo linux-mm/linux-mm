@@ -29,7 +29,7 @@ int nilfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	 */
 	struct the_nilfs *nilfs;
 	struct inode *inode = file->f_mapping->host;
-	int err = 0;
+	int err = 0, wb_err;
 
 	if (nilfs_inode_dirty(inode)) {
 		if (datasync)
@@ -42,6 +42,15 @@ int nilfs_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	nilfs = inode->i_sb->s_fs_info;
 	if (!err)
 		err = nilfs_flush_device(nilfs);
+
+	/*
+	 * Report an error which was recorded in the mapping, for example by
+	 * memory_failure() on a dirty page.  Check even if the above failed,
+	 * so that the error is consumed for this file.
+	 */
+	wb_err = file_check_and_advance_wb_err(file);
+	if (!err)
+		err = wb_err;
 
 	return err;
 }
