@@ -253,6 +253,15 @@ strict_encoding   Enable strict encoding at this mount point (disabled by
                   and directory with names containing invalid UTF-8 characters.
 ================= ==============================================================
 
+These options require kernel support for casefolding (CONFIG_UNICODE)
+and are refused without it.  strict_encoding must be given together
+with casefold on the same mount; a mount with strict_encoding but no
+encoding fails.  Whether the running kernel supports casefold at all
+can be probed by reading /sys/fs/tmpfs/features/casefold.
+
+casefold and strict_encoding only take effect when given at initial
+mount; on remount they are ignored.
+
 This option doesn't render the entire filesystem case-insensitive. One needs to
 still set the casefold flag per directory, by flipping the +F attribute in an
 empty directory. Nevertheless, new directories will inherit the attribute. The
