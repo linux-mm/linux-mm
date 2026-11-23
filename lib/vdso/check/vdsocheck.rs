@@ -96,6 +96,32 @@ fn allowed_relocations_for_machine(machine: u16) -> Option<AllowedRelocations<'s
             ..Default::default()
         }
         .into(),
+        bindings::EM_RISCV => AllowedRelocations {
+            in_object_file: &[
+                16, /* R_RISCV_BRANCH */
+                17, /* R_RISCV_JAL */
+                18, /* R_RISCV_CALL */
+                19, /* R_RISCV_CALL_PLT */
+                23, /* R_RISCV_PCREL_HI20 */
+                24, /* R_RISCV_PCREL_LO12_I */
+                25, /* R_RISCV_PCREL_LO12_S */
+                33, /* R_RISCV_ADD8 */
+                34, /* R_RISCV_ADD16 */
+                35, /* R_RISCV_ADD32 */
+                36, /* R_RISCV_ADD64 */
+                37, /* R_RISCV_SUB8 */
+                38, /* R_RISCV_SUB16 */
+                39, /* R_RISCV_SUB32 */
+                40, /* R_RISCV_SUB64 */
+                43, /* R_RISCV_ALIGN */
+                44, /* R_RISCV_RVC_BRANCH */
+                45, /* R_RISCV_RVC_JUMP */
+                51, /* R_RISCV_RELAX */
+                57, /* R_RISCV_32_PCREL */
+            ],
+            ..Default::default()
+        }
+        .into(),
         _ => None,
     }
 }
