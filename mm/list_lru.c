@@ -41,6 +41,15 @@ static inline void unlock_list_lru(struct list_lru_one *l, bool irq_off,
 static LIST_HEAD(memcg_list_lrus);
 static DEFINE_MUTEX(list_lrus_mutex);
 
+static inline unsigned long list_lru_memcg_idx(const struct mem_cgroup *memcg)
+{
+	/* Index 0 selects the per-node root list. */
+	if (!memcg || mem_cgroup_is_root(memcg))
+		return 0;
+
+	return memcg->css.id;
+}
+
 static inline bool list_lru_memcg_aware(struct list_lru *lru)
 {
 	return lru->memcg_aware;
@@ -74,9 +83,9 @@ static int lru_shrinker_id(struct list_lru *lru)
 static inline struct list_lru_one *
 list_lru_from_memcg(struct list_lru *lru, int nid, struct mem_cgroup *memcg)
 {
-	int idx = memcg_kmem_id(memcg);
+	unsigned long idx = list_lru_memcg_idx(memcg);
 
-	if (list_lru_memcg_aware(lru) && idx >= 0) {
+	if (list_lru_memcg_aware(lru) && idx) {
 		struct list_lru_memcg *mlru = xa_load(&lru->xa, idx);
 
 		/* Lists at a reused index belong to another memcg. */
@@ -425,25 +434,30 @@ unsigned long list_lru_walk_node(struct list_lru *lru, int nid,
 #ifdef CONFIG_MEMCG
 	if (*nr_to_walk > 0 && list_lru_memcg_aware(lru)) {
 		struct list_lru_memcg *mlru;
-		struct mem_cgroup *memcg;
+		struct cgroup_subsys_state *css;
 		unsigned long index;
 
+		/*
+		 * Keep the ID from being reused between the two lookups.
+		 * css_from_id() can see a CSS before ->css_online() succeeds.
+		 */
+		rcu_read_lock();
 		xa_for_each(&lru->xa, index, mlru) {
-			rcu_read_lock();
-			memcg = mem_cgroup_from_private_id(index);
-			if (!memcg || !mem_cgroup_tryget(memcg)) {
-				rcu_read_unlock();
+			css = css_from_id(index, &memory_cgrp_subsys);
+			if (!css || !css_is_online(css) || !css_tryget(css))
 				continue;
-			}
 			rcu_read_unlock();
-			isolated += __list_lru_walk_one(lru, nid, memcg,
+			isolated += __list_lru_walk_one(lru, nid,
+							mem_cgroup_from_css(css),
 							isolate, cb_arg,
 							nr_to_walk, false);
-			mem_cgroup_put(memcg);
+			css_put(css);
 
+			rcu_read_lock();
 			if (*nr_to_walk <= 0)
 				break;
 		}
+		rcu_read_unlock();
 	}
 #endif
 
@@ -526,6 +540,7 @@ static void memcg_reparent_list_lru_one(struct list_lru *lru, int nid,
 
 void memcg_reparent_list_lrus(struct mem_cgroup *memcg, struct mem_cgroup *parent)
 {
+	unsigned long idx = list_lru_memcg_idx(memcg);
 	struct list_lru *lru;
 	int i;
 
@@ -538,7 +553,7 @@ void memcg_reparent_list_lrus(struct mem_cgroup *memcg, struct mem_cgroup *paren
 		 * allocating a new mlru since CSS_DYING is already set for this
 		 * memcg a rcu grace period ago.
 		 */
-		mlru = xa_load(&lru->xa, memcg->kmemcg_id);
+		mlru = xa_load(&lru->xa, idx);
 		if (!mlru)
 			continue;
 
@@ -553,7 +568,7 @@ void memcg_reparent_list_lrus(struct mem_cgroup *memcg, struct mem_cgroup *paren
 		for_each_node(i)
 			memcg_reparent_list_lru_one(lru, i, &mlru->node[i], parent);
 
-		xa_erase_irq(&lru->xa, memcg->kmemcg_id);
+		xa_erase_irq(&lru->xa, idx);
 
 		/*
 		 * Here all list_lrus corresponding to the cgroup are guaranteed
@@ -568,11 +583,11 @@ void memcg_reparent_list_lrus(struct mem_cgroup *memcg, struct mem_cgroup *paren
 static inline bool memcg_list_lru_allocated(struct mem_cgroup *memcg,
 					    struct list_lru *lru)
 {
+	unsigned long idx = list_lru_memcg_idx(memcg);
 	struct list_lru_memcg *mlru;
 	bool allocated;
-	int idx = memcg->kmemcg_id;
 
-	if (idx < 0)
+	if (!idx)
 		return true;
 
 	rcu_read_lock();
@@ -616,7 +631,7 @@ static int __memcg_list_lru_alloc(struct mem_cgroup *memcg,
 		}
 		/* Set before the lists are published, and never changed after. */
 		mlru->memcg = pos;
-		xas_set(&xas, pos->kmemcg_id);
+		xas_set(&xas, list_lru_memcg_idx(pos));
 		do {
 			xas_lock_irqsave(&xas, flags);
 			if (!xas_load(&xas) && !css_is_dying(&pos->css)) {
