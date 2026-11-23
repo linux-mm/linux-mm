@@ -69,6 +69,33 @@ fn allowed_relocations_for_machine(machine: u16) -> Option<AllowedRelocations<'s
             ..Default::default()
         }
         .into(),
+        bindings::EM_PPC => AllowedRelocations {
+            in_object_file: &[
+                10,  /* R_PPC_REL24 */
+                11,  /* R_PPC_REL14 */
+                26,  /* R_PPC_REL32 */
+                249, /* R_PPC_REL16 */
+                250, /* R_PPC_REL16_LO */
+                251, /* R_PPC_REL16_HI */
+                252, /* R_PPC_REL16_HA */
+            ],
+            ..Default::default()
+        }
+        .into(),
+        bindings::EM_PPC64 => AllowedRelocations {
+            in_object_file: &[
+                10,  /* R_PPC64_REL24 */
+                11,  /* R_PPC64_REL14 */
+                26,  /* R_PPC64_REL32 */
+                44,  /* R_PPC64_REL64 */
+                249, /* R_PPC64_REL16 */
+                250, /* R_PPC64_REL16_LO */
+                251, /* R_PPC64_REL16_HI */
+                252, /* R_PPC64_REL16_HA */
+            ],
+            ..Default::default()
+        }
+        .into(),
         _ => None,
     }
 }
