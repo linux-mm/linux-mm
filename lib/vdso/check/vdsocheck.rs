@@ -48,6 +48,15 @@ fn allowed_relocations_for_machine(machine: u16) -> Option<AllowedRelocations<'s
             ..Default::default()
         }
         .into(),
+        bindings::EM_ARM => AllowedRelocations {
+            in_object_file: &[
+                0,  /* R_ARM_NONE */
+                3,  /* R_ARM_REL32 */
+                42, /* R_ARM_PREL31 */
+            ],
+            ..Default::default()
+        }
+        .into(),
         _ => None,
     }
 }
