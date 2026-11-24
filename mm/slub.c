@@ -5543,6 +5543,23 @@ void *__kmalloc_large_node_noprof(size_t size, gfp_t flags, int node)
 }
 EXPORT_SYMBOL(__kmalloc_large_node_noprof);
 
+/*
+ * Deliberately not inline to have all the callers share the code, using a
+ * single call.
+ */
+static
+void *___do_kmalloc_node(struct kmem_cache *s, gfp_t flags, int node,
+			 const struct slab_alloc_context *ac)
+{
+	void *ret;
+
+	ret = slab_alloc_node(s, flags, node, ac);
+	ret = kasan_kmalloc(s, ret, ac->orig_size, flags);
+	trace_kmalloc(ac->caller_addr, ret, ac->orig_size, s->size, flags, node);
+
+	return ret;
+}
+
 static __always_inline
 void *__do_kmalloc_node(kmem_buckets *b, gfp_t flags, int node,
 			kmalloc_token_t token, const struct slab_alloc_context *ac)
@@ -5563,11 +5580,9 @@ void *__do_kmalloc_node(kmem_buckets *b, gfp_t flags, int node,
 
 	s = kmalloc_slab(size, b, flags, token, ac->alloc_flags);
 
-	ret = slab_alloc_node(s, flags, node, ac);
-	ret = kasan_kmalloc(s, ret, size, flags);
-	trace_kmalloc(ac->caller_addr, ret, size, s->size, flags, node);
-	return ret;
+	return ___do_kmalloc_node(s, flags, node, ac);
 }
+
 void *__kmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags, int node)
 {
 	const struct slab_alloc_context ac = {
@@ -5702,38 +5717,26 @@ EXPORT_SYMBOL(__kmalloc_node_track_caller_noprof);
 
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t gfpflags, size_t size)
 {
-	void *ret;
 	const struct slab_alloc_context ac = {
 		.caller_addr = _RET_IP_,
 		.orig_size = size,
 		.alloc_flags = SLAB_ALLOC_DEFAULT,
 	};
 
-	ret = slab_alloc_node(s, gfpflags, NUMA_NO_NODE, &ac);
-
-	trace_kmalloc(_RET_IP_, ret, size, s->size, gfpflags, NUMA_NO_NODE);
-
-	ret = kasan_kmalloc(s, ret, size, gfpflags);
-	return ret;
+	return ___do_kmalloc_node(s, gfpflags, NUMA_NO_NODE, &ac);
 }
 EXPORT_SYMBOL(__kmalloc_cache_noprof);
 
 void *__kmalloc_cache_node_noprof(struct kmem_cache *s, gfp_t gfpflags,
 				  int node, size_t size)
 {
-	void *ret;
 	const struct slab_alloc_context ac = {
 		.caller_addr = _RET_IP_,
 		.orig_size = size,
 		.alloc_flags = SLAB_ALLOC_DEFAULT,
 	};
 
-	ret = slab_alloc_node(s, gfpflags, node, &ac);
-
-	trace_kmalloc(_RET_IP_, ret, size, s->size, gfpflags, node);
-
-	ret = kasan_kmalloc(s, ret, size, gfpflags);
-	return ret;
+	return ___do_kmalloc_node(s, gfpflags, node, &ac);
 }
 EXPORT_SYMBOL(__kmalloc_cache_node_noprof);
 
