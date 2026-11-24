@@ -5543,6 +5543,23 @@ void *__kmalloc_large_node_noprof(size_t size, gfp_t flags, int node)
 }
 EXPORT_SYMBOL(__kmalloc_large_node_noprof);
 
+/*
+ * Deliberately not inline to have all the callers share the code, using a
+ * single call.
+ */
+static
+void *___do_kmalloc_node(struct kmem_cache *s, gfp_t flags, int node,
+			 const struct slab_alloc_context *ac)
+{
+	void *ret;
+
+	ret = slab_alloc_node(s, flags, node, ac);
+	ret = kasan_kmalloc(s, ret, ac->orig_size, flags);
+	trace_kmalloc(ac->caller_addr, ret, ac->orig_size, s->size, flags, node);
+
+	return ret;
+}
+
 static __always_inline
 void *__do_kmalloc_node(kmem_buckets *b, gfp_t flags, int node,
 			kmalloc_token_t token, const struct slab_alloc_context *ac)
@@ -5563,12 +5580,10 @@ void *__do_kmalloc_node(kmem_buckets *b, gfp_t flags, int node,
 
 	s = kmalloc_slab(size, b, flags, token, ac->alloc_flags);
 
-	ret = slab_alloc_node(s, flags, node, ac);
-	ret = kasan_kmalloc(s, ret, size, flags);
-	trace_kmalloc(ac->caller_addr, ret, size, s->size, flags, node);
-	return ret;
+	return ___do_kmalloc_node(s, flags, node, ac);
 }
-void *__kmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags, int node)
+
+void *__kmalloc_node_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags, int node)
 {
 	const struct slab_alloc_context ac = {
 		.caller_addr = _RET_IP_,
@@ -5576,8 +5591,7 @@ void *__kmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags, in
 		.alloc_flags = SLAB_ALLOC_DEFAULT,
 	};
 
-	return __do_kmalloc_node(PASS_BUCKET_PARAM(b), flags, node,
-				 PASS_TOKEN_PARAM(token), &ac);
+	return __do_kmalloc_node(NULL, flags, node, PASS_TOKEN_PARAM(token), &ac);
 }
 EXPORT_SYMBOL(__kmalloc_node_noprof);
 
@@ -5686,7 +5700,7 @@ void *_kmalloc_nolock_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t gfp_flags, in
 }
 EXPORT_SYMBOL_GPL(_kmalloc_nolock_noprof);
 
-void *__kmalloc_node_track_caller_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags,
+void *__kmalloc_node_track_caller_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags,
 					 int node, unsigned long caller)
 {
 	const struct slab_alloc_context ac = {
@@ -5695,45 +5709,32 @@ void *__kmalloc_node_track_caller_noprof(DECL_KMALLOC_PARAMS(size, b, token), gf
 		.alloc_flags = SLAB_ALLOC_DEFAULT,
 	};
 
-	return __do_kmalloc_node(PASS_BUCKET_PARAM(b), flags, node,
-				 PASS_TOKEN_PARAM(token), &ac);
+	return __do_kmalloc_node(NULL, flags, node, PASS_TOKEN_PARAM(token), &ac);
 }
 EXPORT_SYMBOL(__kmalloc_node_track_caller_noprof);
 
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t gfpflags, size_t size)
 {
-	void *ret;
 	const struct slab_alloc_context ac = {
 		.caller_addr = _RET_IP_,
 		.orig_size = size,
 		.alloc_flags = SLAB_ALLOC_DEFAULT,
 	};
 
-	ret = slab_alloc_node(s, gfpflags, NUMA_NO_NODE, &ac);
-
-	trace_kmalloc(_RET_IP_, ret, size, s->size, gfpflags, NUMA_NO_NODE);
-
-	ret = kasan_kmalloc(s, ret, size, gfpflags);
-	return ret;
+	return ___do_kmalloc_node(s, gfpflags, NUMA_NO_NODE, &ac);
 }
 EXPORT_SYMBOL(__kmalloc_cache_noprof);
 
 void *__kmalloc_cache_node_noprof(struct kmem_cache *s, gfp_t gfpflags,
 				  int node, size_t size)
 {
-	void *ret;
 	const struct slab_alloc_context ac = {
 		.caller_addr = _RET_IP_,
 		.orig_size = size,
 		.alloc_flags = SLAB_ALLOC_DEFAULT,
 	};
 
-	ret = slab_alloc_node(s, gfpflags, node, &ac);
-
-	trace_kmalloc(_RET_IP_, ret, size, s->size, gfpflags, node);
-
-	ret = kasan_kmalloc(s, ret, size, gfpflags);
-	return ret;
+	return ___do_kmalloc_node(s, gfpflags, node, &ac);
 }
 EXPORT_SYMBOL(__kmalloc_cache_node_noprof);
 
@@ -5760,6 +5761,34 @@ void *__kmalloc_flags_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags,
 	}
 }
 
+void *__kmem_buckets_alloc_noprof(kmem_buckets *b, size_t size, gfp_t flags)
+{
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	if (!IS_ENABLED(CONFIG_SLAB_BUCKETS))
+		b = NULL;
+
+	return __do_kmalloc_node(b, flags, NUMA_NO_NODE, (kmalloc_token_t){}, &ac);
+}
+
+void *__kmem_buckets_alloc_node_track_caller_noprof(kmem_buckets *b, size_t size,
+		gfp_t flags, int node, unsigned long caller)
+{
+	const struct slab_alloc_context ac = {
+		.caller_addr = caller,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	if (!IS_ENABLED(CONFIG_SLAB_BUCKETS))
+		b = NULL;
+
+	return __do_kmalloc_node(b, flags, node, (kmalloc_token_t){}, &ac);
+}
 
 static noinline void free_to_partial_list(
 	struct kmem_cache *s, struct slab *slab,
@@ -7102,7 +7131,7 @@ __do_krealloc(const void *p, size_t new_size, unsigned long align, gfp_t flags, 
 	return (void *)p;
 
 alloc_new:
-	ret = __kmalloc_node_track_caller_noprof(PASS_KMALLOC_PARAMS(new_size, NULL, token), flags, nid, _RET_IP_);
+	ret = __kmalloc_node_track_caller_noprof(PASS_TOKEN_PARAMS(new_size, token), flags, nid, _RET_IP_);
 	if (ret && p) {
 		/* Disable KASAN checks as the object's redzone is accessed. */
 		kasan_disable_current();
@@ -7155,26 +7184,10 @@ static gfp_t kmalloc_gfp_adjust(gfp_t flags, size_t size)
 	return flags;
 }
 
-void *__kvmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), unsigned long align,
-			     gfp_t flags, int node)
+static void *__kvmalloc_fallback(size_t size, unsigned long align, gfp_t flags,
+		int node, const void *caller)
 {
 	bool allow_block;
-	void *ret;
-	const struct slab_alloc_context ac = {
-		.caller_addr = _RET_IP_,
-		.orig_size = size,
-		.alloc_flags = SLAB_ALLOC_DEFAULT,
-	};
-
-	/*
-	 * It doesn't really make sense to fallback to vmalloc for sub page
-	 * requests
-	 */
-	ret = __do_kmalloc_node(PASS_BUCKET_PARAM(b),
-				kmalloc_gfp_adjust(flags, size),
-				node, PASS_TOKEN_PARAM(token), &ac);
-	if (ret || size <= PAGE_SIZE)
-		return ret;
 
 	/* Don't even allow crazy sizes */
 	if (unlikely(size > INT_MAX)) {
@@ -7200,9 +7213,58 @@ void *__kvmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), unsigned long 
 	 */
 	return __vmalloc_node_range_noprof(size, align, VMALLOC_START, VMALLOC_END,
 			flags, PAGE_KERNEL, allow_block ? VM_ALLOW_HUGE_VMAP:0,
-			node, __builtin_return_address(0));
+			node, caller);
+}
+
+void *__kvmalloc_node_noprof(DECL_TOKEN_PARAMS(size, token), unsigned long align,
+			     gfp_t flags, int node)
+{
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	/*
+	 * It doesn't really make sense to fallback to vmalloc for sub page
+	 * requests
+	 */
+	ret = __do_kmalloc_node(NULL, kmalloc_gfp_adjust(flags, size),
+				node, PASS_TOKEN_PARAM(token), &ac);
+	if (ret || size <= PAGE_SIZE)
+		return ret;
+
+	return __kvmalloc_fallback(size, align, flags, node,
+				__builtin_return_address(0));
 }
 EXPORT_SYMBOL(__kvmalloc_node_noprof);
+
+void *__kmem_buckets_valloc_noprof(kmem_buckets *b, size_t size,
+		unsigned long align, gfp_t flags, int node)
+{
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	if (!IS_ENABLED(CONFIG_SLAB_BUCKETS))
+		b = NULL;
+
+	/*
+	 * It doesn't really make sense to fallback to vmalloc for sub page
+	 * requests
+	 */
+	ret = __do_kmalloc_node(b, kmalloc_gfp_adjust(flags, size),
+				node, (kmalloc_token_t){}, &ac);
+	if (ret || size <= PAGE_SIZE)
+		return ret;
+
+	return __kvmalloc_fallback(size, align, flags, node,
+				__builtin_return_address(0));
+}
 
 /**
  * kvfree() - Free memory.
@@ -7268,7 +7330,7 @@ void *kvrealloc_node_align_noprof(const void *p, DECL_TOKEN_PARAMS(size, token),
 	n = krealloc_node_align_noprof(p, PASS_TOKEN_PARAMS(size, token), align, kmalloc_gfp_adjust(flags, size), nid);
 	if (!n) {
 		/* We failed to krealloc(), fall back to kvmalloc(). */
-		n = __kvmalloc_node_noprof(PASS_KMALLOC_PARAMS(size, NULL, token), align, flags, nid);
+		n = __kvmalloc_node_noprof(PASS_TOKEN_PARAMS(size, token), align, flags, nid);
 		if (!n)
 			return NULL;
 
