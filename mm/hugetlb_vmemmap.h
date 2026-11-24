@@ -15,11 +15,10 @@
 #ifdef CONFIG_HUGETLB_PAGE_OPTIMIZE_VMEMMAP
 extern struct rw_semaphore vmemmap_remap_rwsem;
 
-int hugetlb_vmemmap_restore_folio(const struct hstate *h, struct folio *folio);
-long hugetlb_vmemmap_restore_folios(const struct hstate *h,
-					struct list_head *folio_list,
-					struct list_head *non_hvo_folios);
-void hugetlb_vmemmap_optimize_folio(const struct hstate *h, struct folio *folio);
+int hugetlb_vmemmap_restore_folio(struct folio *folio);
+long hugetlb_vmemmap_restore_folios(struct list_head *folio_list,
+				    struct list_head *non_hvo_folios);
+void hugetlb_vmemmap_optimize_folio(struct folio *folio);
 void hugetlb_vmemmap_optimize_folios(struct hstate *h, struct list_head *folio_list);
 void hugetlb_vmemmap_optimize_bootmem_page(unsigned long pfn, unsigned int order);
 
@@ -34,20 +33,19 @@ static inline void hugetlb_vmemmap_write_unlock(void)
 }
 
 #else
-static inline int hugetlb_vmemmap_restore_folio(const struct hstate *h, struct folio *folio)
+static inline int hugetlb_vmemmap_restore_folio(struct folio *folio)
 {
 	return 0;
 }
 
-static inline long hugetlb_vmemmap_restore_folios(const struct hstate *h,
-					struct list_head *folio_list,
-					struct list_head *non_hvo_folios)
+static inline long hugetlb_vmemmap_restore_folios(struct list_head *folio_list,
+						  struct list_head *non_hvo_folios)
 {
 	list_splice_init(folio_list, non_hvo_folios);
 	return 0;
 }
 
-static inline void hugetlb_vmemmap_optimize_folio(const struct hstate *h, struct folio *folio)
+static inline void hugetlb_vmemmap_optimize_folio(struct folio *folio)
 {
 }
 

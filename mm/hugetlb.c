@@ -1519,7 +1519,7 @@ static void __update_and_free_hugetlb_folio(struct hstate *h,
 	 * is no longer identified as a hugetlb page.  hugetlb_vmemmap_restore_folio
 	 * can only be passed hugetlb pages and will BUG otherwise.
 	 */
-	if (clear_flag && hugetlb_vmemmap_restore_folio(h, folio)) {
+	if (clear_flag && hugetlb_vmemmap_restore_folio(folio)) {
 		spin_lock_irq(&hugetlb_lock);
 		/*
 		 * If we cannot allocate vmemmap pages, just refuse to free the
@@ -1671,7 +1671,7 @@ static void bulk_vmemmap_restore_error(struct hstate *h,
 			 * be freed without restoring vmemmap.
 			 */
 			if (folio_test_hugetlb(folio)) {
-				if (hugetlb_vmemmap_restore_folio(h, folio)) {
+				if (hugetlb_vmemmap_restore_folio(folio)) {
 					spin_lock_irq(&hugetlb_lock);
 					add_hugetlb_folio(h, folio, true);
 					spin_unlock_irq(&hugetlb_lock);
@@ -1701,7 +1701,7 @@ static void update_and_free_pages_bulk(struct hstate *h,
 	 * in an effort to make forward progress.
 	 */
 retry:
-	ret = hugetlb_vmemmap_restore_folios(h, folio_list, &non_hvo_folios);
+	ret = hugetlb_vmemmap_restore_folios(folio_list, &non_hvo_folios);
 	if (ret < 0) {
 		bulk_vmemmap_restore_error(h, folio_list, &non_hvo_folios);
 		goto retry;
@@ -1948,7 +1948,7 @@ static struct folio *alloc_fresh_hugetlb_folio(struct hstate *h,
 
 	folio = only_alloc_fresh_hugetlb_folio(h, gfp_mask, nid, nmask, NULL);
 	if (folio)
-		hugetlb_vmemmap_optimize_folio(h, folio);
+		hugetlb_vmemmap_optimize_folio(folio);
 	return folio;
 }
 
@@ -2117,7 +2117,7 @@ retry:
 		 * non-vmemmap optimized hugetlb folios.
 		 */
 		if (folio_test_hugetlb(folio)) {
-			rc = hugetlb_vmemmap_restore_folio(h, folio);
+			rc = hugetlb_vmemmap_restore_folio(folio);
 			if (rc) {
 				spin_lock_irq(&hugetlb_lock);
 				add_hugetlb_folio(h, folio, adjust_surplus);
@@ -3983,7 +3983,7 @@ static long demote_free_hugetlb_folios(struct hstate *src, struct hstate *dst,
 	LIST_HEAD(dst_list);
 	LIST_HEAD(ret_list);
 
-	rc = hugetlb_vmemmap_restore_folios(src, src_list, &ret_list);
+	rc = hugetlb_vmemmap_restore_folios(src_list, &ret_list);
 	list_splice_init(&ret_list, src_list);
 
 	/*
