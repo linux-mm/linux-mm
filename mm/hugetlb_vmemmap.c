@@ -488,21 +488,6 @@ long hugetlb_vmemmap_restore_folios(const struct hstate *h,
 	return ret;
 }
 
-/* Return true iff a HugeTLB whose vmemmap should and can be optimized. */
-static bool vmemmap_should_optimize_folio(const struct hstate *h, struct folio *folio)
-{
-	if (folio_test_hugetlb_vmemmap_optimized(folio))
-		return false;
-
-	if (!READ_ONCE(vmemmap_optimize_enabled))
-		return false;
-
-	if (!hugetlb_vmemmap_optimizable(h))
-		return false;
-
-	return true;
-}
-
 static int __hugetlb_vmemmap_optimize_folio(const struct hstate *h,
 					    struct folio *folio,
 					    struct list_head *vmemmap_pages,
@@ -511,9 +496,6 @@ static int __hugetlb_vmemmap_optimize_folio(const struct hstate *h,
 	int ret;
 
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_hugetlb(folio), folio);
-
-	if (!vmemmap_should_optimize_folio(h, folio))
-		return 0;
 
 	/*
 	 * Very Subtle
@@ -548,18 +530,12 @@ void hugetlb_vmemmap_optimize_folio(const struct hstate *h, struct folio *folio)
 {
 	LIST_HEAD(vmemmap_pages);
 
+	if (!READ_ONCE(vmemmap_optimize_enabled))
+		return;
+
 	guard(rwsem_read)(&vmemmap_remap_rwsem);
 	__hugetlb_vmemmap_optimize_folio(h, folio, &vmemmap_pages, 0);
 	free_vmemmap_page_list(&vmemmap_pages);
-}
-
-static int hugetlb_vmemmap_pteify_folio(const struct hstate *h, struct folio *folio,
-		unsigned long flags)
-{
-	if (!vmemmap_should_optimize_folio(h, folio))
-		return 0;
-
-	return vmemmap_pteify_folio(folio, flags);
 }
 
 void hugetlb_vmemmap_optimize_folios(struct hstate *h, struct list_head *folio_list)
@@ -568,12 +544,18 @@ void hugetlb_vmemmap_optimize_folios(struct hstate *h, struct list_head *folio_l
 	LIST_HEAD(vmemmap_pages);
 	unsigned long flags = VMEMMAP_DEFER_TLB_FLUSH;
 
+	if (!READ_ONCE(vmemmap_optimize_enabled))
+		return;
+
+	if (!hugetlb_vmemmap_optimizable(h))
+		return;
+
 	if (list_empty(folio_list))
 		return;
 
 	down_write(&vmemmap_remap_rwsem);
 	list_for_each_entry(folio, folio_list, lru) {
-		int ret = hugetlb_vmemmap_pteify_folio(h, folio, flags);
+		int ret = vmemmap_pteify_folio(folio, flags);
 
 		/*
 		 * Splitting the PMD requires allocating a page, thus let's fail
