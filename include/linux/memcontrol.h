@@ -10,6 +10,9 @@
 
 #ifndef _LINUX_MEMCONTROL_H
 #define _LINUX_MEMCONTROL_H
+
+struct dma_buf;
+
 #include <linux/cgroup.h>
 #include <linux/vm_event_item.h>
 #include <linux/hardirq.h>
@@ -41,6 +44,7 @@ enum memcg_stat_item {
 	MEMCG_ZSWAP_B,
 	MEMCG_ZSWAPPED,
 	MEMCG_ZSWAP_INCOMP,
+	MEMCG_DMABUF,
 	MEMCG_NR_STAT,
 };
 
@@ -687,6 +691,9 @@ int mem_cgroup_charge_hugetlb(struct folio *folio, struct mm_struct *mm,
 int mem_cgroup_swapin_charge_folio(struct folio *folio, unsigned short id,
 				   struct mm_struct *mm, gfp_t gfp);
 
+bool obj_cgroup_reserve_dmabuf(struct obj_cgroup *objcg, gfp_t gfp,
+			       unsigned long nr_pages);
+
 void __mem_cgroup_uncharge(struct folio *folio);
 
 /**
@@ -701,6 +708,11 @@ static inline void mem_cgroup_uncharge(struct folio *folio)
 		return;
 	__mem_cgroup_uncharge(folio);
 }
+
+void obj_cgroup_cancel_dmabuf(struct obj_cgroup *objcg, unsigned long nr_pages);
+
+void mem_cgroup_commit_dmabuf(struct dma_buf *dmabuf);
+void mem_cgroup_uncharge_dmabuf(struct dma_buf *dmabuf);
 
 void __mem_cgroup_uncharge_folios(struct folio_batch *folios);
 static inline void mem_cgroup_uncharge_folios(struct folio_batch *folios)
@@ -1199,7 +1211,27 @@ static inline int mem_cgroup_swapin_charge_folio(struct folio *folio,
 	return 0;
 }
 
+static inline bool obj_cgroup_reserve_dmabuf(struct obj_cgroup *objcg,
+					     gfp_t gfp,
+					     unsigned long nr_pages)
+{
+	return true;
+}
+
+static inline void obj_cgroup_cancel_dmabuf(struct obj_cgroup *objcg,
+					    unsigned long nr_pages)
+{
+}
+
+static inline void mem_cgroup_commit_dmabuf(struct dma_buf *dmabuf)
+{
+}
+
 static inline void mem_cgroup_uncharge(struct folio *folio)
+{
+}
+
+static inline void mem_cgroup_uncharge_dmabuf(struct dma_buf *dmabuf)
 {
 }
 
@@ -1770,6 +1802,7 @@ void __memcg_kmem_uncharge_page(struct page *page, int order);
  */
 struct obj_cgroup *current_obj_cgroup(void);
 struct obj_cgroup *get_obj_cgroup_from_folio(const struct folio *folio);
+struct obj_cgroup *get_obj_cgroup_from_fd(int fd);
 
 static inline struct obj_cgroup *get_obj_cgroup_from_current(void)
 {
@@ -1783,6 +1816,11 @@ static inline struct obj_cgroup *get_obj_cgroup_from_current(void)
 
 int obj_cgroup_charge(struct obj_cgroup *objcg, gfp_t gfp, size_t size);
 void obj_cgroup_uncharge(struct obj_cgroup *objcg, size_t size);
+
+bool obj_cgroup_transfer_charge(struct obj_cgroup **ptr_objcg,
+				struct obj_cgroup *new_objcg,
+				enum memcg_stat_item item,
+				unsigned int nr_pages);
 
 extern struct static_key_false memcg_bpf_enabled_key;
 static inline bool memcg_bpf_enabled(void)
@@ -1875,6 +1913,24 @@ static inline void __memcg_kmem_uncharge_page(struct page *page, int order)
 static inline struct obj_cgroup *get_obj_cgroup_from_folio(const struct folio *folio)
 {
 	return NULL;
+}
+
+static inline struct obj_cgroup *get_obj_cgroup_from_fd(int fd)
+{
+	return ERR_PTR(-EOPNOTSUPP);
+}
+
+static inline struct obj_cgroup *get_obj_cgroup_from_current(void)
+{
+	return NULL;
+}
+
+static inline bool obj_cgroup_transfer_charge(struct obj_cgroup **ptr_objcg,
+					      struct obj_cgroup *new_objcg,
+					      enum memcg_stat_item item,
+					      unsigned int nr_pages)
+{
+	return true;
 }
 
 static inline bool memcg_bpf_enabled(void)

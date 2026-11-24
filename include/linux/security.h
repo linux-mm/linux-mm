@@ -352,6 +352,8 @@ int security_capable(const struct cred *cred,
 		       struct user_namespace *ns,
 		       int cap,
 		       unsigned int opts);
+int security_current_memcg_charge_task(const struct cred *cred);
+int security_current_memcg_charge_cgroup(const struct file *file);
 int security_quotactl(int cmds, int type, int id, const struct super_block *sb);
 int security_quota_on(struct dentry *dentry);
 int security_syslog(int type);
@@ -708,6 +710,16 @@ static inline int security_capable(const struct cred *cred,
 				   unsigned int opts)
 {
 	return cap_capable(cred, ns, cap, opts);
+}
+
+static inline int security_current_memcg_charge_task(const struct cred *cred)
+{
+	return 0;
+}
+
+static inline int security_current_memcg_charge_cgroup(const struct file *file)
+{
+	return 0;
 }
 
 static inline int security_quotactl(int cmds, int type, int id,

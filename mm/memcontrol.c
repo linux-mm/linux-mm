@@ -49,6 +49,7 @@
 #include <linux/slab.h>
 #include <linux/swapops.h>
 #include <linux/spinlock.h>
+#include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 #include <linux/vmpressure.h>
@@ -59,6 +60,7 @@
 #include <linux/lockdep.h>
 #include <linux/resume_user_mode.h>
 #include <linux/psi.h>
+#include <linux/security.h>
 #include <linux/seq_buf.h>
 #include <linux/sched/isolation.h>
 #include <linux/kmemleak.h>
@@ -70,6 +72,7 @@
 #include <net/ip.h>
 #include "slab.h"
 #include "memcontrol-v1.h"
+#include <linux/dma-buf.h>
 
 #include <linux/uaccess.h>
 
@@ -459,6 +462,7 @@ static const unsigned int memcg_stat_items[] = {
 	MEMCG_ZSWAP_B,
 	MEMCG_ZSWAPPED,
 	MEMCG_ZSWAP_INCOMP,
+	MEMCG_DMABUF,
 };
 
 #define NR_MEMCG_NODE_STAT_ITEMS ARRAY_SIZE(memcg_node_stat_items)
@@ -1645,6 +1649,7 @@ static const struct memory_stat memory_stats[] = {
 #ifdef CONFIG_HUGETLB_PAGE
 	{ "hugetlb",			NR_HUGETLB			},
 #endif
+	{ "dmabuf",			MEMCG_DMABUF			},
 
 	/* The memory events */
 	{ "workingset_refault_anon",	WORKINGSET_REFAULT_ANON		},
@@ -3164,6 +3169,163 @@ struct obj_cgroup *get_obj_cgroup_from_folio(const struct folio *folio)
 		obj_cgroup_get(objcg);
 
 	return objcg;
+}
+
+/*
+ * Charging outside the caller's own memcg subtree can escape its limits
+ * or push reclaim and OOM onto other cgroups.
+ */
+static bool mem_cgroup_may_charge(struct mem_cgroup *memcg)
+{
+	struct mem_cgroup *self = get_mem_cgroup_from_current();
+	bool ret = mem_cgroup_is_descendant(memcg, self);
+
+	mem_cgroup_put(self);
+	return ret || capable(CAP_SYS_RESOURCE);
+}
+
+/**
+ * get_obj_cgroup_from_fd - resolve an object cgroup from a cgroupfd or pidfd
+ * @fd: file descriptor (cgroupfd or pidfd)
+ *
+ * Tries @fd as a cgroupfd first; if that fails, tries it as a pidfd. Only
+ * cgroup2 directories are accepted as cgroupfds, any other fd is tried as a
+ * pidfd.
+ *
+ * Resolving a memcg outside the caller's own subtree requires CAP_SYS_RESOURCE.
+ *
+ * On success returns a referenced objcg pointer. On failure returns
+ * an ERR_PTR.
+ */
+struct obj_cgroup *get_obj_cgroup_from_fd(int fd)
+{
+	struct cgroup_subsys_state *css;
+	const struct cred *tcred;
+	struct obj_cgroup *objcg;
+	struct mem_cgroup *memcg;
+	struct task_struct *task;
+	unsigned int pidfd_flags;
+	int ret;
+
+	if (mem_cgroup_disabled())
+		return ERR_PTR(-EOPNOTSUPP);
+
+	CLASS(fd_raw, f)(fd);
+	if (fd_empty(f))
+		return ERR_PTR(-EBADF);
+
+	css = css_tryget_online_from_dir(fd_file(f)->f_path.dentry,
+					 &memory_cgrp_subsys);
+	if (!IS_ERR(css) && !cgroup_on_dfl(css->cgroup)) {
+		css_put(css);
+		css = ERR_PTR(-EBADF);
+	}
+
+	if (!IS_ERR(css)) {
+		/* fd is a cgroupfd */
+		ret = security_current_memcg_charge_cgroup(fd_file(f));
+		if (ret) {
+			css_put(css);
+			return ERR_PTR(ret);
+		}
+	} else {
+		if (PTR_ERR(css) != -EBADF)
+			return ERR_CAST(css);
+
+		/* fd is a pidfd */
+		task = pidfd_get_task(fd, &pidfd_flags);
+		if (IS_ERR(task))
+			return ERR_CAST(task);
+
+		tcred = get_task_cred(task);
+		ret = security_current_memcg_charge_task(tcred);
+		put_cred(tcred);
+		if (ret) {
+			put_task_struct(task);
+			return ERR_PTR(ret);
+		}
+
+		rcu_read_lock();
+		css = task_css(task, memory_cgrp_id);
+		put_task_struct(task);
+		if (!css || !css_tryget_online(css)) {
+			rcu_read_unlock();
+			return ERR_PTR(-ENOENT);
+		}
+		rcu_read_unlock();
+	}
+
+	memcg = mem_cgroup_from_css(css);
+	if (!mem_cgroup_may_charge(memcg)) {
+		mem_cgroup_put(memcg);
+		return ERR_PTR(-EPERM);
+	}
+
+	objcg = get_obj_cgroup_from_memcg(memcg, numa_node_id());
+	mem_cgroup_put(memcg);
+
+	if (!objcg)
+		return ERR_PTR(-ENOENT);
+
+	return objcg;
+}
+
+/**
+ * obj_cgroup_transfer_charge - move a charge between object cgroups
+ * @ptr_objcg: pointer to the object cgroup to transfer from
+ * @new_objcg: target object cgroup; caller must hold a reference
+ * @item: memcg stat counter to adjust; must not be a node stat
+ * @nr_pages: number of pages to transfer
+ *
+ * Transfers @nr_pages of charge from *@ptr_objcg to @new_objcg and, on
+ * success, stores @new_objcg in *@ptr_objcg. Does nothing if both resolve
+ * to the same memcg; *@ptr_objcg is left untouched in that case.
+ *
+ * Updates to *@ptr_objcg must be serialized by the caller.
+ * Returns %true on success, %false if the charge against @new_objcg
+ * failed.
+ */
+bool obj_cgroup_transfer_charge(struct obj_cgroup **ptr_objcg,
+				struct obj_cgroup *new_objcg,
+				enum memcg_stat_item item,
+				unsigned int nr_pages)
+{
+	struct obj_cgroup *old_objcg = *ptr_objcg;
+	struct mem_cgroup *old_memcg = NULL, *new_memcg;
+	bool ret = true;
+
+	if (!new_objcg || mem_cgroup_disabled())
+		return true;
+
+	new_memcg = get_mem_cgroup_from_objcg(new_objcg);
+	if (old_objcg)
+		old_memcg = get_mem_cgroup_from_objcg(old_objcg);
+
+	if (old_memcg == new_memcg)
+		goto out;
+
+	if (try_charge(new_memcg, GFP_KERNEL, nr_pages)) {
+		ret = false;
+		goto out;
+	}
+
+	mod_memcg_state(new_memcg, item, nr_pages);
+
+	if (old_objcg) {
+		/* Uncharge old cgroup */
+		mod_memcg_state(old_memcg, item, -nr_pages);
+		if (!mem_cgroup_is_root(old_memcg))
+			refill_stock(old_memcg, nr_pages);
+	}
+
+	obj_cgroup_get(new_objcg);
+	*ptr_objcg = new_objcg;
+	obj_cgroup_put(old_objcg);
+
+out:
+	mem_cgroup_put(new_memcg);
+	mem_cgroup_put(old_memcg);
+	return ret;
 }
 
 #ifdef CONFIG_MEMCG_NMI_SAFETY_REQUIRES_ATOMIC
@@ -5771,6 +5933,115 @@ void mem_cgroup_sk_uncharge(const struct sock *sk, unsigned int nr_pages)
 void mem_cgroup_flush_workqueue(void)
 {
 	flush_workqueue(memcg_wq);
+}
+
+/**
+ * obj_cgroup_reserve_dmabuf - charge an object cgroup for a dma-buf allocation
+ * @objcg: object cgroup to charge (may be %NULL)
+ * @gfp_mask: reclaim mode
+ * @nr_pages: number of pages to charge
+ *
+ * Charges @nr_pages against @objcg. Call this before allocating pages so
+ * the cgroup limit is enforced up front. On success the caller must
+ * finalize the charge with the MEMCG_DMABUF stat update, or call
+ * obj_cgroup_cancel_dmabuf() to undo it.
+ *
+ * @nr_pages is derived from the buffer size, which may be controlled by
+ * userspace, so it is taken as unsigned long and rejected above what
+ * a single memcg charge can account.
+ *
+ * Returns %true on success, %false if @nr_pages is too large or the
+ * charge would exceed the limit.
+ */
+bool obj_cgroup_reserve_dmabuf(struct obj_cgroup *objcg, gfp_t gfp_mask,
+			       unsigned long nr_pages)
+{
+	struct mem_cgroup *memcg;
+	int ret;
+
+	if (!objcg || mem_cgroup_disabled())
+		return true;
+
+	/* a single memcg charge accounts at most INT_MAX pages */
+	if (nr_pages > INT_MAX)
+		return false;
+
+	memcg = get_mem_cgroup_from_objcg(objcg);
+	ret = try_charge(memcg, gfp_mask, nr_pages);
+	mem_cgroup_put(memcg);
+	return !ret;
+}
+EXPORT_SYMBOL_GPL(obj_cgroup_reserve_dmabuf);
+
+/**
+ * obj_cgroup_cancel_dmabuf - undo a dma-buf charge
+ * @objcg: object cgroup to uncharge (may be %NULL)
+ * @nr_pages: same value passed to obj_cgroup_reserve_dmabuf()
+ *
+ * Returns @nr_pages of charge to @objcg. Use when the allocation fails
+ * after obj_cgroup_reserve_dmabuf().
+ */
+void obj_cgroup_cancel_dmabuf(struct obj_cgroup *objcg, unsigned long nr_pages)
+{
+	struct mem_cgroup *memcg;
+
+	if (!objcg)
+		return;
+
+	memcg = get_mem_cgroup_from_objcg(objcg);
+	if (!mem_cgroup_is_root(memcg))
+		refill_stock(memcg, nr_pages);
+	mem_cgroup_put(memcg);
+}
+EXPORT_SYMBOL_GPL(obj_cgroup_cancel_dmabuf);
+
+/**
+ * mem_cgroup_commit_dmabuf - finalize a dma-buf charge
+ * @dmabuf: buffer whose charge is being finalized
+ *
+ * Adds @dmabuf's size to the %MEMCG_DMABUF stat of the cgroup its object
+ * cgroup currently resolves to. Call after obj_cgroup_reserve_dmabuf()
+ * succeeded and the buffer is about to be exported. Safe to call when
+ * @dmabuf->objcg is %NULL.
+ */
+void mem_cgroup_commit_dmabuf(struct dma_buf *dmabuf)
+{
+	struct mem_cgroup *memcg;
+
+	if (!dmabuf->objcg)
+		return;
+
+	memcg = get_mem_cgroup_from_objcg(dmabuf->objcg);
+	mod_memcg_state(memcg, MEMCG_DMABUF,
+			PAGE_ALIGN(dmabuf->size) >> PAGE_SHIFT);
+	mem_cgroup_put(memcg);
+}
+
+/**
+ * mem_cgroup_uncharge_dmabuf - uncharge a dma-buf from its object cgroup
+ * @dmabuf: buffer to uncharge
+ *
+ * Reverses a finalized dma-buf charge. Drops the object cgroup
+ * reference stored in @dmabuf->objcg and clears the pointer.
+ * Safe to call when @dmabuf->objcg is %NULL.
+ */
+void mem_cgroup_uncharge_dmabuf(struct dma_buf *dmabuf)
+{
+	struct obj_cgroup *objcg = dmabuf->objcg;
+	struct mem_cgroup *memcg;
+	unsigned long nr_pages;
+
+	if (!objcg)
+		return;
+
+	memcg = get_mem_cgroup_from_objcg(objcg);
+	nr_pages = PAGE_ALIGN(dmabuf->size) >> PAGE_SHIFT;
+	mod_memcg_state(memcg, MEMCG_DMABUF, -nr_pages);
+	if (!mem_cgroup_is_root(memcg))
+		refill_stock(memcg, nr_pages);
+	mem_cgroup_put(memcg);
+	obj_cgroup_put(objcg);
+	dmabuf->objcg = NULL;
 }
 
 static int __init cgroup_memory(char *s)
