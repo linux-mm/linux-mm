@@ -156,6 +156,27 @@ macro_rules! warn_on {
     }};
 }
 
+/// Report a warning on the first time `cond` is true and return the condition's evaluation result.
+#[macro_export]
+macro_rules! warn_once {
+    ($cond:expr) => {{
+        let cond = $cond;
+
+        #[cfg(CONFIG_DEBUG_BUGVERBOSE_DETAILED)]
+        const COND_STR: &str = concat!("[", stringify!($cond), "] ", file!());
+        #[cfg(not(CONFIG_DEBUG_BUGVERBOSE_DETAILED))]
+        const COND_STR: &str = file!();
+
+        if cond {
+            const WARN_ON_FLAGS: u32 = $crate::bug::bugflag_taint($crate::bindings::TAINT_WARN)
+                | $crate::bindings::BUGFLAG_ONCE;
+
+            $crate::warn_flags!(COND_STR, WARN_ON_FLAGS);
+        }
+        cond
+    }};
+}
+
 #[cfg(CONFIG_RUST_BUG_KUNIT_TEST)]
 #[macros::kunit_tests(rust_kernel_bug)]
 mod tests {
@@ -173,6 +194,31 @@ mod tests {
 
         assert!(!warn_on!(false));
         assert!(warn_on!(true));
+
+        // SAFETY: `kunit_suppressed_warning_count()` accepts any value returned by
+        // `kunit_start_suppress_warning()`.
+        let suppressed_count = unsafe { bindings::kunit_suppressed_warning_count(handle) };
+
+        // SAFETY: `test` is valid as above. `kunit_end_suppress_warning()` accepts any
+        // value returned by `kunit_start_suppress_warning()`.
+        unsafe { bindings::kunit_end_suppress_warning(test, handle) };
+
+        assert_eq!(suppressed_count, 1);
+    }
+
+    #[test]
+    fn test_warn_once() {
+        // SAFETY: `kunit_get_current_test()` is always safe to call (it has
+        // fallbacks for when no KUnit test is running).
+        let test = unsafe { bindings::kunit_get_current_test() };
+
+        // SAFETY: This function runs only as a KUnit test case, so `test` is a
+        // valid pointer to the running test.
+        let handle = unsafe { bindings::kunit_start_suppress_warning(test) };
+
+        for _ in 0..2 {
+            assert!(warn_once!(true));
+        }
 
         // SAFETY: `kunit_suppressed_warning_count()` accepts any value returned by
         // `kunit_start_suppress_warning()`.
