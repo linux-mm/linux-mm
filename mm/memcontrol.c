@@ -1748,10 +1748,36 @@ static bool memcg_accounts_hugetlb(void)
 {
 	return cgrp_dfl_root.flags & CGRP_ROOT_MEMORY_HUGETLB_ACCOUNTING;
 }
+
+/*
+ * A cgroup can keep HugeTLB folios out of its own memory accounting, and out
+ * of that of its descendants, with memory.hugetlb_accounting. Such folios are
+ * charged to the parent of the topmost cgroup that opted out. That way the
+ * cgroups above still account for the memory, and the file cannot be used to
+ * escape their limits.
+ *
+ * The root cgroup has no such file, so there always is a parent to return.
+ */
+static struct mem_cgroup *hugetlb_charge_target(struct mem_cgroup *memcg)
+{
+	struct mem_cgroup *target = memcg;
+
+	for (; memcg; memcg = parent_mem_cgroup(memcg)) {
+		if (!READ_ONCE(memcg->hugetlb_accounting))
+			target = parent_mem_cgroup(memcg);
+	}
+
+	return target;
+}
 #else /* CONFIG_HUGETLB_PAGE */
 static bool memcg_accounts_hugetlb(void)
 {
 	return false;
+}
+
+static struct mem_cgroup *hugetlb_charge_target(struct mem_cgroup *memcg)
+{
+	return memcg;
 }
 #endif /* CONFIG_HUGETLB_PAGE */
 
@@ -4291,6 +4317,9 @@ mem_cgroup_css_alloc(struct cgroup_subsys_state *parent_css)
 		return ERR_CAST(memcg);
 
 	page_counter_set_high(&memcg->memory, PAGE_COUNTER_MAX);
+#ifdef CONFIG_HUGETLB_PAGE
+	WRITE_ONCE(memcg->hugetlb_accounting, true);
+#endif
 #ifdef CONFIG_ZSWAP
 	memcg->zswap_max = PAGE_COUNTER_MAX;
 	WRITE_ONCE(memcg->zswap_writeback, true);
@@ -4487,6 +4516,9 @@ static void mem_cgroup_css_reset(struct cgroup_subsys_state *css)
 	page_counter_set_max(&memcg->memory, PAGE_COUNTER_MAX);
 	page_counter_set_max(&memcg->swap, PAGE_COUNTER_MAX);
 	WRITE_ONCE(memcg->oom_group, false);
+#ifdef CONFIG_HUGETLB_PAGE
+	WRITE_ONCE(memcg->hugetlb_accounting, true);
+#endif
 #ifdef CONFIG_ZSWAP
 	WRITE_ONCE(memcg->zswap_max, PAGE_COUNTER_MAX);
 	WRITE_ONCE(memcg->zswap_writeback, true);
@@ -5140,6 +5172,36 @@ static ssize_t memory_oom_group_write(struct kernfs_open_file *of,
 	return nbytes;
 }
 
+#ifdef CONFIG_HUGETLB_PAGE
+static int memory_hugetlb_accounting_show(struct seq_file *m, void *v)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_seq(m);
+
+	seq_printf(m, "%d\n", READ_ONCE(memcg->hugetlb_accounting));
+
+	return 0;
+}
+
+static ssize_t memory_hugetlb_accounting_write(struct kernfs_open_file *of,
+					       char *buf, size_t nbytes,
+					       loff_t off)
+{
+	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
+	int ret, hugetlb_accounting;
+
+	ret = kstrtoint(strstrip(buf), 0, &hugetlb_accounting);
+	if (ret)
+		return ret;
+
+	if (hugetlb_accounting != 0 && hugetlb_accounting != 1)
+		return -EINVAL;
+
+	WRITE_ONCE(memcg->hugetlb_accounting, hugetlb_accounting);
+
+	return nbytes;
+}
+#endif /* CONFIG_HUGETLB_PAGE */
+
 static ssize_t memory_reclaim(struct kernfs_open_file *of, char *buf,
 			      size_t nbytes, loff_t off)
 {
@@ -5219,6 +5281,14 @@ static struct cftype memory_files[] = {
 		.seq_show = memory_oom_group_show,
 		.write = memory_oom_group_write,
 	},
+#ifdef CONFIG_HUGETLB_PAGE
+	{
+		.name = "hugetlb_accounting",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.seq_show = memory_hugetlb_accounting_show,
+		.write = memory_hugetlb_accounting_write,
+	},
+#endif
 	{
 		.name = "reclaim",
 		.flags = CFTYPE_NS_DELEGATABLE,
@@ -5355,7 +5425,10 @@ int __mem_cgroup_charge(struct folio *folio, struct mm_struct *mm, gfp_t gfp)
  * already been obtained and charged to the appropriate hugetlb cgroup
  * controller (if it is enabled).
  *
- * Returns ENOMEM if the memcg is already full.
+ * The folio is charged to the memcg of @mm, or to one of its ancestors if
+ * that memcg is exempt through memory.hugetlb_accounting.
+ *
+ * Returns ENOMEM if the memcg that is charged is already full.
  * Returns 0 if either the charge was successful, or if we skip the charging.
  */
 int mem_cgroup_charge_hugetlb(struct folio *folio, struct mm_struct *mm,
@@ -5373,7 +5446,8 @@ int mem_cgroup_charge_hugetlb(struct folio *folio, struct mm_struct *mm,
 		!memcg || !cgroup_subsys_on_dfl(memory_cgrp_subsys))
 		goto out;
 
-	if (charge_memcg(folio, memcg, gfp))
+	/* The ancestors of memcg are pinned by the reference we hold on it. */
+	if (charge_memcg(folio, hugetlb_charge_target(memcg), gfp))
 		ret = -ENOMEM;
 
 out:
