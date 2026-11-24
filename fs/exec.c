@@ -1100,8 +1100,16 @@ void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec)
 	size_t len = strnlen(buf, sizeof(tsk->comm) - 1);
 
 	trace_task_rename(tsk, buf);
-	memcpy(tsk->comm, buf, len);
-	memset(&tsk->comm[len], 0, sizeof(tsk->comm) - len);
+	/*
+	 * tsk->comm is read locklessly by many users (e.g. tracepoints,
+	 * printk). comm[TASK_COMM_LEN - 1] is never written with a non-NUL
+	 * byte, so concurrent readers see a bounded, NUL-terminated string;
+	 * at worst a mix of the old and new name. Mark the update as
+	 * intentionally racy.
+	 */
+	data_race(memcpy(tsk->comm, buf, len));
+	/* Same as above: lockless readers tolerate a partially updated comm. */
+	data_race(memset(&tsk->comm[len], 0, sizeof(tsk->comm) - len));
 	perf_event_comm(tsk, exec);
 }
 
