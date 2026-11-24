@@ -733,9 +733,75 @@ static int uio_mmap_logical(struct vm_area_struct *vma)
 	return 0;
 }
 
-static const struct vm_operations_struct uio_physical_vm_ops = {
+/* Populate UIO maps on fault, huge where the arch and alignment allow */
+static vm_fault_t uio_physical_huge_fault(struct vm_fault *vmf,
+					  unsigned int order)
+{
+	unsigned long addr = vmf->address & ~((PAGE_SIZE << order) - 1);
+	struct vm_area_struct *vma = vmf->vma;
+	struct uio_device *idev = vma->vm_private_data;
+	vm_fault_t ret = VM_FAULT_SIGBUS;
+	unsigned long pfn;
+
+	/* An order-aligned addr below the VMA would wrap the subtraction */
+	if (addr < vma->vm_start)
+		return VM_FAULT_FALLBACK;
+
+	/* vm_pgoff is the base pfn, not the map index (uio_mmap_physical()) */
+	pfn = vma->vm_pgoff + ((addr - vma->vm_start) >> PAGE_SHIFT);
+
+	mutex_lock(&idev->info_lock);
+
+	if (idev->info)
+		ret = vmf_insert_pfn_order(vmf, pfn, order);
+
+	mutex_unlock(&idev->info_lock);
+
+	return ret;
+}
+
+static vm_fault_t uio_physical_fault(struct vm_fault *vmf)
+{
+	return uio_physical_huge_fault(vmf, 0);
+}
+
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+/* generic_access_phys() needs a present PTE; a lazy mapping may have none */
+static int uio_physical_access(struct vm_area_struct *vma, unsigned long addr,
+			       void *buf, int len, int write)
+{
+	unsigned int fault_flags = FAULT_FLAG_REMOTE;
+	int ret;
+
+	if (write)
+		fault_flags |= FAULT_FLAG_WRITE;
+
+	/* unlocked == NULL keeps the mmap lock held and the vma valid */
+	ret = fixup_user_fault(vma->vm_mm, addr, fault_flags, NULL);
+	if (ret)
+		return ret;
+
+	return generic_access_phys(vma, addr, buf, len, write);
+}
+#endif
+
+/*
+ * vm_ops for a COW mapping, which vmf_insert_pfn*() cannot populate. Must
+ * exist even when empty: a NULL vm_ops would make the VMA anonymous.
+ */
+static const struct vm_operations_struct uio_physical_cow_vm_ops = {
 #ifdef CONFIG_HAVE_IOREMAP_PROT
 	.access = generic_access_phys,
+#endif
+};
+
+static const struct vm_operations_struct uio_physical_vm_ops = {
+	.fault = uio_physical_fault,
+#ifdef CONFIG_ARCH_SUPPORTS_HUGE_PFNMAP
+	.huge_fault = uio_physical_huge_fault,
+#endif
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+	.access = uio_physical_access,
 #endif
 };
 
@@ -754,7 +820,6 @@ static int uio_mmap_physical(struct vm_area_struct *vma)
 	if (vma->vm_end - vma->vm_start > mem->size)
 		return -EINVAL;
 
-	vma->vm_ops = &uio_physical_vm_ops;
 	if (idev->info->mem[mi].memtype == UIO_MEM_PHYS)
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
@@ -764,14 +829,30 @@ static int uio_mmap_physical(struct vm_area_struct *vma)
 	 * up above in uio_find_mem_index(), rather than an
 	 * actual page offset into the mmap.
 	 *
-	 * So we just do the physical mmap without a page
-	 * offset.
+	 * So a COW mapping is remapped below without a page
+	 * offset, and the lazy path overwrites vm_pgoff.
 	 */
-	return remap_pfn_range(vma,
-			       vma->vm_start,
-			       mem->addr >> PAGE_SHIFT,
-			       vma->vm_end - vma->vm_start,
-			       vma->vm_page_prot);
+	if (vma_is_cow_mapping(vma)) {
+		vma->vm_ops = &uio_physical_cow_vm_ops;
+
+		return remap_pfn_range(vma,
+				       vma->vm_start,
+				       mem->addr >> PAGE_SHIFT,
+				       vma->vm_end - vma->vm_start,
+				       vma->vm_page_prot);
+	}
+
+	vma->vm_ops = &uio_physical_vm_ops;
+
+	/*
+	 * A VMA split adds the split offset to vm_pgoff, so the map index
+	 * stored there would no longer find the map. Store the base pfn
+	 * instead, as remap_pfn_range() does for COW mappings.
+	 */
+	vma->vm_pgoff = mem->addr >> PAGE_SHIFT;
+
+	/* Tracking reserves the memory type, for PAT conflict detection */
+	return track_pfn_range(vma, mem->addr >> PAGE_SHIFT);
 }
 
 static int uio_mmap_dma_coherent(struct vm_area_struct *vma)
