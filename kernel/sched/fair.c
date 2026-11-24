@@ -2911,6 +2911,15 @@ bool should_numa_migrate_memory(struct task_struct *p, struct folio *folio,
 		return !numa_promotion_rate_limit(pgdat, rate_limit, nr);
 	}
 
+	/*
+	 * Past this point the folio is migrated based on the task placement
+	 * state, which only NUMA_BALANCING_NORMAL does. If it was cleared,
+	 * or NUMA balancing disabled, since this hinting fault was armed, just
+	 * restore the mapping.
+	 */
+	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL))
+		return false;
+
 	this_cpupid = cpu_pid_to_cpupid(dst_cpu, current->pid);
 	last_cpupid = folio_xchg_last_cpupid(folio, this_cpupid);
 
@@ -4312,6 +4321,13 @@ static void task_numa_work(struct callback_head *work)
 	 * work.
 	 */
 	if (p->flags & PF_EXITING)
+		return;
+
+	/*
+	 * NUMA balancing may have been disabled after this work was queued,
+	 * don't arm new hinting faults.
+	 */
+	if (!static_branch_likely(&sched_numa_balancing))
 		return;
 
 	/*
