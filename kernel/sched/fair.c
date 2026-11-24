@@ -4164,6 +4164,15 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
 	     !cpupid_valid(last_cpupid)))
 		return;
 
+	/*
+	 * Without NUMA_BALANCING_NORMAL top-tier folios are not armed for
+	 * hinting faults, the only top-tier faults are the folios just
+	 * promoted from the slower tiers. Any other one was armed before
+	 * NUMA_BALANCING_NORMAL was cleared, don't let it drive placement.
+	 */
+	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL) && !migrated)
+		return;
+
 	/* Allocate buffer to track faults on a per-node basis */
 	if (unlikely(!p->numa_faults)) {
 		int size = sizeof(*p->numa_faults) *
@@ -12514,6 +12523,13 @@ has_spare:
 #ifdef CONFIG_NUMA_BALANCING
 static inline enum fbq_type fbq_classify_group(struct sg_lb_stats *sgs)
 {
+	/*
+	 * The preferred nodes behind nr_numa_running and nr_preferred_running
+	 * are not updated while NUMA balancing is disabled, don't classify on
+	 * stale values.
+	 */
+	if (!static_branch_likely(&sched_numa_balancing))
+		return all;
 	if (sgs->sum_h_nr_running > sgs->nr_numa_running)
 		return regular;
 	if (sgs->sum_h_nr_running > sgs->nr_preferred_running)
@@ -12523,6 +12539,8 @@ static inline enum fbq_type fbq_classify_group(struct sg_lb_stats *sgs)
 
 static inline enum fbq_type fbq_classify_rq(struct rq *rq)
 {
+	if (!static_branch_likely(&sched_numa_balancing))
+		return regular;
 	if (rq->nr_running > rq->nr_numa_running)
 		return regular;
 	if (rq->nr_running > rq->nr_preferred_running)
@@ -12824,17 +12842,20 @@ sched_balance_find_dst_group(struct sched_domain *sd, struct task_struct *p, int
 		if (sd->flags & SD_NUMA) {
 			int imb_numa_nr = sd->imb_numa_nr;
 #ifdef CONFIG_NUMA_BALANCING
-			int idlest_cpu;
 			/*
 			 * If there is spare capacity at NUMA, try to select
 			 * the preferred node
 			 */
-			if (cpu_to_node(this_cpu) == p->numa_preferred_nid)
-				return NULL;
+			if (static_branch_likely(&sched_numa_balancing)) {
+				int idlest_cpu;
 
-			idlest_cpu = cpumask_first(sched_group_span(idlest));
-			if (cpu_to_node(idlest_cpu) == p->numa_preferred_nid)
-				return idlest;
+				if (cpu_to_node(this_cpu) == p->numa_preferred_nid)
+					return NULL;
+
+				idlest_cpu = cpumask_first(sched_group_span(idlest));
+				if (cpu_to_node(idlest_cpu) == p->numa_preferred_nid)
+					return idlest;
+			}
 #endif /* CONFIG_NUMA_BALANCING */
 			/*
 			 * Otherwise, keep the task close to the wakeup source
