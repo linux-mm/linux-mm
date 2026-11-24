@@ -21,9 +21,7 @@
  * HVO which is only active if the size of struct page is a power of 2.
  */
 #define MAX_FOLIO_VMEMMAP_ALIGN					\
-	(IS_ENABLED(CONFIG_VMEMMAP_OPTIMIZATION) &&		\
-	 is_power_of_2(sizeof(struct page)) ?			\
-	 MAX_FOLIO_NR_PAGES * sizeof(struct page) : 0)
+	(vmemmap_optimization_supported() ? MAX_FOLIO_NR_PAGES * sizeof(struct page) : 0)
 
 /* The number of retained vmemmap pages with HVO enabled. */
 #define VMEMMAP_OPTIMIZATION_PAGES		1
@@ -33,10 +31,7 @@
 
 static inline bool vmemmap_optimizable_order(unsigned int order)
 {
-	if (!IS_ENABLED(CONFIG_VMEMMAP_OPTIMIZATION))
-		return false;
-
-	if (!is_power_of_2(sizeof(struct page)))
+	if (!vmemmap_optimization_supported())
 		return false;
 
 	return order >= VMEMMAP_OPTIMIZATION_MIN_ORDER;
@@ -115,10 +110,7 @@ static inline bool vmemmap_optimizable_pfn(unsigned long pfn, unsigned int order
 {
 	const unsigned long nr_pages = 1UL << order;
 
-	if (!IS_ENABLED(CONFIG_VMEMMAP_OPTIMIZATION))
-		return false;
-
-	if (!is_power_of_2(sizeof(struct page)))
+	if (!vmemmap_optimization_supported())
 		return false;
 
 	return (pfn & (nr_pages - 1)) >= VMEMMAP_OPTIMIZATION_NR_STRUCT_PAGES;
