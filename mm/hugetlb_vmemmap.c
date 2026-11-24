@@ -408,7 +408,6 @@ static int __hugetlb_vmemmap_restore_folio(struct folio *folio, unsigned long fl
 	int ret;
 
 	VM_WARN_ON_ONCE_FOLIO(!folio_test_hugetlb(folio), folio);
-	VM_WARN_ON_ONCE_FOLIO(folio_ref_count(folio), folio);
 
 	if (!folio_test_hugetlb_vmemmap_optimized(folio))
 		return 0;
