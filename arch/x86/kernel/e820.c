@@ -17,6 +17,7 @@
 #include <linux/kvm_types.h>
 #include <linux/cc_platform.h>
 
+#include <asm/cmdline.h>
 #include <asm/e820/api.h>
 #include <asm/setup.h>
 
@@ -908,7 +909,12 @@ __initdata static int userdef;
 
 __init static bool cc_ignore_cmdline_mem(const char *opt)
 {
+	char buf[32];
+
 	if (!cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
+		return false;
+
+	if (cmdline_find_option(boot_command_line, "elfcorehdr", buf, sizeof(buf)) >= 0)
 		return false;
 
 	pr_warn("%s= is not supported in confidential guests, ignoring\n", opt);
