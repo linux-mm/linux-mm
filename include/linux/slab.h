@@ -927,27 +927,6 @@ void *kmem_cache_alloc_from_sheaf_noprof(struct kmem_cache *cachep, gfp_t gfp,
 unsigned int kmem_cache_sheaf_size(struct slab_sheaf *sheaf);
 
 /*
- * These macros allow declaring a kmem_buckets * parameter alongside size, which
- * can be compiled out with CONFIG_SLAB_BUCKETS=n so that a large number of call
- * sites don't have to pass NULL.
- */
-#ifdef CONFIG_SLAB_BUCKETS
-#define DECL_BUCKET_PARAMS(_size, _b)	size_t (_size), kmem_buckets *(_b)
-#define PASS_BUCKET_PARAMS(_size, _b)	(_size), (_b)
-#define PASS_BUCKET_PARAM(_b)		(_b)
-#else
-#define DECL_BUCKET_PARAMS(_size, _b)	size_t (_size)
-#define PASS_BUCKET_PARAMS(_size, _b)	(_size)
-#define PASS_BUCKET_PARAM(_b)		NULL
-#endif
-
-#define DECL_KMALLOC_PARAMS(_size, _b, _token) DECL_BUCKET_PARAMS(_size, _b) \
-					       DECL_TOKEN_PARAM(_token)
-
-#define PASS_KMALLOC_PARAMS(_size, _b, _token) PASS_BUCKET_PARAMS(_size, _b) \
-					       _PASS_TOKEN_PARAM(_token)
-
-/*
  * The following functions are not to be used directly and are intended only
  * for internal use from kmalloc() and kmalloc_node()
  * with the exception of kunit tests
@@ -956,7 +935,7 @@ unsigned int kmem_cache_sheaf_size(struct slab_sheaf *sheaf);
 void *__kmalloc_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags)
 				__assume_kmalloc_alignment __alloc_size(1);
 
-void *__kmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags, int node)
+void *__kmalloc_node_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags, int node)
 				__assume_kmalloc_alignment __alloc_size(1);
 
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t flags, size_t size)
@@ -1197,7 +1176,7 @@ static __always_inline __alloc_size(1) void *_kmalloc_node_noprof(size_t size, g
 				kmalloc_caches[kmalloc_type(flags, token)][index],
 				flags, node, size);
 	}
-	return __kmalloc_node_noprof(PASS_KMALLOC_PARAMS(size, NULL, token), flags, node);
+	return __kmalloc_node_noprof(PASS_TOKEN_PARAMS(size, token), flags, node);
 }
 #define kmalloc_node_noprof(...)		_kmalloc_node_noprof(__VA_ARGS__, __kmalloc_token(__VA_ARGS__))
 #define kmalloc_node(...)			alloc_hooks(kmalloc_node_noprof(__VA_ARGS__))
@@ -1265,10 +1244,10 @@ void *krealloc_array(void *p, size_t new_n, size_t new_size, gfp_t flags);
  */
 #define kcalloc(n, size, flags)		kmalloc_array(n, size, (flags) | __GFP_ZERO)
 
-void *__kmalloc_node_track_caller_noprof(DECL_KMALLOC_PARAMS(size, b, token), gfp_t flags, int node,
+void *__kmalloc_node_track_caller_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags, int node,
 					 unsigned long caller) __alloc_size(1);
 #define kmalloc_node_track_caller_noprof(size, flags, node, caller) \
-	__kmalloc_node_track_caller_noprof(PASS_KMALLOC_PARAMS(size, NULL, __kmalloc_token(size)), flags, node, caller)
+	__kmalloc_node_track_caller_noprof(PASS_TOKEN_PARAMS(size, __kmalloc_token(size)), flags, node, caller)
 #define kmalloc_node_track_caller(...)		\
 	alloc_hooks(kmalloc_node_track_caller_noprof(__VA_ARGS__, _RET_IP_))
 
@@ -1294,7 +1273,7 @@ static inline __alloc_size(1, 2) void *_kmalloc_array_node_noprof(size_t n, size
 		return NULL;
 	if (__builtin_constant_p(n) && __builtin_constant_p(size))
 		return _kmalloc_node_noprof(bytes, flags, node, token);
-	return __kmalloc_node_noprof(PASS_KMALLOC_PARAMS(bytes, NULL, token), flags, node);
+	return __kmalloc_node_noprof(PASS_TOKEN_PARAMS(bytes, token), flags, node);
 }
 #define kmalloc_array_node_noprof(...)		_kmalloc_array_node_noprof(__VA_ARGS__, __kmalloc_token(__VA_ARGS__))
 #define kmalloc_array_node(...)			alloc_hooks(kmalloc_array_node_noprof(__VA_ARGS__))
@@ -1323,10 +1302,10 @@ void *kzalloc(size_t size, gfp_t flags);
 #define kzalloc(size, flags)			alloc_hooks(kzalloc_noprof(size, flags))
 #define kzalloc_node(_size, _flags, _node)	kmalloc_node(_size, (_flags)|__GFP_ZERO, _node)
 
-void *__kvmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), unsigned long align,
+void *__kvmalloc_node_noprof(DECL_TOKEN_PARAMS(size, token), unsigned long align,
 			     gfp_t flags, int node) __alloc_size(1);
 #define kvmalloc_node_align_noprof(_size, _align, _flags, _node)	\
-	__kvmalloc_node_noprof(PASS_KMALLOC_PARAMS(_size, NULL, __kmalloc_token(_size)), _align, _flags, _node)
+	__kvmalloc_node_noprof(PASS_TOKEN_PARAMS(_size, __kmalloc_token(_size)), _align, _flags, _node)
 #define kvmalloc_node_align(...)		\
 	alloc_hooks(kvmalloc_node_align_noprof(__VA_ARGS__))
 #if 0 /* kernel-doc */
@@ -1374,7 +1353,7 @@ _kvmalloc_array_node_noprof(size_t n, size_t size, gfp_t flags, int node, kmallo
 	if (unlikely(check_mul_overflow(n, size, &bytes)))
 		return NULL;
 
-	return __kvmalloc_node_noprof(PASS_KMALLOC_PARAMS(bytes, NULL, token), 1, flags, node);
+	return __kvmalloc_node_noprof(PASS_TOKEN_PARAMS(bytes, token), 1, flags, node);
 }
 #define kvmalloc_array_node_noprof(...)		_kvmalloc_array_node_noprof(__VA_ARGS__, __kmalloc_token(__VA_ARGS__))
 #define kvmalloc_array_noprof(...)		kvmalloc_array_node_noprof(__VA_ARGS__, NUMA_NO_NODE)
