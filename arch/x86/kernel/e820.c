@@ -939,6 +939,9 @@ __init static int parse_memopt(char *p)
 #endif
 	}
 
+	if (cc_ignore_cmdline_mem("mem"))
+		return 0;
+
 	userdef = 1;
 	mem_size = memparse(p, &p);
 
