@@ -2890,6 +2890,14 @@ static struct slab_sheaf *__alloc_empty_sheaf(struct kmem_cache *s, gfp_t gfp,
 	if (unlikely(!sheaf))
 		return NULL;
 
+	/*
+	 * A queued rcu sheaf may only be referenced by an earlier rcu callback
+	 * in memory kmemleak doesn't scan (e.g. its own metadata). Never
+	 * report sheaves, but keep scanning the objects they hold.
+	 */
+	if (alloc_flags_allow_spinning(alloc_flags))
+		kmemleak_not_leak(sheaf);
+
 	sheaf->cache = s;
 
 	stat(s, SHEAF_ALLOC);
