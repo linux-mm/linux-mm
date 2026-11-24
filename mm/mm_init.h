@@ -112,4 +112,15 @@ void memblock_free_all(void);
 void __meminit __init_single_page(struct page *page, unsigned long pfn,
 				unsigned long zone, int nid);
 
+static inline void memmap_init_refresh_pfn_fields(struct page *page,
+						  unsigned long pfn,
+						  unsigned long zone)
+{
+	set_page_section_from_pfn(page, pfn);
+#ifdef WANT_PAGE_VIRTUAL
+	if (!is_highmem_idx(zone))
+		set_page_address(page, __va(pfn << PAGE_SHIFT));
+#endif
+}
+
 #endif /* __MM_MM_INIT_H */

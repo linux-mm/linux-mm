@@ -1075,11 +1075,12 @@ static void __ref __init_zone_device_page(struct page *page, unsigned long pfn,
 static void zone_device_page_init_from_template(struct page *page,
 		unsigned long pfn, struct page *template)
 {
-	set_page_section_from_pfn(template, pfn);
-#ifdef WANT_PAGE_VIRTUAL
-	if (!is_highmem_idx(ZONE_DEVICE))
-		set_page_address(template, __va(pfn << PAGE_SHIFT));
-#endif
+	/*
+	 * Refresh PFN-dependent fields in the template before the
+	 * non-temporal copy, so the destination page does not need cached
+	 * stores after memcpy_nontemporal().
+	 */
+	memmap_init_refresh_pfn_fields(template, pfn, ZONE_DEVICE);
 	memcpy_nontemporal(page, template, sizeof(*page));
 }
 
