@@ -334,6 +334,15 @@ struct mem_cgroup {
 	 */
 	bool oom_group;
 
+#ifdef CONFIG_HUGETLB_PAGE
+	/*
+	 * Charge HugeTLB folios used by this memcg and its descendants to
+	 * them? If not, the folios are charged to the parent of this memcg.
+	 * Only relevant with the memory_hugetlb_accounting mount option.
+	 */
+	bool hugetlb_accounting;
+#endif
+
 #ifdef CONFIG_ZSWAP
 	/*
 	 * Prevent pages from this memcg from being written back from zswap to

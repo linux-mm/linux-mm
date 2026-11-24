@@ -17,12 +17,12 @@
 #define PROTECTION (PROT_READ | PROT_WRITE)
 
 /* borrowed from mm/hmm-tests.c */
-static long get_hugepage_size(void)
+static long get_meminfo(const char *tag)
 {
 	int fd;
 	char buf[2048];
 	int len;
-	char *p, *q, *path = "/proc/meminfo", *tag = "Hugepagesize:";
+	char *p, *q, *path = "/proc/meminfo";
 	long val;
 
 	fd = open(path, O_RDONLY);
@@ -53,12 +53,17 @@ static long get_hugepage_size(void)
 		p = buf;
 
 	val = strtol(p, &q, 0);
-	if (*q != ' ') {
+	if (*q != ' ' && *q != '\n') {
 		/* Error parsing the file */
 		return -1;
 	}
 
 	return val;
+}
+
+static long get_hugepage_size(void)
+{
+	return get_meminfo("Hugepagesize:");
 }
 
 static int set_file(const char *path, long value)
@@ -196,13 +201,197 @@ out:
 	return ret;
 }
 
+struct opt_out_args {
+	const char *root;
+	const char *child;
+	const char *parent;
+	const char *grandparent;
+	bool parent_charged;
+	bool grandparent_charged;
+};
+
+static bool opt_out_charged(const char *name, long delta, bool charged)
+{
+	if (charged && values_close(MB(8), delta, 10))
+		return true;
+	if (!charged && delta < MB(2))
+		return true;
+
+	ksft_print_msg("hugetlb usage should%s be charged to the %s.\n",
+		       charged ? "" : " not", name);
+	ksft_print_msg("%s memory increased by %ld\n", name, delta);
+	return false;
+}
+
+static long root_hugetlb(const char *root)
+{
+	return cg_read_key_long(root, "memory.stat", "hugetlb ");
+}
+
+/*
+ * Use 4 hugepages in the child. They must never be charged to the child, and
+ * be charged to the parent and the grandparent as the caller expects.
+ * memory.current is hierarchical, so a charge to the parent also shows up in
+ * the grandparent. Wherever the charge lands, the root must count the pages.
+ */
+static int hugetlb_opt_out_program(const char *cgroup, void *arg)
+{
+	struct opt_out_args *args = arg;
+	long root, child, parent, grandparent, cur;
+	int ret = EXIT_FAILURE;
+	void *addr;
+
+	root = root_hugetlb(args->root);
+	child = cg_read_long(args->child, "memory.current");
+	parent = cg_read_long(args->parent, "memory.current");
+	grandparent = cg_read_long(args->grandparent, "memory.current");
+	if (root < 0 || child < 0 || parent < 0 || grandparent < 0) {
+		ksft_print_msg("fail to read the memory usage.\n");
+		return EXIT_FAILURE;
+	}
+
+	addr = mmap(ADDR, LENGTH, PROTECTION, FLAGS, 0, 0);
+	if (addr == MAP_FAILED) {
+		ksft_print_msg("fail to mmap.\n");
+		return EXIT_FAILURE;
+	}
+	write_data(addr);
+
+	cur = cg_read_long(args->child, "memory.current");
+	if (cur < 0 || !opt_out_charged("child", cur - child, false))
+		goto out;
+
+	cur = cg_read_long(args->parent, "memory.current");
+	if (cur < 0 ||
+	    !opt_out_charged("parent", cur - parent, args->parent_charged))
+		goto out;
+
+	cur = cg_read_long(args->grandparent, "memory.current");
+	if (cur < 0 || !opt_out_charged("grandparent", cur - grandparent,
+					args->grandparent_charged))
+		goto out;
+
+	/* memory.stat is flushed lazily, give the root time to catch up */
+	cur = cg_read_key_long_poll(args->root, "memory.stat", "hugetlb ",
+				    root + LENGTH, 30, DEFAULT_WAIT_INTERVAL_US);
+	if (cur < 0 || !opt_out_charged("root", cur - root, true))
+		goto out;
+
+	munmap(addr, LENGTH);
+	cur = cg_read_long(args->grandparent, "memory.current");
+	if (cur < 0 || cur - grandparent >= MB(2)) {
+		ksft_print_msg("memory usage should go back down.\n");
+		ksft_print_msg("grandparent memory is now %ld, was %ld\n",
+			       cur, grandparent);
+		return ret;
+	}
+
+	return EXIT_SUCCESS;
+
+out:
+	munmap(addr, LENGTH);
+	return ret;
+}
+
+static int test_hugetlb_memcg_opt_out(char *root)
+{
+	char *grandparent, *parent = NULL, *child = NULL;
+	struct opt_out_args args;
+	int ret = KSFT_FAIL;
+
+	grandparent = cg_name(root, "hugetlb_memcg_grandparent");
+	if (!grandparent || cg_create(grandparent)) {
+		ksft_print_msg("fail to create cgroup.\n");
+		goto out;
+	}
+
+	if (cg_write(grandparent, "cgroup.subtree_control", "+memory")) {
+		ksft_print_msg("fail to enable the memory controller.\n");
+		goto out;
+	}
+
+	parent = cg_name(grandparent, "parent");
+	if (!parent || cg_create(parent)) {
+		ksft_print_msg("fail to create cgroup.\n");
+		goto out;
+	}
+
+	if (cg_write(parent, "cgroup.subtree_control", "+memory")) {
+		ksft_print_msg("fail to enable the memory controller.\n");
+		goto out;
+	}
+
+	child = cg_name(parent, "child");
+	if (!child || cg_create(child)) {
+		ksft_print_msg("fail to create cgroup.\n");
+		goto out;
+	}
+
+	if (cg_read_long(child, "memory.hugetlb_accounting") < 0) {
+		ret = KSFT_SKIP;
+		goto out;
+	}
+
+	set_nr_hugepages(20);
+	if (get_meminfo("HugePages_Free:") < 4) {
+		ksft_print_msg("not enough free hugepages.\n");
+		ret = KSFT_SKIP;
+		goto out;
+	}
+
+	args.root = root;
+	args.child = child;
+	args.parent = parent;
+	args.grandparent = grandparent;
+
+	/* The child opts out: its hugetlb usage is charged to the parent. */
+	if (cg_write(child, "memory.hugetlb_accounting", "0"))
+		goto out;
+	args.parent_charged = true;
+	args.grandparent_charged = true;
+	if (cg_run(child, hugetlb_opt_out_program, &args))
+		goto out;
+
+	/* The parent opts out too: the grandparent is charged, not the parent. */
+	if (cg_write(parent, "memory.hugetlb_accounting", "0"))
+		goto out;
+	args.parent_charged = false;
+	if (cg_run(child, hugetlb_opt_out_program, &args))
+		goto out;
+
+	/* The child cannot turn the accounting back on for itself. */
+	if (cg_write(child, "memory.hugetlb_accounting", "1"))
+		goto out;
+	if (cg_run(child, hugetlb_opt_out_program, &args))
+		goto out;
+
+	/* The grandparent opts out as well: only the root counts the pages. */
+	if (cg_write(grandparent, "memory.hugetlb_accounting", "0"))
+		goto out;
+	args.grandparent_charged = false;
+	if (cg_run(child, hugetlb_opt_out_program, &args))
+		goto out;
+
+	ret = KSFT_PASS;
+out:
+	if (child)
+		cg_destroy(child);
+	if (parent)
+		cg_destroy(parent);
+	cg_destroy(grandparent);
+	free(child);
+	free(parent);
+	free(grandparent);
+	return ret;
+}
+
 int main(int argc, char **argv)
 {
 	char root[PATH_MAX];
 	int has_memory_hugetlb_acc;
 
 	ksft_print_header();
-	ksft_set_plan(1);
+	ksft_set_plan(2);
 
 	has_memory_hugetlb_acc = proc_mount_contains("memory_hugetlb_accounting");
 	if (has_memory_hugetlb_acc < 0)
@@ -214,6 +403,7 @@ int main(int argc, char **argv)
 	if (get_hugepage_size() != 2048) {
 		ksft_print_msg("test_hugetlb_memcg requires 2MB hugepages\n");
 		ksft_test_result_skip("test_hugetlb_memcg\n");
+		ksft_test_result_skip("test_hugetlb_memcg_opt_out\n");
 		ksft_finished();
 	}
 
@@ -237,6 +427,18 @@ int main(int argc, char **argv)
 		break;
 	default:
 		ksft_test_result_fail("test_hugetlb_memcg\n");
+		break;
+	}
+
+	switch (test_hugetlb_memcg_opt_out(root)) {
+	case KSFT_PASS:
+		ksft_test_result_pass("test_hugetlb_memcg_opt_out\n");
+		break;
+	case KSFT_SKIP:
+		ksft_test_result_skip("test_hugetlb_memcg_opt_out\n");
+		break;
+	default:
+		ksft_test_result_fail("test_hugetlb_memcg_opt_out\n");
 		break;
 	}
 

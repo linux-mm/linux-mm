@@ -245,6 +245,8 @@ cgroup v2 currently supports the following mount options.
         * HugeTLB pages utilized while this option is not selected
           will not be tracked by the memory controller (even if cgroup
           v2 is remounted later on).
+        * A cgroup can be exempted, together with its descendants, by
+          writing "0" to its memory.hugetlb_accounting file.
 
   pids_localevents
         The option restores v1-like behavior of pids.events:max, that is only
@@ -1478,6 +1480,45 @@ The following nested keys are defined.
 	current memory usage for subsequent reads through the same
 	file descriptor.
 
+  memory.hugetlb_accounting
+	A read-write single value file which exists on non-root
+	cgroups.  The default value is "1".
+
+	Determines whether HugeTLB memory used by the cgroup and its
+	descendants is charged to them. The file only has an effect
+	if cgroup v2 is mounted with the memory_hugetlb_accounting
+	option.
+
+	If set to "0", HugeTLB memory used by the cgroup or by any of
+	its descendants is charged to the parent of the cgroup
+	instead. If several cgroups on the path to the root have the
+	file set to "0", it is the parent of the topmost one. The
+	cgroups above therefore keep accounting for the memory, and
+	the file cannot be used to escape their limits. A descendant
+	cannot turn the accounting back on for itself.
+
+	This is meant for hierarchies where a workload manager gives
+	its workloads a HugeTLB budget of their own, with the HugeTLB
+	controller, next to a memory.max that covers only their other
+	memory. Without the exemption such a workload reaches its
+	memory.max as soon as it uses its huge pages.
+
+	HugeTLB folios that are allocated while a cgroup is exempt do
+	not show up in its memory.current, nor in the "hugetlb" entry
+	of its memory.stat, but in those of the cgroup that is charged
+	for them. A HugeTLB fault in an exempt cgroup still results in
+	SIGBUS if the cgroup that is charged, or one above it, is at
+	its memory.max and reclaim fails. The failure is counted in the
+	memory.events of the cgroup whose limit was hit and of its
+	ancestors, not in those of the exempt cgroup.
+
+	Like the limits of a cgroup, the file is meant to be written
+	by the parent, and is not delegatable.
+
+	HugeTLB folios keep the accounting that they got when they
+	were allocated. A change of the file only affects folios that
+	are allocated afterwards.
+
   memory.oom.group
 	A read-write single value file which exists on non-root
 	cgroups.  The default value is "0".
@@ -1815,6 +1856,9 @@ The following nested keys are defined.
 		Amount of memory used by hugetlb pages. This metric only shows
 		up if hugetlb usage is accounted for in memory.current (i.e.
 		cgroup is mounted with the memory_hugetlb_accounting option).
+		HugeTLB memory of cgroups that are exempt through
+		memory.hugetlb_accounting is reported in the cgroup that
+		is charged for it.
 
   memory.numa_stat
 	A read-only nested-keyed file which exists on non-root cgroups.
