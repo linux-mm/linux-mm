@@ -318,9 +318,68 @@ static inline int private_mapping_ok(struct vm_area_desc *desc)
 }
 #endif
 
-static const struct vm_operations_struct mmap_mem_ops = {
+#ifdef CONFIG_MMU
+/* Populate /dev/mem on fault, huge where the arch and alignment allow */
+static vm_fault_t mmap_mem_huge_fault(struct vm_fault *vmf, unsigned int order)
+{
+	unsigned long addr = vmf->address & ~((PAGE_SIZE << order) - 1);
+	struct vm_area_struct *vma = vmf->vma;
+	unsigned long pfn;
+
+	/* An order-aligned addr below the VMA would wrap the subtraction */
+	if (addr < vma->vm_start)
+		return VM_FAULT_FALLBACK;
+
+	pfn = vma->vm_pgoff + ((addr - vma->vm_start) >> PAGE_SHIFT);
+
+	return vmf_insert_pfn_order(vmf, pfn, order);
+}
+
+static vm_fault_t mmap_mem_fault(struct vm_fault *vmf)
+{
+	return mmap_mem_huge_fault(vmf, 0);
+}
+#endif /* CONFIG_MMU */
+
 #ifdef CONFIG_HAVE_IOREMAP_PROT
-	.access = generic_access_phys
+/* generic_access_phys() needs a present PTE; a lazy mapping may have none */
+static int mmap_mem_access(struct vm_area_struct *vma, unsigned long addr,
+			   void *buf, int len, int write)
+{
+	unsigned int fault_flags = FAULT_FLAG_REMOTE;
+	int ret;
+
+	if (write)
+		fault_flags |= FAULT_FLAG_WRITE;
+
+	/* unlocked == NULL keeps the mmap lock held and the vma valid */
+	ret = fixup_user_fault(vma->vm_mm, addr, fault_flags, NULL);
+	if (ret)
+		return ret;
+
+	return generic_access_phys(vma, addr, buf, len, write);
+}
+#endif
+
+/*
+ * vm_ops for an eagerly populated mapping. Must exist even when empty: a NULL
+ * vm_ops would make the VMA anonymous.
+ */
+static const struct vm_operations_struct mmap_mem_eager_vm_ops = {
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+	.access = generic_access_phys,
+#endif
+};
+
+static const struct vm_operations_struct mmap_mem_ops = {
+#ifdef CONFIG_MMU
+	.fault = mmap_mem_fault,
+#endif
+#ifdef CONFIG_ARCH_SUPPORTS_HUGE_PFNMAP
+	.huge_fault = mmap_mem_huge_fault,
+#endif
+#ifdef CONFIG_HAVE_IOREMAP_PROT
+	.access = mmap_mem_access,
 #endif
 };
 
@@ -355,11 +414,25 @@ static int mmap_mem_prepare(struct vm_area_desc *desc)
 					       size,
 					       desc->page_prot);
 
+	desc->action.error_override = -EAGAIN;
+
+	/*
+	 * COW can't be populated on fault: vmf_insert_pfn*() BUG_ON() it. And
+	 * with IO_STRICT_DEVMEM a fault can install an entry after
+	 * revoke_iomem() has zapped it, so keep the revoke final.
+	 */
+	if (IS_ENABLED(CONFIG_IO_STRICT_DEVMEM) ||
+	    vma_desc_is_cow_mapping(desc)) {
+		/* Remap-pfn-range will mark the range with the I/O flag. */
+		desc->vm_ops = &mmap_mem_eager_vm_ops;
+		mmap_action_remap_full(desc, desc->pgoff);
+		return 0;
+	}
+
 	desc->vm_ops = &mmap_mem_ops;
 
-	/* Remap-pfn-range will mark the range with the I/O flag. */
-	mmap_action_remap_full(desc, desc->pgoff);
-	desc->action.error_override = -EAGAIN;
+	/* Tracking reserves the memory type, for PAT conflict detection */
+	mmap_action_track_pfn(desc, desc->pgoff);
 
 	return 0;
 }
