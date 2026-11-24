@@ -788,6 +788,8 @@ static int check_sparse_vm_area(struct vm_struct *area, unsigned long start,
 		return -EINVAL;
 	if (WARN_ON_ONCE(!(area->flags & VM_SPARSE)))
 		return -EINVAL;
+	if (WARN_ON_ONCE(area->flags & VM_ALLOC))
+		return -EINVAL;
 	if ((end - start) >> PAGE_SHIFT > totalram_pages())
 		return -E2BIG;
 	if (start < (unsigned long)area->addr ||
@@ -4174,6 +4176,135 @@ fail:
 	return NULL;
 }
 
+/**
+ * vm_area_grow_pages - back more of a sparse area with pages
+ * @area: area created with %VM_SPARSE | %VM_ALLOC
+ * @end: end of the range to back, %PAGE_SIZE aligned
+ * @gfp: gfp flags for the page allocation
+ *
+ * Allocate and map pages for [@area->nr_pages << PAGE_SHIFT, @end).  The
+ * pages are zeroed when %__GFP_ZERO is set.  The backed range always forms
+ * a prefix of the area, and growing to a range that is already backed is a
+ * no-op.  On failure nothing is mapped and @area->nr_pages is unchanged.
+ *
+ * The area must be released with vfree(@area->addr).  Callers must
+ * serialize calls to this function.
+ *
+ * Return: 0 on success, -errno on failure.
+ */
+int vm_area_grow_pages(struct vm_struct *area, unsigned long end, gfp_t gfp)
+{
+	unsigned long start = (unsigned long)area->nr_pages << PAGE_SHIFT;
+	unsigned long addr = (unsigned long)area->addr;
+	unsigned long nr_pages, nr_allocated;
+	gfp_t nested_gfp = (gfp & GFP_RECLAIM_MASK) | __GFP_ZERO;
+	struct vmap_node *vn;
+	unsigned int flags;
+	int ret;
+
+	might_sleep();
+
+	if (WARN_ON_ONCE(!(area->flags & VM_ALLOC) ||
+			 !(area->flags & VM_SPARSE)))
+		return -EINVAL;
+	if (WARN_ON_ONCE(!IS_ALIGNED(end, PAGE_SIZE)))
+		return -EINVAL;
+	if (WARN_ON_ONCE(end > get_vm_area_size(area)))
+		return -EINVAL;
+	if (end <= start)
+		return 0;
+	if ((end - start) >> PAGE_SHIFT > totalram_pages())
+		return -E2BIG;
+
+	if (!area->pages) {
+		unsigned long max_pages = get_vm_area_size(area) >> PAGE_SHIFT;
+
+		area->pages = kvmalloc_array(max_pages, sizeof(*area->pages),
+					     nested_gfp);
+		if (!area->pages)
+			return -ENOMEM;
+	}
+
+	if (!(gfp & (GFP_DMA | GFP_DMA32)))
+		gfp |= __GFP_HIGHMEM;
+
+	nr_pages = (end - start) >> PAGE_SHIFT;
+	nr_allocated = vm_area_alloc_pages(vmalloc_gfp_adjust(gfp, 0),
+					   NUMA_NO_NODE, 0, nr_pages,
+					   area->pages + (start >> PAGE_SHIFT));
+	if (nr_allocated != nr_pages) {
+		vm_area_free_pages(area, start >> PAGE_SHIFT,
+				   (start >> PAGE_SHIFT) + nr_allocated);
+		return -ENOMEM;
+	}
+
+	flags = memalloc_apply_gfp_scope(gfp);
+	ret = __vmap_pages_range(addr + start, addr + end, PAGE_KERNEL,
+				 area->pages + (start >> PAGE_SHIFT),
+				 PAGE_SHIFT, nested_gfp);
+	memalloc_restore_scope(flags);
+	if (ret)
+		goto free_pages;
+
+	kasan_unpoison_vmalloc((void *)(addr + start), end - start,
+			       KASAN_VMALLOC_PROT_NORMAL |
+			       KASAN_VMALLOC_KEEP_TAG);
+
+	/*
+	 * Publish under busy.lock, like clear_vm_uninitialized_flag():
+	 * show_busy_info() reads nr_pages and pages[] under that lock.
+	 */
+	vn = addr_to_node(addr);
+	spin_lock(&vn->busy.lock);
+	WRITE_ONCE(area->nr_pages, end >> PAGE_SHIFT);
+	spin_unlock(&vn->busy.lock);
+	return 0;
+
+free_pages:
+	vunmap_range(addr + start, addr + end);
+	vm_area_free_pages(area, start >> PAGE_SHIFT, end >> PAGE_SHIFT);
+	return -ENOMEM;
+}
+
+/**
+ * vm_area_shrink_pages - release the pages backing the end of a sparse area
+ * @area: area created with %VM_SPARSE | %VM_ALLOC
+ * @end: new end of the backed range, %PAGE_SIZE aligned
+ *
+ * Unmap and free pages for [@end, @area->nr_pages << PAGE_SHIFT).  The
+ * released range can be backed again with vm_area_grow_pages().  Callers
+ * must serialize calls to this function.
+ */
+void vm_area_shrink_pages(struct vm_struct *area, unsigned long end)
+{
+	unsigned long start = (unsigned long)area->nr_pages << PAGE_SHIFT;
+	unsigned long addr = (unsigned long)area->addr;
+	struct vmap_node *vn;
+
+	might_sleep();
+
+	if (WARN_ON_ONCE(!(area->flags & VM_ALLOC) ||
+			 !(area->flags & VM_SPARSE)))
+		return;
+	if (WARN_ON_ONCE(!IS_ALIGNED(end, PAGE_SIZE)))
+		return;
+	if (end >= start)
+		return;
+
+	/*
+	 * Lower nr_pages under busy.lock before the pages go away: readers
+	 * walk pages[] up to nr_pages under that lock.
+	 */
+	vn = addr_to_node(addr);
+	spin_lock(&vn->busy.lock);
+	WRITE_ONCE(area->nr_pages, end >> PAGE_SHIFT);
+	spin_unlock(&vn->busy.lock);
+
+	kasan_poison_vmalloc((void *)(addr + end), start - end);
+	vunmap_range(addr + end, addr + start);
+	vm_area_free_pages(area, end >> PAGE_SHIFT, start >> PAGE_SHIFT);
+}
+
 /*
  * See __vmalloc_node_range() for a clear list of supported vmalloc flags.
  * This gfp lists all flags currently passed through vmalloc. Currently,
@@ -4983,12 +5114,18 @@ long vread_iter(struct iov_iter *iter, const char *addr, size_t count)
 		if (n > remains)
 			n = remains;
 
-		if (flags & VMAP_RAM)
+		if (flags & VMAP_RAM) {
 			copied = vmap_ram_vread_iter(iter, addr, n, flags);
-		else if (!(vm && (vm->flags & (VM_IOREMAP | VM_SPARSE))))
-			copied = aligned_vread_iter(iter, addr, n);
-		else /* IOREMAP | SPARSE area is treated as memory hole */
+		} else if (vm && (vm->flags & VM_IOREMAP)) {
+			/* Not backed by struct pages. */
 			copied = zero_iter(iter, n);
+		} else if (vm && (vm->flags & VM_SPARSE) &&
+			   !(vm->flags & VM_ALLOC)) {
+			/* Populated by the caller; treat as a memory hole. */
+			copied = zero_iter(iter, n);
+		} else {
+			copied = aligned_vread_iter(iter, addr, n);
+		}
 
 		addr += copied;
 		remains -= copied;
@@ -5104,6 +5241,10 @@ EXPORT_SYMBOL(remap_vmalloc_range);
 void free_vm_area(struct vm_struct *area)
 {
 	struct vm_struct *ret;
+
+	/* VM_SPARSE | VM_ALLOC areas own their pages and need vfree(). */
+	WARN_ON_ONCE((area->flags & (VM_ALLOC | VM_SPARSE)) ==
+		     (VM_ALLOC | VM_SPARSE));
 	ret = remove_vm_area(area->addr);
 	BUG_ON(ret != area);
 	kfree(area);

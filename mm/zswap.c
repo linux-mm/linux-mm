@@ -885,7 +885,8 @@ fail:
 }
 
 static bool zswap_compress(struct folio *folio, long index,
-			   struct zswap_entry *entry, struct zswap_pool *pool)
+			   struct zswap_entry *entry, struct zswap_pool *pool,
+			   bool can_writeback)
 {
 	struct zswap_comp_ctx *comp_ctx;
 	struct scatterlist input, output;
@@ -934,9 +935,13 @@ static bool zswap_compress(struct folio *folio, long index,
 	 * save the content as is without a compression, to keep the LRU order
 	 * of writebacks.  If writeback is disabled, reject the page since it
 	 * only adds metadata overhead.  swap_writeout() will put the page back
-	 * to the active LRU list in the case.
+	 * to the active LRU list in the case.  An xswap entry in this phase
+	 * is never put on the LRU, so an incompressible page stored for it
+	 * could never be reclaimed: reject it the same way.
 	 */
 	if (comp_ret) {
+		if (!can_writeback)
+			goto unlock;
 		rcu_read_lock();
 		if (!mem_cgroup_zswap_writeback_enabled(folio_memcg(folio))) {
 			rcu_read_unlock();
@@ -1092,6 +1097,11 @@ static int zswap_writeback_entry(struct swap_io_ctx *ctx,
 	si = get_swap_device(swpentry);
 	if (IS_ERR_OR_NULL(si))
 		return -ENOENT;
+
+	if (si->flags & SWP_XSWAP) {
+		put_swap_device(si);
+		return -EINVAL;
+	}
 
 	mpol = get_task_policy(current);
 	folio = __swap_cache_alloc_folio(swpentry, GFP_KERNEL, BIT(0), NULL, mpol,
@@ -1508,10 +1518,15 @@ static void shrink_worker(struct work_struct *w)
 		 * There are no writeback-candidate pages in the memcg.
 		 * This is not an issue as long as we can find another memcg
 		 * with pages in zswap. Skip this without incrementing attempts
-		 * and failures.
+		 * and failures.  With memcg disabled there is no other memcg,
+		 * so an empty walk is the last one and has to count.
 		 */
-		if (ret == -ENOENT)
+		if (ret == -ENOENT) {
+			if (mem_cgroup_disabled() &&
+			    ++failures == MAX_RECLAIM_RETRIES)
+				break;
 			goto resched;
+		}
 		++attempts;
 
 		if (ret && ++failures == MAX_RECLAIM_RETRIES)
@@ -1531,6 +1546,7 @@ static bool zswap_store_page(struct folio *folio, long index,
 {
 	swp_entry_t page_swpentry = folio_swap_entry(folio, index);
 	struct zswap_entry *entry, *old;
+	bool can_writeback;
 
 	/* allocate entry */
 	entry = zswap_entry_cache_alloc(GFP_KERNEL, folio_nid(folio));
@@ -1539,7 +1555,10 @@ static bool zswap_store_page(struct folio *folio, long index,
 		return false;
 	}
 
-	if (!zswap_compress(folio, index, entry, pool))
+	/* In this phase xswap has no device to write the page back to. */
+	can_writeback = !(__swap_entry_to_info(page_swpentry)->flags & SWP_XSWAP);
+
+	if (!zswap_compress(folio, index, entry, pool, can_writeback))
 		goto compress_failed;
 
 	/*
@@ -1599,7 +1618,8 @@ static bool zswap_store_page(struct folio *folio, long index,
 	entry->referenced = true;
 	if (entry->length) {
 		INIT_LIST_HEAD(&entry->lru);
-		zswap_lru_add(entry);
+		if (can_writeback)
+			zswap_lru_add(entry);
 	}
 
 	return true;
@@ -1669,7 +1689,7 @@ put_pool:
 	zswap_pool_put(pool);
 put_objcg:
 	obj_cgroup_put(objcg);
-	if (!ret && zswap_pool_reached_full)
+	if (!ret && zswap_pool_reached_full && atomic_read(&nr_real_swapfiles))
 		queue_work(shrink_wq, &zswap_shrink_work);
 check_old:
 	/*
