@@ -172,30 +172,19 @@ static int vmemmap_remap_range(unsigned long start, unsigned long end,
 	return 0;
 }
 
-/*
- * Free a vmemmap page. A vmemmap page can be allocated from the memblock
- * allocator or buddy allocator. If the PG_reserved flag is set, it means
- * that it allocated from the memblock allocator, just free it via the
- * free_reserved_page(). Otherwise, use __free_page().
- */
-static inline void free_vmemmap_page(struct page *page)
-{
-	if (PageReserved(page)) {
-		memmap_boot_pages_add(-1);
-		free_reserved_page(page);
-	} else {
-		memmap_pages_add(-1);
-		__free_page(page);
-	}
-}
-
-/* Free a list of the vmemmap pages */
 static void free_vmemmap_page_list(struct list_head *list)
 {
 	struct page *page, *next;
 
-	list_for_each_entry_safe(page, next, list, lru)
-		free_vmemmap_page(page);
+	list_for_each_entry_safe(page, next, list, lru) {
+		if (PageReserved(page)) {
+			memmap_boot_pages_add(-1);
+			free_reserved_page(page);
+		} else {
+			memmap_pages_add(-1);
+			__free_page(page);
+		}
+	}
 }
 
 static int alloc_vmemmap_page_list(struct list_head *head,
