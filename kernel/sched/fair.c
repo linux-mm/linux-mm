@@ -3224,8 +3224,14 @@ static bool task_numa_compare(struct task_numa_env *env,
 
 	rcu_read_lock();
 	cur = rcu_dereference_all(dst_rq->curr);
+	/*
+	 * Only swap with a fair task: the placement of a task in any other
+	 * class is driven by that class, and its load, which the swap is
+	 * weighed on, isn't tracked by fair. Moving the task alone to the
+	 * destination is still allowed.
+	 */
 	if (cur && ((cur->flags & (PF_EXITING | PF_KTHREAD)) ||
-		    !cur->mm))
+		    !cur->mm || cur->sched_class != &fair_sched_class))
 		cur = NULL;
 
 	/*
