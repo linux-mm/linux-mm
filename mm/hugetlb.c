@@ -3722,8 +3722,6 @@ static void __init report_hugepages(void)
 		string_get_size(huge_page_size(h), 1, STRING_UNITS_2, buf, sizeof(buf));
 		pr_info("registered %s page size, pre-allocated %ld pages\n",
 			buf, h->nr_huge_pages);
-		pr_info("%d KiB vmemmap can be freed for a %s page\n",
-			hugetlb_vmemmap_optimizable_size(h) / SZ_1K, buf);
 	}
 }
 
