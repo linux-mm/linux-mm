@@ -406,15 +406,16 @@ cleanup:
 }
 
 /*
- * Test that cgroup.kill kills the threads of a process that were migrated
- * to the cgroup after their thread group leader had exited, and so are
- * not listed in its cgroup.procs.
+ * Test that a process whose thread group leader has exited is listed in the
+ * cgroup.procs of the cgroup its threads were migrated to, and that
+ * cgroup.kill there kills it.
  */
 static int test_cgkill_exited_leader_migrated(const char *root)
 {
 	char *parent = NULL, *src = NULL, *dst = NULL;
 	int ret = KSFT_FAIL;
 	pid_t pid = -ESRCH;
+	char buf[32];
 
 	parent = cg_name(root, "cg_test_exited_leader_migrated");
 	if (!parent)
@@ -438,12 +439,17 @@ static int test_cgkill_exited_leader_migrated(const char *root)
 	if (wait_for_zombie_leader(pid))
 		goto cleanup;
 
-	/* The exiting leader stays behind, only the live thread is moved. */
+	/*
+	 * Only the live thread is moved, but the process is listed where the
+	 * thread is.
+	 */
 	if (cg_enter(dst, pid))
 		goto cleanup;
 
+	snprintf(buf, sizeof(buf), "%d\n", pid);
 	if (cg_read_strcmp(dst, "cgroup.events", "populated 1\n") ||
-	    cg_read_strcmp(dst, "cgroup.procs", ""))
+	    cg_read_strcmp(dst, "cgroup.procs", buf) ||
+	    cg_read_strcmp(src, "cgroup.procs", ""))
 		goto cleanup;
 
 	if (cg_write(dst, "cgroup.kill", "1"))

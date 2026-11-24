@@ -3081,6 +3081,9 @@ int cgroup_migrate(struct task_struct *leader, bool threadgroup,
 		if (!threadgroup)
 			break;
 	} while_each_thread(leader, task);
+	/* see procs_live_thread() */
+	if (threadgroup && (leader->flags & PF_EXITING))
+		WRITE_ONCE(leader->cg_leader_left, true);
 	spin_unlock_irq(&css_set_lock);
 
 	return cgroup_migrate_execute(mgctx);
@@ -5200,6 +5203,40 @@ static void css_task_iter_skip(struct css_task_iter *it,
 	}
 }
 
+/*
+ * A cgroup.procs migration skips a leader that is already exiting, as the
+ * controllers don't deal with exiting tasks, so the leader stays on its
+ * css_set while the rest of its process moves.  CSS_TASK_ITER_PROCS walks
+ * visit such a leader at the first live thread of the process instead, if
+ * that thread is on a different css_set.
+ *
+ * PF_EXITING isn't set under css_set_lock, so a walk that races with a
+ * thread starting to exit may visit the process twice or miss it.
+ */
+static struct task_struct *procs_live_thread(struct task_struct *leader)
+{
+	struct task_struct *t;
+
+	if (!READ_ONCE(leader->cg_leader_left))
+		return leader;
+
+	for_each_thread(leader, t) {
+		if (!(t->flags & PF_EXITING)) {
+			if (task_css_set(t) == task_css_set(leader))
+				return leader;
+			return t;
+		}
+	}
+	return leader;
+}
+
+static bool procs_stand_in(struct task_struct *task)
+{
+	struct task_struct *leader = task->group_leader;
+
+	return leader != task && procs_live_thread(leader) == task;
+}
+
 static void css_task_iter_advance(struct css_task_iter *it)
 {
 	struct task_struct *task;
@@ -5246,8 +5283,18 @@ repeat:
 		goto repeat;
 
 	if (it->flags & CSS_TASK_ITER_PROCS) {
-		/* if PROCS, skip over tasks which aren't group leaders */
-		if (!thread_group_leader(task))
+		/*
+		 * If PROCS, skip over tasks which aren't group leaders, except
+		 * for the thread a left-behind leader is visited at.
+		 */
+		if (!thread_group_leader(task)) {
+			if (!procs_stand_in(task))
+				goto repeat;
+			return;
+		}
+
+		/* and leaders visited at another thread */
+		if (procs_live_thread(task) != task)
 			goto repeat;
 
 		/* and dying leaders w/o live member threads */
@@ -5322,6 +5369,9 @@ struct task_struct *css_task_iter_next(struct css_task_iter *it)
 	while (it->task_pos && !it->cur_task) {
 		it->cur_task = list_entry(it->task_pos, struct task_struct,
 					  cg_list);
+		/* a left-behind leader is visited at a live thread */
+		if (it->flags & CSS_TASK_ITER_PROCS)
+			it->cur_task = it->cur_task->group_leader;
 		/* a task on dying_tasks with zero refcount is only valid for
 		 * RCU readers, not even interesting for
 		 * CSS_TASK_ITER_WITH_DEAD, find another one */
@@ -6841,6 +6891,7 @@ void cgroup_fork(struct task_struct *child)
 {
 	RCU_INIT_POINTER(child->cgroups, &init_css_set);
 	INIT_LIST_HEAD(&child->cg_list);
+	child->cg_leader_left = false;
 }
 
 /**
