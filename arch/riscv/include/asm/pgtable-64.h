@@ -226,7 +226,7 @@ static inline int pud_bad(pud_t pud)
 #define pud_leaf	pud_leaf
 static inline bool pud_leaf(pud_t pud)
 {
-	return pud_present(pud) && (pud_val(pud) & _PAGE_LEAF);
+	return pud_val(pud) & _PAGE_LEAF;
 }
 
 static inline int pud_user(pud_t pud)
