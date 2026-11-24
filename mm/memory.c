@@ -3439,6 +3439,86 @@ int remap_pfn_range_complete(struct vm_area_struct *vma,
 	return do_remap_pfn_range(vma, start, pfn, size, prot);
 }
 
+#ifdef __HAVE_PFNMAP_TRACKING
+static int do_track_pfn_range(struct vm_area_struct *vma, unsigned long pfn)
+{
+	const unsigned long size = vma->vm_end - vma->vm_start;
+	struct pfnmap_track_ctx *ctx;
+
+	if (vma->pfnmap_track_ctx)
+		return -EINVAL;
+
+	ctx = pfnmap_track_ctx_alloc(pfn, size, &vma->vm_page_prot);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
+
+	vma->pfnmap_track_ctx = ctx;
+	return 0;
+}
+#else
+static int do_track_pfn_range(struct vm_area_struct *vma, unsigned long pfn)
+{
+	return 0;
+}
+#endif
+
+/**
+ * track_pfn_range - reserve a VMA's PFN range without populating it
+ * @vma: user vma to track the range for
+ * @pfn: page frame number at vma->vm_start
+ *
+ * Sets the VMA flags remap_pfn_range() would set and reserves the memory type
+ * of the whole VMA's PFN range for its lifetime. Creates no page table
+ * entries: the caller's fault handler populates the range, and must not map
+ * outside it.
+ *
+ * vma cannot be a COW mapping.
+ *
+ * Note: this is only safe if the mmap lock is held for writing when called.
+ *
+ * Return: %0 on success, negative error code otherwise.
+ */
+int track_pfn_range(struct vm_area_struct *vma, unsigned long pfn)
+{
+	int err;
+
+	if (vma_is_cow_mapping(vma))
+		return -EINVAL;
+
+	err = remap_pfn_range_prepare_vma(vma, vma->vm_start, pfn,
+					  vma->vm_end - vma->vm_start);
+	if (err)
+		return err;
+
+	return do_track_pfn_range(vma, pfn);
+}
+EXPORT_SYMBOL_GPL(track_pfn_range);
+
+int track_pfn_range_prepare(struct vm_area_desc *desc)
+{
+	const struct mmap_action *action = &desc->action;
+
+	/* COW mappings cannot be populated on fault */
+	if (vma_desc_is_cow_mapping(desc))
+		return -EINVAL;
+
+	/* do_track_pfn_range() anchors start_pfn at the VMA start */
+	if (action->remap.start != desc->start)
+		return -EINVAL;
+
+	/* do_track_pfn_range() reserves the whole VMA, so the action must */
+	if (action->remap.size != vma_desc_size(desc))
+		return -EINVAL;
+
+	return remap_pfn_range_prepare(desc);
+}
+
+int track_pfn_range_complete(struct vm_area_struct *vma,
+			     struct mmap_action *action)
+{
+	return do_track_pfn_range(vma, action->remap.start_pfn);
+}
+
 static int __simple_ioremap_prep(unsigned long vm_len, pgoff_t vm_pgoff,
 				 phys_addr_t start_phys, unsigned long size,
 				 unsigned long *pfnp)
