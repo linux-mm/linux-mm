@@ -5763,6 +5763,34 @@ void *__kmalloc_flags_noprof(DECL_TOKEN_PARAMS(size, token), gfp_t flags,
 	}
 }
 
+void *__kmem_buckets_alloc_noprof(kmem_buckets *b, size_t size, gfp_t flags)
+{
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	if (!IS_ENABLED(CONFIG_SLAB_BUCKETS))
+		b = NULL;
+
+	return __do_kmalloc_node(b, flags, NUMA_NO_NODE, (kmalloc_token_t){}, &ac);
+}
+
+void *__kmem_buckets_alloc_node_track_caller_noprof(kmem_buckets *b, size_t size,
+		gfp_t flags, int node, unsigned long caller)
+{
+	const struct slab_alloc_context ac = {
+		.caller_addr = caller,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	if (!IS_ENABLED(CONFIG_SLAB_BUCKETS))
+		b = NULL;
+
+	return __do_kmalloc_node(b, flags, node, (kmalloc_token_t){}, &ac);
+}
 
 static noinline void free_to_partial_list(
 	struct kmem_cache *s, struct slab *slab,
@@ -7158,26 +7186,10 @@ static gfp_t kmalloc_gfp_adjust(gfp_t flags, size_t size)
 	return flags;
 }
 
-void *__kvmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), unsigned long align,
-			     gfp_t flags, int node)
+static void *__kvmalloc_fallback(size_t size, unsigned long align, gfp_t flags,
+		int node, const void *caller)
 {
 	bool allow_block;
-	void *ret;
-	const struct slab_alloc_context ac = {
-		.caller_addr = _RET_IP_,
-		.orig_size = size,
-		.alloc_flags = SLAB_ALLOC_DEFAULT,
-	};
-
-	/*
-	 * It doesn't really make sense to fallback to vmalloc for sub page
-	 * requests
-	 */
-	ret = __do_kmalloc_node(PASS_BUCKET_PARAM(b),
-				kmalloc_gfp_adjust(flags, size),
-				node, PASS_TOKEN_PARAM(token), &ac);
-	if (ret || size <= PAGE_SIZE)
-		return ret;
 
 	/* Don't even allow crazy sizes */
 	if (unlikely(size > INT_MAX)) {
@@ -7203,9 +7215,59 @@ void *__kvmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), unsigned long 
 	 */
 	return __vmalloc_node_range_noprof(size, align, VMALLOC_START, VMALLOC_END,
 			flags, PAGE_KERNEL, allow_block ? VM_ALLOW_HUGE_VMAP:0,
-			node, __builtin_return_address(0));
+			node, caller);
+}
+
+void *__kvmalloc_node_noprof(DECL_KMALLOC_PARAMS(size, b, token), unsigned long align,
+			     gfp_t flags, int node)
+{
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	/*
+	 * It doesn't really make sense to fallback to vmalloc for sub page
+	 * requests
+	 */
+	ret = __do_kmalloc_node(PASS_BUCKET_PARAM(b),
+				kmalloc_gfp_adjust(flags, size),
+				node, PASS_TOKEN_PARAM(token), &ac);
+	if (ret || size <= PAGE_SIZE)
+		return ret;
+
+	return __kvmalloc_fallback(size, align, flags, node,
+				__builtin_return_address(0));
 }
 EXPORT_SYMBOL(__kvmalloc_node_noprof);
+
+void *__kmem_buckets_valloc_noprof(kmem_buckets *b, size_t size,
+		unsigned long align, gfp_t flags, int node)
+{
+	void *ret;
+	const struct slab_alloc_context ac = {
+		.caller_addr = _RET_IP_,
+		.orig_size = size,
+		.alloc_flags = SLAB_ALLOC_DEFAULT,
+	};
+
+	if (!IS_ENABLED(CONFIG_SLAB_BUCKETS))
+		b = NULL;
+
+	/*
+	 * It doesn't really make sense to fallback to vmalloc for sub page
+	 * requests
+	 */
+	ret = __do_kmalloc_node(b, kmalloc_gfp_adjust(flags, size),
+				node, (kmalloc_token_t){}, &ac);
+	if (ret || size <= PAGE_SIZE)
+		return ret;
+
+	return __kvmalloc_fallback(size, align, flags, node,
+				__builtin_return_address(0));
+}
 
 /**
  * kvfree() - Free memory.

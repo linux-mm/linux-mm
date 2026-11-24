@@ -1168,11 +1168,18 @@ void *kmalloc_nolock(size_t size, gfp_t gfp_flags, int node);
 #define kvzalloc_flex(P, FAM, COUNT, ...) \
 	__alloc_flex(kvzalloc, default_gfp(__VA_ARGS__), typeof(P), FAM, COUNT)
 
+void *__kmem_buckets_alloc_noprof(kmem_buckets *b, size_t size, gfp_t flags)
+				__assume_kmalloc_alignment __alloc_size(2);
+
+void *__kmem_buckets_alloc_node_track_caller_noprof(kmem_buckets *b, size_t size,
+		gfp_t flags, int node, unsigned long caller)
+		__assume_kmalloc_alignment __alloc_size(2);
+
 #define kmem_buckets_alloc(_b, _size, _flags)	\
-	alloc_hooks(__kmalloc_node_noprof(PASS_KMALLOC_PARAMS(_size, _b, __kmalloc_token(_size)), _flags, NUMA_NO_NODE))
+	alloc_hooks(__kmem_buckets_alloc_noprof(_b, _size, _flags))
 
 #define kmem_buckets_alloc_node_track_caller(_b, _size, _flags, _node)	\
-	alloc_hooks(__kmalloc_node_track_caller_noprof(PASS_KMALLOC_PARAMS(_size, _b, __kmalloc_token(_size)), _flags, _node, _RET_IP_))
+	alloc_hooks(__kmem_buckets_alloc_node_track_caller_noprof(_b, _size, _flags, _node, _RET_IP_))
 
 #define kmem_buckets_alloc_track_caller(_b, _size, _flags) \
 	kmem_buckets_alloc_node_track_caller(_b, _size, _flags, NUMA_NO_NODE)
@@ -1353,8 +1360,11 @@ void *kvmalloc_node(size_t size, gfp_t flags, int node);
 
 #define kvzalloc_node(_size, _flags, _node)	kvmalloc_node(_size, (_flags)|__GFP_ZERO, _node)
 
+void *__kmem_buckets_valloc_noprof(kmem_buckets *b, size_t size,
+		unsigned long align, gfp_t flags, int node) __alloc_size(2);
+
 #define kmem_buckets_valloc(_b, _size, _flags)	\
-	alloc_hooks(__kvmalloc_node_noprof(PASS_KMALLOC_PARAMS(_size, _b, __kmalloc_token(_size)), 1, _flags, NUMA_NO_NODE))
+	alloc_hooks(__kmem_buckets_valloc_noprof(_b, _size, 1, _flags, NUMA_NO_NODE))
 
 static inline __alloc_size(1, 2) void *
 _kvmalloc_array_node_noprof(size_t n, size_t size, gfp_t flags, int node, kmalloc_token_t token)
