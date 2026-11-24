@@ -15,6 +15,7 @@
 #include <linux/firmware-map.h>
 #include <linux/sort.h>
 #include <linux/kvm_types.h>
+#include <linux/cc_platform.h>
 
 #include <asm/e820/api.h>
 #include <asm/setup.h>
@@ -905,6 +906,15 @@ __init unsigned long e820__end_of_low_ram_pfn(void)
 
 __initdata static int userdef;
 
+__init static bool cc_ignore_cmdline_mem(const char *opt)
+{
+	if (!cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
+		return false;
+
+	pr_warn("%s= is not supported in confidential guests, ignoring\n", opt);
+	return true;
+}
+
 /* The "mem=nopentium" boot option disables 4MB page tables on 32-bit kernels: */
 __init static int parse_memopt(char *p)
 {
@@ -997,6 +1007,9 @@ __init static int parse_memmap_one(char *p)
 
 __init static int parse_memmap_opt(char *str)
 {
+	if (cc_ignore_cmdline_mem("memmap"))
+		return 0;
+
 	while (str) {
 		char *k = strchr(str, ',');
 
