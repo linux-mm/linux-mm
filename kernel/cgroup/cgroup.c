@@ -5237,6 +5237,17 @@ static bool procs_stand_in(struct task_struct *task)
 	return leader != task && procs_live_thread(leader) == task;
 }
 
+/**
+ * task_procs_css_set - css_set of the process a PROCS walk returned
+ * @task: the task returned by the walk
+ *
+ * See task_procs_css().
+ */
+struct css_set *task_procs_css_set(struct task_struct *task)
+{
+	return task_css_set(procs_live_thread(task));
+}
+
 static void css_task_iter_advance(struct css_task_iter *it)
 {
 	struct task_struct *task;
