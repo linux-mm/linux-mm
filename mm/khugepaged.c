@@ -1870,7 +1870,7 @@ static enum scan_result set_huge_pmd(struct vm_area_struct *vma, unsigned long a
 
 	mmap_assert_locked(vma->vm_mm);
 
-	ret = do_set_pmd(&vmf, folio, page, /* may_alloc= */ false);
+	ret = do_set_pmd(&vmf, folio, page);
 	*prealloc_pte = vmf.prealloc_pte;
 	if (ret)
 		return SCAN_FAIL;
