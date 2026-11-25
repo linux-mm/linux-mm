@@ -28,6 +28,8 @@
 #define DFL_TMPL_SIZE		ARRAY_SIZE(hugetlb_dfl_tmpl)
 #define LEGACY_TMPL_SIZE	ARRAY_SIZE(hugetlb_legacy_tmpl)
 
+#define HUGETLB_CGROUP_OFFLINE_BATCH	32
+
 static struct hugetlb_cgroup *root_h_cgroup __read_mostly;
 static struct cftype *dfl_files;
 static struct cftype *legacy_files;
@@ -123,6 +125,8 @@ static void hugetlb_cgroup_init(struct hugetlb_cgroup *h_cgroup,
 		VM_WARN_ON_ONCE(ret);
 		ret = page_counter_set_max(rsvd, limit);
 		VM_WARN_ON_ONCE(ret);
+
+		INIT_LIST_HEAD(&h_cgroup->activelist[idx]);
 	}
 }
 
@@ -219,17 +223,7 @@ static void hugetlb_cgroup_move_parent(int idx, struct hugetlb_cgroup *h_cg,
 {
 	unsigned int nr_pages;
 	struct page_counter *counter;
-	struct hugetlb_cgroup *hcg;
 	struct hugetlb_cgroup *parent = parent_hugetlb_cgroup(h_cg);
-
-	hcg = hugetlb_cgroup_from_folio(folio);
-	/*
-	 * We can have pages in active list without any cgroup
-	 * ie, hugepage with less than 3 pages. We can safely
-	 * ignore those pages.
-	 */
-	if (!hcg || hcg != h_cg)
-		goto out;
 
 	nr_pages = folio_nr_pages(folio);
 	if (!parent) {
@@ -244,8 +238,7 @@ static void hugetlb_cgroup_move_parent(int idx, struct hugetlb_cgroup *h_cg,
 	hugetlb_cgroup_move_usage(h_cg, parent, folio, folio);
 
 	set_hugetlb_cgroup(folio, parent);
-out:
-	return;
+	list_move(&folio->lru, hugetlb_folio_activelist(folio));
 }
 
 /*
@@ -255,15 +248,20 @@ out:
 static void hugetlb_cgroup_css_offline(struct cgroup_subsys_state *css)
 {
 	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_css(css);
+	struct folio *folio, *next;
 	struct hstate *h;
-	struct folio *folio;
 
 	do {
 		for_each_hstate(h) {
-			spin_lock_irq(&hugetlb_lock);
-			list_for_each_entry(folio, &h->hugepage_activelist, lru)
-				hugetlb_cgroup_move_parent(hstate_index(h), h_cg, folio);
+			int idx = hstate_index(h);
+			unsigned int nr = 0;
 
+			spin_lock_irq(&hugetlb_lock);
+			list_for_each_entry_safe(folio, next, &h_cg->activelist[idx], lru) {
+				hugetlb_cgroup_move_parent(idx, h_cg, folio);
+				if (++nr == HUGETLB_CGROUP_OFFLINE_BATCH)
+					break;
+			}
 			spin_unlock_irq(&hugetlb_lock);
 		}
 		cond_resched();
@@ -367,6 +365,7 @@ static void __hugetlb_cgroup_commit_charge(int idx, unsigned long nr_pages,
 		 */
 		WRITE_ONCE(h_cg->nodeinfo[folio_nid(folio)]->usage[idx],
 			   usage + nr_pages);
+		list_move(&folio->lru, hugetlb_folio_activelist(folio));
 	}
 out:
 	if (!rsvd && charged_h_cg)
@@ -940,7 +939,6 @@ void hugetlb_cgroup_migrate(struct folio *old_folio, struct folio *new_folio)
 {
 	struct hugetlb_cgroup *h_cg;
 	struct hugetlb_cgroup *h_cg_rsvd;
-	struct hstate *h = folio_hstate(old_folio);
 
 	if (hugetlb_cgroup_disabled())
 		return;
@@ -957,7 +955,7 @@ void hugetlb_cgroup_migrate(struct folio *old_folio, struct folio *new_folio)
 
 	hugetlb_cgroup_move_usage(h_cg, h_cg, old_folio, new_folio);
 
-	list_move(&new_folio->lru, &h->hugepage_activelist);
+	list_move(&new_folio->lru, hugetlb_folio_activelist(new_folio));
 	spin_unlock_irq(&hugetlb_lock);
 }
 

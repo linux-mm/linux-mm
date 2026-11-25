@@ -54,6 +54,9 @@ struct hugetlb_cgroup {
 	/* Handle for "hugetlb.events.local" */
 	struct cgroup_file events_local_file[HUGE_MAX_HSTATE];
 
+	/* In-use folios whose usage is charged here, under hugetlb_lock. */
+	struct list_head activelist[HUGE_MAX_HSTATE];
+
 	struct hugetlb_cgroup_per_node *nodeinfo[];
 };
 
@@ -98,6 +101,17 @@ static inline void set_hugetlb_cgroup_rsvd(struct folio *folio,
 					  struct hugetlb_cgroup *h_cg)
 {
 	__set_hugetlb_cgroup(folio, h_cg, true);
+}
+
+static inline struct list_head *hugetlb_folio_activelist(struct folio *folio)
+{
+	struct hugetlb_cgroup *h_cg = hugetlb_cgroup_from_folio(folio);
+	struct hstate *h = folio_hstate(folio);
+
+	lockdep_assert_held(&hugetlb_lock);
+	if (!h_cg)
+		return &h->hugepage_activelist;
+	return &h_cg->activelist[hstate_index(h)];
 }
 
 static inline bool hugetlb_cgroup_disabled(void)
@@ -183,6 +197,12 @@ static inline void set_hugetlb_cgroup(struct folio *folio,
 static inline void set_hugetlb_cgroup_rsvd(struct folio *folio,
 					  struct hugetlb_cgroup *h_cg)
 {
+}
+
+static inline struct list_head *hugetlb_folio_activelist(struct folio *folio)
+{
+	lockdep_assert_held(&hugetlb_lock);
+	return &folio_hstate(folio)->hugepage_activelist;
 }
 
 static inline bool hugetlb_cgroup_disabled(void)

@@ -7608,7 +7608,7 @@ void folio_putback_hugetlb(struct folio *folio)
 {
 	spin_lock_irq(&hugetlb_lock);
 	folio_set_hugetlb_migratable(folio);
-	list_move_tail(&folio->lru, &(folio_hstate(folio))->hugepage_activelist);
+	list_move_tail(&folio->lru, hugetlb_folio_activelist(folio));
 	spin_unlock_irq(&hugetlb_lock);
 	folio_put(folio);
 }
@@ -7684,7 +7684,7 @@ void move_hugetlb_state(struct folio *old_folio, struct folio *new_folio,
 	 */
 	spin_lock_irq(&hugetlb_lock);
 	folio_set_hugetlb_migratable(new_folio);
-	list_move_tail(&new_folio->lru, &(folio_hstate(new_folio))->hugepage_activelist);
+	list_move_tail(&new_folio->lru, hugetlb_folio_activelist(new_folio));
 	spin_unlock_irq(&hugetlb_lock);
 }
 
