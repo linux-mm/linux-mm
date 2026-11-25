@@ -1871,8 +1871,7 @@ void init_new_hugetlb_folio(struct folio *folio)
  * Find and lock address space (mapping) in write mode.
  *
  * Upon entry, the folio is locked which means that folio_mapping() is
- * stable.  Due to locking order, we can only trylock_write.  If we can
- * not get the lock, simply return NULL to caller.
+ * stable. If we cannot get the lock immediately, we simply return NULL.
  */
 struct address_space *hugetlb_folio_mapping_lock_write(struct folio *folio)
 {

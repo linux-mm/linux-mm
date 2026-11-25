@@ -684,8 +684,6 @@ static long hugetlbfs_punch_hole(struct inode *inode, loff_t offset, loff_t len)
 		return -EPERM;
 	}
 
-	i_mmap_lock_write(mapping);
-
 	/* If range starts before first full page, zero partial page. */
 	if (offset < hole_start)
 		hugetlbfs_zero_partial_page(h, mapping,
@@ -693,18 +691,18 @@ static long hugetlbfs_punch_hole(struct inode *inode, loff_t offset, loff_t len)
 
 	/* Unmap users of full pages in the hole. */
 	if (hole_end > hole_start) {
+		i_mmap_lock_write(mapping);
 		if (mapping_mapped(mapping))
 			hugetlb_vmdelete_list(mapping,
 					      hole_start >> PAGE_SHIFT,
 					      hole_end >> PAGE_SHIFT, 0);
+		i_mmap_unlock_write(mapping);
 	}
 
 	/* If range extends beyond last full page, zero partial page. */
 	if ((offset + len) > hole_end && (offset + len) > hole_start)
 		hugetlbfs_zero_partial_page(h, mapping,
 				hole_end, offset + len);
-
-	i_mmap_unlock_write(mapping);
 
 	/* Remove full pages from the file. */
 	if (hole_end > hole_start)
