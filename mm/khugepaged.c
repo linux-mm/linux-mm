@@ -3073,9 +3073,8 @@ breakouterloop_mmap_lock:
 		 * mm_slot not pointing to the exiting mm.
 		 */
 		if (!list_is_last(&slot->mm_node, &khugepaged_scan.mm_head)) {
-			slot = list_next_entry(slot, mm_node);
-			khugepaged_scan.mm_slot =
-				mm_slot_entry(slot, struct khugepaged_mm_slot, slot);
+			khugepaged_scan.mm_slot = mm_slot_next(slot,
+						struct khugepaged_mm_slot, slot);
 		} else {
 			khugepaged_scan.mm_slot = NULL;
 			khugepaged_full_scans++;

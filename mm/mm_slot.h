@@ -33,6 +33,9 @@ static inline void mm_slot_free(struct kmem_cache *cache, void *objp)
 	kmem_cache_free(cache, objp);
 }
 
+#define mm_slot_next(ptr, type, member) \
+	mm_slot_entry(list_next_entry(ptr, mm_node), type, member)
+
 /*
  * Note: mm_slot_lookup and mm_slot_insert cannot be converted to static inline
  * functions because the hash helpers (hash_for_each_possible and hash_add) rely
