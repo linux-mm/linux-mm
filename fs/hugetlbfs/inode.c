@@ -35,6 +35,7 @@
 #include <linux/security.h>
 #include <linux/magic.h>
 #include <linux/migrate.h>
+#include <linux/random.h>
 #include <linux/uio.h>
 
 #include <linux/uaccess.h>
@@ -1204,6 +1205,7 @@ static struct inode *hugetlbfs_alloc_inode(struct super_block *sb)
 		hugetlbfs_inc_free_inodes(sbinfo);
 		return NULL;
 	}
+	p->fault_mutex_hash_seed = get_random_u32();
 	return &p->vfs_inode;
 }
 
