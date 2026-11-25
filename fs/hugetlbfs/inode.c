@@ -442,10 +442,11 @@ retry:
 		i_mmap_lock_write(mapping);
 
 		vma = vma_lock->vma;
-		if (!vma) {
+		if (!vma || vma_start_pgoff(vma) >= end || vma_end_pgoff(vma) <= start) {
 			/*
-			 * If lock is no longer attached to vma, then just
-			 * unlock, drop our reference and retry looking for
+			 * If the lock is no longer attached to this vma, or if
+			 * the vma changed and no longer covers the folio, then
+			 * just unlock, drop our reference and retry looking for
 			 * other vmas.
 			 */
 			up_write(&vma_lock->rw_sema);
@@ -459,6 +460,7 @@ retry:
 		 */
 		v_start = vma_offset_start(vma, start);
 		v_end = vma_offset_end(vma, end);
+		VM_WARN_ON_ONCE(v_start >= v_end);
 		if (hugetlb_vma_maps_pfn(vma, v_start, pfn))
 			unmap_hugepage_range(vma, v_start, v_end, NULL,
 					     ZAP_FLAG_DROP_MARKER);
