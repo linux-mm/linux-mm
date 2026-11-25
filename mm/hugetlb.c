@@ -142,6 +142,8 @@ static void hugetlb_unmap_range(struct mmu_gather *tlb,
 				unsigned long end, struct folio *folio,
 				zap_flags_t zap_flags);
 static struct resv_map *vma_resv_map(struct vm_area_struct *vma);
+static struct folio *remove_pool_hugetlb_folio(struct hstate *h,
+		nodemask_t *nodes_allowed, bool acct_surplus);
 
 static inline bool subpool_is_free(struct hugepage_subpool *spool)
 {
@@ -1760,6 +1762,7 @@ void free_huge_folio(struct folio *folio)
 	struct hstate *h = folio_hstate(folio);
 	int nid = folio_nid(folio);
 	struct hugepage_subpool *spool = hugetlb_folio_subpool(folio);
+	struct folio *surplus_folio = NULL;
 	bool restore_reserve;
 	unsigned long flags;
 
@@ -1808,19 +1811,35 @@ void free_huge_folio(struct folio *folio)
 		folio_clear_hugetlb_temporary(folio);
 		spin_unlock_irqrestore(&hugetlb_lock, flags);
 		update_and_free_hugetlb_folio(h, folio, true);
+		return;
 	} else if (h->surplus_huge_pages_node[nid] &&
 		   h->free_huge_pages >= h->resv_huge_pages) {
 		/* Free this surplus folio that is not required globally. */
 		remove_hugetlb_folio(h, folio, true);
 		spin_unlock_irqrestore(&hugetlb_lock, flags);
 		update_and_free_hugetlb_folio(h, folio, true);
-	} else {
-		mod_node_page_state(folio_pgdat(folio), NR_HUGETLB,
-				    -(long)pages_per_huge_page(h));
-		arch_clear_hugetlb_flags(folio);
-		enqueue_hugetlb_folio(h, folio);
-		spin_unlock_irqrestore(&hugetlb_lock, flags);
+		return;
 	}
+
+	mod_node_page_state(folio_pgdat(folio), NR_HUGETLB,
+			    -(long)pages_per_huge_page(h));
+	arch_clear_hugetlb_flags(folio);
+	enqueue_hugetlb_folio(h, folio);
+
+	/*
+	 * This is not a surplus folio on this node, but we might have surplus
+	 * folios on other nodes that are no longer required, as reservations
+	 * are global and surplus folios are per node. So free another folio
+	 * instead.
+	 */
+	if (h->surplus_huge_pages &&
+	    h->free_huge_pages > h->resv_huge_pages)
+		surplus_folio = remove_pool_hugetlb_folio(h, &node_states[N_MEMORY],
+							  /* acct_surplus= */ true);
+	spin_unlock_irqrestore(&hugetlb_lock, flags);
+	/* We might be in atomic context, but freeing might need vmemmap pages. */
+	if (surplus_folio)
+		update_and_free_hugetlb_folio(h, surplus_folio, true);
 }
 
 /*
