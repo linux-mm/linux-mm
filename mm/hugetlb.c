@@ -6568,11 +6568,8 @@ int hugetlb_mfill_atomic_pte(pte_t *dst_pte,
 			goto out;
 		}
 
-		ret = copy_folio_from_user(folio, (const void __user *) src_addr,
-					   false);
-
 		/* fallback to copy_from_user outside mmap_lock */
-		if (unlikely(ret)) {
+		if (unlikely(copy_folio_from_user(folio, (const void __user *)src_addr, false))) {
 			ret = -ENOENT;
 			/* Free the allocated folio which may have
 			 * consumed a reservation.
