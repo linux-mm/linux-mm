@@ -2184,14 +2184,16 @@ static int __init fanotify_user_setup(void)
 	fanotify_mark_cache = KMEM_CACHE(fanotify_mark,
 					 SLAB_PANIC|SLAB_ACCOUNT);
 	fanotify_fid_event_cachep = KMEM_CACHE(fanotify_fid_event,
-					       SLAB_PANIC);
+					       SLAB_PANIC|SLAB_MAY_ACCOUNT);
 	fanotify_path_event_cachep = KMEM_CACHE(fanotify_path_event,
-						SLAB_PANIC);
+						SLAB_PANIC|SLAB_MAY_ACCOUNT);
 	if (IS_ENABLED(CONFIG_FANOTIFY_ACCESS_PERMISSIONS)) {
 		fanotify_perm_event_cachep =
-			KMEM_CACHE(fanotify_perm_event, SLAB_PANIC);
+			KMEM_CACHE(fanotify_perm_event,
+				   SLAB_PANIC|SLAB_MAY_ACCOUNT);
 	}
-	fanotify_mnt_event_cachep = KMEM_CACHE(fanotify_mnt_event, SLAB_PANIC);
+	fanotify_mnt_event_cachep = KMEM_CACHE(fanotify_mnt_event,
+					       SLAB_PANIC|SLAB_MAY_ACCOUNT);
 
 	fanotify_max_queued_events = FANOTIFY_DEFAULT_MAX_EVENTS;
 	init_user_ns.ucount_max[UCOUNT_FANOTIFY_GROUPS] =
