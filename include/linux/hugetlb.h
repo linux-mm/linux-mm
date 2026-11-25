@@ -274,7 +274,8 @@ long hugetlb_change_protection(struct vm_area_struct *vma,
 		unsigned long cp_flags);
 void hugetlb_unshare_all_pmds(struct vm_area_struct *vma);
 void fixup_hugetlb_reservations(struct vm_area_struct *vma);
-void hugetlb_split(struct vm_area_struct *vma, unsigned long addr);
+void hugetlb_split(struct vm_area_struct *vma, struct vm_area_struct *new,
+		unsigned long addr);
 
 unsigned int arch_hugetlb_cma_order(void);
 
@@ -457,7 +458,8 @@ static inline void fixup_hugetlb_reservations(struct vm_area_struct *vma)
 {
 }
 
-static inline void hugetlb_split(struct vm_area_struct *vma, unsigned long addr) {}
+static inline void hugetlb_split(struct vm_area_struct *vma,
+		struct vm_area_struct *new, unsigned long addr) {}
 
 #endif /* !CONFIG_HUGETLB_PAGE */
 

@@ -4887,7 +4887,8 @@ static int hugetlb_vm_op_split(struct vm_area_struct *vma, unsigned long addr)
 	return 0;
 }
 
-void hugetlb_split(struct vm_area_struct *vma, unsigned long addr)
+void hugetlb_split(struct vm_area_struct *vma, struct vm_area_struct *new,
+		unsigned long addr)
 {
 	/*
 	 * PMD sharing is only possible for PUD_SIZE-aligned address ranges
@@ -4898,7 +4899,12 @@ void hugetlb_split(struct vm_area_struct *vma, unsigned long addr)
 	 * walks (except hardware and gup_fast()).
 	 */
 	vma_assert_write_locked(vma);
+	vma_assert_write_locked(new);
 	i_mmap_assert_write_locked(vma->vm_file->f_mapping);
+
+	/* Shared PMDs require a hugetlb VMA lock. */
+	if (!__vma_shareable_lock(vma))
+		return;
 
 	if (addr & ~PUD_MASK) {
 		unsigned long floor = addr & PUD_MASK;
@@ -4918,6 +4924,15 @@ void hugetlb_split(struct vm_area_struct *vma, unsigned long addr)
 			hugetlb_unshare_pmds(vma, floor, ceil, /* take_locks = */ false);
 		}
 	}
+
+	/*
+	 * If we failed to allocate the hugetlb VMA lock, unshare everything
+	 * that the new VMA covers.
+	 */
+	if (!__vma_shareable_lock(new))
+		hugetlb_unshare_pmds(new, ALIGN(new->vm_start, PUD_SIZE),
+				     ALIGN_DOWN(new->vm_end, PUD_SIZE),
+				     /* take_locks = */ false);
 }
 
 static unsigned long hugetlb_vm_op_pagesize(struct vm_area_struct *vma)

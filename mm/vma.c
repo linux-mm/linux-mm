@@ -590,7 +590,7 @@ __split_vma(struct vma_iterator *vmi, struct vm_area_struct *vma,
 	 */
 	vma_adjust_trans_huge(vma, vma->vm_start, addr, NULL);
 	if (vma_is_hugetlb(vma))
-		hugetlb_split(vma, addr);
+		hugetlb_split(vma, new, addr);
 
 	if (new_below) {
 		vma->vm_start = addr;
