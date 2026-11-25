@@ -1801,6 +1801,9 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 
 		if (type == CLEAR_REFS_SOFT_DIRTY) {
 			for_each_vma(vmi, vma) {
+				/* hugetlb does not support soft-dirty tracking. */
+				if (vma_is_hugetlb(vma))
+					continue;
 				if (!(vma->vm_flags & VM_SOFTDIRTY))
 					continue;
 				vm_flags_clear(vma, VM_SOFTDIRTY);
