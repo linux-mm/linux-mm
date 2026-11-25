@@ -9833,6 +9833,8 @@ static char *create_unique_id(struct kmem_cache *s)
 		*p++ = 'a';
 	if (s->flags & SLAB_ACCOUNT)
 		*p++ = 'A';
+	if (s->flags & SLAB_MAY_ACCOUNT)
+		*p++ = 'M';
 	if (s->flags & SLAB_DEBUG_NOOP)
 		*p++ = 'N';
 	if (p != name + 1)
