@@ -587,6 +587,17 @@ static inline bool pte_is_uffd_marker(pte_t pte)
 	return false;
 }
 
+/**
+ * pte_is_migration_entry() - Does this PTE entry encode a migration entry?
+ * @pte: PTE entry.
+ *
+ * Returns: true if the PTE encodes a migration entry, otherwise false.
+ */
+static inline bool pte_is_migration_entry(pte_t pte)
+{
+	return softleaf_is_migration(softleaf_from_pte(pte));
+}
+
 #if defined(CONFIG_ZONE_DEVICE) && defined(CONFIG_ARCH_HAS_PMD_SOFTLEAVES)
 
 /**

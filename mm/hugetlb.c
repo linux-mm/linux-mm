@@ -5131,6 +5131,7 @@ again:
 			if (!userfaultfd_protected(dst_vma))
 				entry = pte_swp_clear_uffd(entry);
 			set_huge_pte_at(dst, addr, dst_pte, entry, sz);
+			hugetlb_count_add(npages, dst);
 		} else if (unlikely(pte_is_marker(entry))) {
 			const pte_marker marker = copy_pte_marker(softleaf, dst_vma);
 
@@ -5480,6 +5481,8 @@ static void hugetlb_unmap_range(struct mmu_gather *tlb,
 				spin_unlock(ptl);
 				continue;
 			}
+			if (pte_is_migration_entry(pte))
+				hugetlb_count_sub(pages_per_huge_page(h), mm);
 			/*
 			 * If the pte was wr-protected by uffd-wp in any of the
 			 * swap forms, meanwhile the caller does not want to
