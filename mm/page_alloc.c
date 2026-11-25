@@ -141,6 +141,18 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 })
 
 /*
+ * Like pcp_spin_unlock(), for callers that disabled IRQs (except on PREEMPT_RT)
+ * before taking zone->lock. An interrupt that arrives in between runs only once
+ * the pcp lock is dropped, so its softirqs can use the pcp lists. Disable IRQs
+ * after taking the pcp lock as other holders may be waiting for an IPI.
+ */
+#define pcp_spin_unlock_irqrestore(ptr, flags)				\
+({									\
+	spin_unlock_irqrestore(&(ptr)->lock, flags);			\
+	pcpu_task_unpin();						\
+})
+
+/*
  * On CONFIG_SMP=n the UP implementation of spin_trylock() never fails and thus
  * is not compatible with our locking scheme. However we do not need pcp for
  * scalability in the first place, so just make all the trylocks fail and take
@@ -151,6 +163,9 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 		NULL
 
 #define pcp_spin_unlock(ptr)		\
+		BUG_ON(1)
+
+#define pcp_spin_unlock_irqrestore(ptr, flags)	\
 		BUG_ON(1)
 #endif
 
@@ -2846,8 +2861,8 @@ static int nr_pcp_high(struct per_cpu_pages *pcp, struct zone *zone,
  * Tune pcp alloc factor and adjust count & free_count. Free pages to bring the
  * pcp's watermarks below high.
  *
- * May return a freed pcp, if during page freeing the pcp spinlock cannot be
- * reacquired. Return true if pcp is locked, false otherwise.
+ * May return with the pcp unlocked after freeing pages to the buddy allocator.
+ * Return true if pcp is locked, false otherwise.
  */
 static bool free_frozen_page_commit(struct zone *zone,
 		struct per_cpu_pages *pcp, struct page *page, int migratetype,
@@ -2904,14 +2919,19 @@ static bool free_frozen_page_commit(struct zone *zone,
 
 	to_free = nr_pcp_free(pcp, batch, high, free_high);
 	while (to_free > 0 && pcp->count > 0) {
+		unsigned long flags = 0;
+
 		to_free_batched = min(to_free, batch);
+		if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+			local_irq_save(flags);
 		free_pcppages_bulk(zone, to_free_batched, pcp, pindex);
 		to_free -= to_free_batched;
+		pcp_spin_unlock_irqrestore(pcp, flags);
 
-		if (to_free == 0 || pcp->count == 0)
+		if (!to_free) {
+			ret = false;
 			break;
-
-		pcp_spin_unlock(pcp);
+		}
 
 		pcp = pcp_spin_trylock(zone->per_cpu_pageset);
 		if (!pcp) {
