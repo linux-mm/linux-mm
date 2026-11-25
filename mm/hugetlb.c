@@ -4744,8 +4744,9 @@ void hugetlb_show_meminfo_node(int nid)
 
 void hugetlb_report_usage(struct seq_file *m, struct mm_struct *mm)
 {
+	/* Negative once the MM shared PMD tables, see huge_pmd_share(). */
 	seq_printf(m, "HugetlbPages:\t%8lu kB\n",
-		   K(atomic_long_read(&mm->hugetlb_usage)));
+		   K(max(atomic_long_read(&mm->hugetlb_usage), 0L)));
 }
 
 /* Return the number pages of memory we physically have, in PAGE_SIZE units. */
@@ -7310,6 +7311,12 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 				(pmd_t *)((unsigned long)spte & PAGE_MASK));
 		hugetlbfs_pmd_sharing_inc(file_inode(vma->vm_file));
 		mm_inc_nr_pmds(mm);
+		/*
+		 * (Un)mapping folios with shared PMD tables would require
+		 * updating statistics of all MMs. Instead, give up accounting.
+		 */
+		atomic_long_set(&mm->hugetlb_usage, LONG_MIN / 2);
+		atomic_long_set(&svma->vm_mm->hugetlb_usage, LONG_MIN / 2);
 	} else {
 		ptdesc_pmd_pts_dec(virt_to_ptdesc(spte));
 	}

@@ -268,7 +268,8 @@ It's slow but very precise.
  VmPTE                       size of page table entries
  VmSwap                      amount of swap used by anonymous private data
                              (shmem swap usage is not included)
- HugetlbPages                size of hugetlb memory portions
+ HugetlbPages                size of hugetlb memory portions (0 once the
+                             process shared hugetlb PMD page tables)
  CoreDumping                 process's memory is currently being dumped
                              (killing the process may lead to a corrupted core)
  THP_enabled                 process is allowed to use THP (returns 0 when
