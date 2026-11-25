@@ -1630,7 +1630,8 @@ static vm_fault_t insert_pmd(struct vm_area_struct *vma, unsigned long addr,
 	spinlock_t *ptl;
 	pmd_t entry;
 
-	if (addr < vma->vm_start || addr >= vma->vm_end)
+	if (addr < vma->vm_start || addr >= vma->vm_end ||
+	    vma->vm_end - addr < HPAGE_PMD_SIZE)
 		return VM_FAULT_SIGBUS;
 
 	if (arch_needs_pgtable_deposit()) {
@@ -1771,7 +1772,8 @@ static vm_fault_t insert_pud(struct vm_area_struct *vma, unsigned long addr,
 	spinlock_t *ptl;
 	pud_t entry;
 
-	if (addr < vma->vm_start || addr >= vma->vm_end)
+	if (addr < vma->vm_start || addr >= vma->vm_end ||
+	    vma->vm_end - addr < HPAGE_PUD_SIZE)
 		return VM_FAULT_SIGBUS;
 
 	ptl = pud_lock(mm, pud);
