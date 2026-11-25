@@ -1822,37 +1822,57 @@ static void collect_mm_slot(struct khugepaged_mm_slot *mm_slot)
 	}
 }
 
+/*
+ * Allocate the page tables needed to map a PMD at @haddr. Must be called
+ * before locking the folio: allocating with __GFP_FS while holding a folio
+ * lock can deadlock in reclaim.
+ */
+static enum scan_result alloc_huge_pmd_tables(struct mm_struct *mm,
+		unsigned long haddr, pmd_t *pmd, pgtable_t *prealloc_pte)
+{
+	if (!pmd) {
+		pgd_t *pgd = pgd_offset(mm, haddr);
+		p4d_t *p4d;
+		pud_t *pud;
+
+		p4d = p4d_alloc(mm, pgd, haddr);
+		if (!p4d)
+			return SCAN_FAIL;
+		pud = pud_alloc(mm, p4d, haddr);
+		if (!pud)
+			return SCAN_FAIL;
+		if (!pmd_alloc(mm, pud, haddr))
+			return SCAN_FAIL;
+	}
+
+	/* Archs like ppc64 deposit a page table along with the PMD mapping. */
+	if (arch_needs_pgtable_deposit()) {
+		*prealloc_pte = pte_alloc_one(mm);
+		if (!*prealloc_pte)
+			return SCAN_FAIL;
+	}
+	return SCAN_SUCCEED;
+}
+
 /* folio must be locked, and mmap_lock must be held */
 static enum scan_result set_huge_pmd(struct vm_area_struct *vma, unsigned long addr,
-		pmd_t *pmdp, struct folio *folio, struct page *page)
+		pmd_t *pmdp, struct folio *folio, struct page *page,
+		pgtable_t *prealloc_pte)
 {
-	struct mm_struct *mm = vma->vm_mm;
 	struct vm_fault vmf = {
 		.vma = vma,
 		.address = addr,
 		.flags = 0,
+		.pmd = pmdp,
+		.prealloc_pte = *prealloc_pte,
 	};
-	pgd_t *pgdp;
-	p4d_t *p4dp;
-	pud_t *pudp;
+	vm_fault_t ret;
 
 	mmap_assert_locked(vma->vm_mm);
 
-	if (!pmdp) {
-		pgdp = pgd_offset(mm, addr);
-		p4dp = p4d_alloc(mm, pgdp, addr);
-		if (!p4dp)
-			return SCAN_FAIL;
-		pudp = pud_alloc(mm, p4dp, addr);
-		if (!pudp)
-			return SCAN_FAIL;
-		pmdp = pmd_alloc(mm, pudp, addr);
-		if (!pmdp)
-			return SCAN_FAIL;
-	}
-
-	vmf.pmd = pmdp;
-	if (do_set_pmd(&vmf, folio, page, /* may_alloc= */ true))
+	ret = do_set_pmd(&vmf, folio, page, /* may_alloc= */ false);
+	*prealloc_pte = vmf.prealloc_pte;
+	if (ret)
 		return SCAN_FAIL;
 
 	folio_get(folio);
@@ -1881,6 +1901,7 @@ static enum scan_result try_collapse_pte_mapped_thp(struct mm_struct *mm, unsign
 	unsigned long haddr = addr & HPAGE_PMD_MASK;
 	unsigned long end = haddr + HPAGE_PMD_SIZE;
 	struct vm_area_struct *vma = vma_lookup(mm, haddr);
+	pgtable_t prealloc_pte = NULL;
 	struct folio *folio;
 	pte_t *start_pte, *pte;
 	pmd_t *pmd, pgt_pmd;
@@ -1916,10 +1937,18 @@ static enum scan_result try_collapse_pte_mapped_thp(struct mm_struct *mm, unsign
 	if (userfaultfd_protected(vma))
 		return SCAN_PTE_UFFD;
 
+	if (install_pmd) {
+		result = alloc_huge_pmd_tables(mm, haddr, pmd, &prealloc_pte);
+		if (result != SCAN_SUCCEED)
+			goto free_pte;
+	}
+
 	folio = filemap_lock_folio(vma->vm_file->f_mapping,
 			       linear_page_index(vma, haddr));
-	if (IS_ERR(folio))
-		return SCAN_PAGE_NULL;
+	if (IS_ERR(folio)) {
+		result = SCAN_PAGE_NULL;
+		goto free_pte;
+	}
 
 	if (!is_pmd_order(folio_order(folio))) {
 		result = SCAN_PAGE_COMPOUND;
@@ -2067,7 +2096,8 @@ static enum scan_result try_collapse_pte_mapped_thp(struct mm_struct *mm, unsign
 maybe_install_pmd:
 	/* step 5: install pmd entry */
 	result = install_pmd
-			? set_huge_pmd(vma, haddr, pmd, folio, &folio->page)
+			? set_huge_pmd(vma, haddr, pmd, folio, &folio->page,
+				       &prealloc_pte)
 			: SCAN_SUCCEED;
 	goto drop_folio;
 abort:
@@ -2086,6 +2116,9 @@ unlock:
 drop_folio:
 	folio_unlock(folio);
 	folio_put(folio);
+free_pte:
+	if (prealloc_pte)
+		pte_free(mm, prealloc_pte);
 	return result;
 }
 
