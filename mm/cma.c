@@ -32,6 +32,8 @@
 #include <linux/hugetlb.h>
 #include <trace/events/cma.h>
 #include <linux/page-isolation.h>
+#include <linux/crash_reserve.h>
+#include <linux/range.h>
 
 #include "internal.h"
 #include "cma.h"
@@ -42,12 +44,33 @@ unsigned int cma_area_count;
 
 bool cma_folio_is_longterm_pinnable(struct folio *folio)
 {
+	struct range r;
+	int i;
+
 	/*
 	 * Explicitly allocated CMA folios own their CMA memory and can be
 	 * pinned even in ZONE_MOVABLE, as CMA memory cannot be offlined.
 	 * For now, only HugeTLB tracks these allocations with a folio flag.
 	 */
-	return folio_test_hugetlb(folio) && folio_test_hugetlb_cma(folio);
+	if (!folio_test_hugetlb(folio) || !folio_test_hugetlb_cma(folio))
+		return false;
+
+	/*
+	 * The crash kernel uses the memory in crashk_cma_ranges[], but a
+	 * device can still write to a long-term pinned folio after a crash.
+	 */
+	if (!crashk_cma_cnt)
+		return true;
+
+	r.start = PFN_PHYS(folio_pfn(folio));
+	r.end = r.start + folio_size(folio) - 1;
+
+	for (i = 0; i < crashk_cma_cnt; i++) {
+		if (range_overlaps(&crashk_cma_ranges[i], &r))
+			return false;
+	}
+
+	return true;
 }
 
 phys_addr_t cma_get_base(const struct cma *cma)
