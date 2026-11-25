@@ -53,6 +53,7 @@
 #include <linux/atomic.h>
 #include <linux/percpu.h>
 #include <linux/rcupdate.h>
+#include <linux/spinlock_types.h>
 #include <linux/types.h>
 #include <linux/gfp.h>
 
@@ -108,6 +109,8 @@ struct percpu_ref {
 	 * mode; if set, then get/put will manipulate the atomic_t.
 	 */
 	unsigned long		percpu_count_ptr;
+
+	spinlock_t percpu_ref_switch_lock;
 
 	/*
 	 * 'percpu_ref' is often embedded into user structure, and only
