@@ -5953,12 +5953,11 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 {
 	const bool pagecache_folio = vmf->vma->vm_flags & VM_MAYSHARE;
 	u32 hash = hugetlb_fault_mutex_hash(mapping, vmf->pgoff);
-	bool new_folio, new_anon_folio = false;
+	bool folio_locked = true, new_anon_folio = false;
 	struct vm_area_struct *vma = vmf->vma;
 	struct mm_struct *mm = vma->vm_mm;
 	struct hstate *h = hstate_vma(vma);
 	vm_fault_t ret = VM_FAULT_SIGBUS;
-	bool folio_locked = true;
 	struct folio *folio;
 	pte_t new_pte;
 
@@ -5978,7 +5977,6 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 	 * Use page lock to guard against racing truncation
 	 * before we get page_table_lock.
 	 */
-	new_folio = false;
 	folio = filemap_lock_hugetlb_folio(h, mapping, vmf->pgoff);
 	if (IS_ERR(folio)) {
 		if (!hugetlb_pgoff_valid(mapping, vmf->pgoff, /* partial= */ false))
@@ -6048,7 +6046,6 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 		}
 		folio_zero_user(folio, vmf->real_address);
 		__folio_mark_uptodate(folio);
-		new_folio = true;
 
 		if (pagecache_folio) {
 			int err = hugetlb_add_to_page_cache(folio, mapping,
@@ -6069,6 +6066,7 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 				goto out;
 			}
 			filemap_invalidate_unlock_shared(mapping);
+			folio_set_hugetlb_migratable(folio);
 		} else {
 			new_anon_folio = true;
 			folio_lock(folio);
@@ -6151,11 +6149,10 @@ static vm_fault_t hugetlb_no_page(struct address_space *mapping,
 	}
 
 	/*
-	 * Only set hugetlb_migratable in newly allocated pages.  Existing pages
-	 * found in the pagecache may not have hugetlb_migratable if they have
-	 * been isolated for migration.
+	 * We must set hugetlb folios migratable whenever (1) a new anon folio
+	 * gets mapped; or (2) a new folio was added to the pagecache.
 	 */
-	if (new_folio)
+	if (new_anon_folio)
 		folio_set_hugetlb_migratable(folio);
 
 	if (folio_locked)
@@ -6646,6 +6643,7 @@ int hugetlb_mfill_atomic_pte(pte_t *dst_pte,
 		if (ret)
 			goto out_release_nounlock;
 		folio_in_pagecache = true;
+		folio_set_hugetlb_migratable(folio);
 	}
 
 	ptl = huge_pte_lock(h, dst_mm, dst_pte);
@@ -6694,7 +6692,7 @@ int hugetlb_mfill_atomic_pte(pte_t *dst_pte,
 	/* No need to invalidate - it was non-present before */
 	update_mmu_cache(dst_vma, dst_addr, dst_pte);
 
-	if (!is_continue)
+	if (!folio_in_pagecache)
 		folio_set_hugetlb_migratable(folio);
 	if (vm_shared || is_continue)
 		folio_unlock(folio);
