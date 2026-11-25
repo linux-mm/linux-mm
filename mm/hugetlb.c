@@ -6355,32 +6355,33 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 	}
 
 	/*
-	 * Protnone hugetlb PTEs with the uffd bit are used by
-	 * userfaultfd RWP for access tracking. Plain PROT_NONE (without the
-	 * marker) is not an RWP fault and is not expected on hugetlb (no
-	 * NUMA hinting), so let normal hugetlb fault handling proceed.
+	 * Protnone hugetlb PTEs with the uffd bit are used by userfaultfd RWP
+	 * for access tracking. Without the bit there is nothing to report, so
+	 * just make the PTE accessible.
 	 */
-	if (pte_protnone(vmf.orig_pte) && vma_is_accessible(vma) &&
-	    huge_pte_uffd(vmf.orig_pte)) {
+	if (pte_protnone(vmf.orig_pte) && vma_is_accessible(vma)) {
 		spinlock_t *ptl;
 		pte_t pte;
 
 		/* Sync: drop hugetlb locks before blocking in handle_userfault() */
-		if (userfaultfd_rwp(vma) && !userfaultfd_rwp_async(vma))
+		if (huge_pte_uffd(vmf.orig_pte) && userfaultfd_rwp(vma) &&
+		    !userfaultfd_rwp_async(vma))
 			return hugetlb_handle_userfault(&vmf, mapping, VM_UFFD_RWP);
 
 		ptl = huge_pte_lock(h, mm, vmf.pte);
 		pte = huge_ptep_get(mm, vmf.address, vmf.pte);
-		/*
-		 * TODO: fix all cases where uffd PTE bits remain in VMAs that
-		 * are no longer registered with uffd.
-		 */
-		if (pte_protnone(pte) && huge_pte_uffd(pte)) {
+		if (pte_same(pte, vmf.orig_pte)) {
 			unsigned int shift = huge_page_shift(h);
 
 			pte = huge_pte_modify(pte, vma->vm_page_prot);
 			pte = arch_make_huge_pte(pte, shift, vma->vm_flags);
-			/* huge_pte_modify() preserves _PAGE_UFFD; drop it on resolution */
+			/*
+			 * huge_pte_modify() preserves _PAGE_UFFD; drop it on
+			 * resolution.
+			 *
+			 * TODO: fix all cases where uffd PTE bits remain in VMAs
+			 * that are no longer registered with uffd.
+			 */
 			pte = huge_pte_clear_uffd(pte);
 			pte = pte_mkyoung(pte);
 			/*
