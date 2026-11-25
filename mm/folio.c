@@ -525,6 +525,23 @@ static void lru_deactivate_file(struct lruvec *lruvec, struct folio *folio)
 	}
 }
 
+#ifdef CONFIG_LRU_GEN
+/* with MGLRU, add the folio to the head of the oldest generation */
+static void lruvec_add_deactivated_folio(struct lruvec *lruvec, struct folio *folio)
+{
+	int type = folio_is_file_lru(folio);
+	unsigned long seq = lruvec->lrugen.min_seq[type];
+
+	if (!lru_gen_add_folio(lruvec, folio, MIN_SEQ_UNBOUNDED, seq, false))
+		lruvec_add_folio(lruvec, folio);
+}
+#else
+static void lruvec_add_deactivated_folio(struct lruvec *lruvec, struct folio *folio)
+{
+	lruvec_add_folio(lruvec, folio);
+}
+#endif
+
 static void lru_deactivate(struct lruvec *lruvec, struct folio *folio)
 {
 	long nr_pages = folio_nr_pages(folio);
@@ -535,7 +552,7 @@ static void lru_deactivate(struct lruvec *lruvec, struct folio *folio)
 	lruvec_del_folio(lruvec, folio);
 	folio_clear_active(folio);
 	folio_clear_referenced(folio);
-	lruvec_add_folio(lruvec, folio);
+	lruvec_add_deactivated_folio(lruvec, folio);
 
 	__count_vm_events(PGDEACTIVATE, nr_pages);
 	count_memcg_events(lruvec_memcg(lruvec), PGDEACTIVATE, nr_pages);
