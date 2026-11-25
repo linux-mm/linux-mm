@@ -833,7 +833,7 @@ static int queue_folios_hugetlb(pte_t *pte, unsigned long hmask,
 	 * cannot easily detect if a folio is shared.
 	 */
 	if ((flags & MPOL_MF_MOVE_ALL) ||
-	    (!folio_maybe_mapped_shared(folio) && !hugetlb_pmd_shared(pte)))
+	    !hugetlb_folio_maybe_mapped_shared(folio, pte))
 		if (!folio_isolate_hugetlb(folio, qp->pagelist))
 			qp->nr_failed++;
 unlock:

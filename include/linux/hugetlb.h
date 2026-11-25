@@ -1386,6 +1386,22 @@ static inline bool hugetlb_pmd_shared(pte_t *pte)
 }
 #endif
 
+#ifdef CONFIG_HUGETLB_PAGE
+static inline bool hugetlb_folio_maybe_mapped_shared(struct folio *folio,
+		pte_t *ptep)
+{
+	if (folio_maybe_mapped_shared(folio))
+		return true;
+	return folio_size(folio) == PMD_SIZE && hugetlb_pmd_shared(ptep);
+}
+#else /* !CONFIG_HUGETLB_PAGE */
+static inline bool hugetlb_folio_maybe_mapped_shared(struct folio *folio,
+		pte_t *ptep)
+{
+	return true;
+}
+#endif /* CONFIG_HUGETLB_PAGE */
+
 bool want_pmd_share(struct vm_area_struct *vma, unsigned long addr);
 
 #ifndef __HAVE_ARCH_FLUSH_HUGETLB_TLB_RANGE
