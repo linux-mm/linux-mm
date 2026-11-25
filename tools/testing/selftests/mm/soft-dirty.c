@@ -310,6 +310,51 @@ static void test_merge(int pagemap_fd, int pagesize)
 	munmap(map, 2 * pagesize);
 }
 
+/*
+ * Clear the soft-dirty bits of a dirty PTE-mapped THP, then mprotect() it
+ * without writing to it. mprotect() batches the PTEs of the large folio
+ * and must not mark them soft-dirty.
+ */
+static void test_thp_mprotect(int pagemap_fd, int pagesize)
+{
+	size_t hpage_len = read_pmd_pagesize();
+	size_t len = hpage_len - pagesize;
+	unsigned long nr = 0;
+	size_t offs;
+	char *map;
+
+	if (!thp_is_enabled() || !hpage_len) {
+		ksft_test_result_skip("Test %s no THP\n", __func__);
+		return;
+	}
+
+	map = memalign(hpage_len, hpage_len);
+	if (!map)
+		ksft_exit_fail_msg("memalign failed\n");
+	if (madvise(map, hpage_len, MADV_HUGEPAGE))
+		ksft_exit_fail_msg("madvise failed\n");
+	memset(map, 1, hpage_len);
+
+	if (!check_huge_anon(map, hpage_len, 1, hpage_len)) {
+		ksft_test_result_skip("Test %s no THP\n", __func__);
+		goto out;
+	}
+
+	/* Zapping the last page PTE-maps the rest of the THP. */
+	madvise(map + len, pagesize, MADV_DONTNEED);
+	clear_softdirty();
+	mprotect(map, len, PROT_READ);
+
+	for (offs = 0; offs < len; offs += pagesize)
+		nr += pagemap_is_softdirty(pagemap_fd, map + offs);
+	ksft_test_result(!nr, "Test %s soft-dirty clear after mprotect\n",
+			 __func__);
+
+	mprotect(map, len, PROT_READ | PROT_WRITE);
+out:
+	free(map);
+}
+
 static void test_mprotect_anon(int pagemap_fd, int pagesize)
 {
 	test_mprotect(pagemap_fd, pagesize, true);
@@ -330,7 +375,7 @@ int main(int argc, char **argv)
 	if (!softdirty_supported())
 		ksft_exit_skip("soft-dirty is not support\n");
 
-	ksft_set_plan(19);
+	ksft_set_plan(20);
 	pagemap_fd = open(PAGEMAP_FILE_PATH, O_RDONLY);
 	if (pagemap_fd < 0)
 		ksft_exit_fail_msg("Failed to open %s\n", PAGEMAP_FILE_PATH);
@@ -343,6 +388,7 @@ int main(int argc, char **argv)
 	test_mprotect_anon(pagemap_fd, pagesize);
 	test_mprotect_file(pagemap_fd, pagesize);
 	test_merge(pagemap_fd, pagesize);
+	test_thp_mprotect(pagemap_fd, pagesize);
 
 	close(pagemap_fd);
 
