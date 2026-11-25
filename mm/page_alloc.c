@@ -177,6 +177,9 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 		spin_lock(&(ptr)->lock)
 #define pcp_spin_unlock_nopin(ptr)			\
 		spin_unlock(&(ptr)->lock)
+/* Like pcp_spin_unlock_irqrestore(), for callers that did not pin */
+#define pcp_spin_unlock_nopin_irqrestore(ptr, flags)	\
+		spin_unlock_irqrestore(&(ptr)->lock, flags)
 
 #ifdef CONFIG_USE_PERCPU_NUMA_NODE_ID
 DEFINE_PER_CPU(int, numa_node);
@@ -2599,6 +2602,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
 {
 	int high_min, to_drain, to_drain_batched, batch;
+	unsigned long flags = 0;
 	bool todo = false;
 
 	high_min = READ_ONCE(pcp->high_min);
@@ -2619,8 +2623,10 @@ bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
 	while (to_drain > 0) {
 		to_drain_batched = min(to_drain, batch);
 		pcp_spin_lock_nopin(pcp);
+		if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+			local_irq_save(flags);
 		free_pcppages_bulk(zone, to_drain_batched, pcp, 0);
-		pcp_spin_unlock_nopin(pcp);
+		pcp_spin_unlock_nopin_irqrestore(pcp, flags);
 		todo = true;
 
 		to_drain -= to_drain_batched;
@@ -2637,14 +2643,17 @@ bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
  */
 void drain_zone_pages(struct zone *zone, struct per_cpu_pages *pcp)
 {
+	unsigned long flags = 0;
 	int to_drain, batch;
 
 	batch = READ_ONCE(pcp->batch);
 	to_drain = min(pcp->count, batch);
 	if (to_drain > 0) {
 		pcp_spin_lock_nopin(pcp);
+		if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+			local_irq_save(flags);
 		free_pcppages_bulk(zone, to_drain, pcp, 0);
-		pcp_spin_unlock_nopin(pcp);
+		pcp_spin_unlock_nopin_irqrestore(pcp, flags);
 	}
 }
 #endif
@@ -2655,10 +2664,13 @@ void drain_zone_pages(struct zone *zone, struct per_cpu_pages *pcp)
 static void drain_pages_zone(unsigned int cpu, struct zone *zone)
 {
 	struct per_cpu_pages *pcp = per_cpu_ptr(zone->per_cpu_pageset, cpu);
+	unsigned long flags = 0;
 	int count;
 
 	do {
 		pcp_spin_lock_nopin(pcp);
+		if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+			local_irq_save(flags);
 		count = pcp->count;
 		if (count) {
 			int to_drain = min(count,
@@ -2667,7 +2679,7 @@ static void drain_pages_zone(unsigned int cpu, struct zone *zone)
 			free_pcppages_bulk(zone, to_drain, pcp, 0);
 			count -= to_drain;
 		}
-		pcp_spin_unlock_nopin(pcp);
+		pcp_spin_unlock_nopin_irqrestore(pcp, flags);
 	} while (count);
 }
 
