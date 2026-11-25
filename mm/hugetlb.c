@@ -5458,6 +5458,14 @@ static void hugetlb_unmap_range(struct mmu_gather *tlb,
 		 */
 		if (unlikely(!pte_present(pte))) {
 			/*
+			 * If we have a folio provided, we only care about
+			 * present page table entries (folio is locked).
+			 */
+			if (folio_provided) {
+				spin_unlock(ptl);
+				continue;
+			}
+			/*
 			 * If the pte was wr-protected by uffd-wp in any of the
 			 * swap forms, meanwhile the caller does not want to
 			 * drop the uffd-wp bit in this zap, then replace the
