@@ -3930,6 +3930,12 @@ Kernel parameters
 			in above case 3, memory may need be hot added after boot
 			if system memory of hypervisor is not sufficient.
 
+			[X86] Not supported in confidential guests (SEV-SNP,
+			TDX) that use unaccepted memory. The unaccepted memory
+			bitmap is built before the command line is parsed and
+			does not follow mem=, so memory that is no longer in
+			the memory map may still be accepted.
+
 	mem=nn[KMG]@ss[KMG]
 			[ARM,MIPS,EARLY] - override the memory layout
 			reported by firmware.
@@ -3970,6 +3976,12 @@ Kernel parameters
 			comma delimited.
 			Example:
 				memmap=100M@2G,100M#3G,1G!1024G
+
+			[X86] Not supported in confidential guests (SEV-SNP,
+			TDX) that use unaccepted memory. The unaccepted memory
+			bitmap is built before the command line is parsed and
+			does not follow memmap=. A memory hole can crash an
+			SEV-SNP guest early in boot.
 
 	memmap=nn[KMG]#ss[KMG]
 			[KNL,ACPI,EARLY] Mark specific memory as ACPI data.
