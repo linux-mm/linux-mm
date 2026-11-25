@@ -1785,8 +1785,10 @@ static inline pte_t modify_prot_start_ptes(struct vm_area_struct *vma,
 		unsigned long addr, pte_t *ptep, unsigned int nr)
 {
 	pte_t pte, tmp_pte;
+	bool soft_dirty;
 
 	pte = ptep_modify_prot_start(vma, addr, ptep);
+	soft_dirty = pte_soft_dirty(pte);
 	while (--nr) {
 		ptep++;
 		addr += PAGE_SIZE;
@@ -1795,8 +1797,10 @@ static inline pte_t modify_prot_start_ptes(struct vm_area_struct *vma,
 			pte = pte_mkdirty(pte);
 		if (pte_young(tmp_pte))
 			pte = pte_mkyoung(pte);
+		soft_dirty |= pte_soft_dirty(tmp_pte);
 	}
-	return pte;
+	/* pte_mkdirty() also sets the soft-dirty bit. */
+	return soft_dirty ? pte_mksoft_dirty(pte) : pte_clear_soft_dirty(pte);
 }
 #endif
 
