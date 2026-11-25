@@ -139,9 +139,9 @@ static inline void resv_map_put_hugetlb_cgroup_uncharge_info(
 }
 
 extern int hugetlb_cgroup_charge_cgroup(int idx, unsigned long nr_pages,
-					struct hugetlb_cgroup **ptr);
+		struct mm_struct *mm, struct hugetlb_cgroup **ptr);
 extern int hugetlb_cgroup_charge_cgroup_rsvd(int idx, unsigned long nr_pages,
-					     struct hugetlb_cgroup **ptr);
+		struct mm_struct *mm, struct hugetlb_cgroup **ptr);
 extern void hugetlb_cgroup_commit_charge(int idx, unsigned long nr_pages,
 					 struct hugetlb_cgroup *h_cg,
 					 struct folio *folio);
@@ -225,14 +225,14 @@ static inline void resv_map_put_hugetlb_cgroup_uncharge_info(
 }
 
 static inline int hugetlb_cgroup_charge_cgroup(int idx, unsigned long nr_pages,
-					       struct hugetlb_cgroup **ptr)
+		struct mm_struct *mm, struct hugetlb_cgroup **ptr)
 {
 	return 0;
 }
 
 static inline int hugetlb_cgroup_charge_cgroup_rsvd(int idx,
-						    unsigned long nr_pages,
-						    struct hugetlb_cgroup **ptr)
+		unsigned long nr_pages, struct mm_struct *mm,
+		struct hugetlb_cgroup **ptr)
 {
 	return 0;
 }

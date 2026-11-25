@@ -2305,7 +2305,7 @@ struct folio *alloc_hugetlb_folio_reserve(struct hstate *h, int preferred_nid,
 	int idx = hstate_index(h);
 	int ret;
 
-	if (hugetlb_cgroup_charge_cgroup(idx, nr_pages, &h_cg))
+	if (hugetlb_cgroup_charge_cgroup(idx, nr_pages, NULL, &h_cg))
 		return NULL;
 
 	spin_lock_irq(&hugetlb_lock);
@@ -3000,7 +3000,8 @@ void wait_for_freed_hugetlb_folios(void)
  * hugetlb_alloc_folio - Allocate a hugetlb folio.
  * @h: Hugetlb state control block.
  * @mpoli: Interpreted memory policy to use for allocation.
- * @mm: Memory descriptor of the allocation target.
+ * @mm: Memory descriptor of the allocation target. With CONFIG_MEMCG, the
+ *      hugetlb cgroup of the owner of @mm is charged.
  * @alloc_flags: Flags controlling the allocation behavior.
  *
  * Allocates a hugetlb folio and handles cgroup charging and global hstate
@@ -3026,10 +3027,10 @@ struct folio *hugetlb_alloc_folio(struct hstate *h,
 	int ret;
 
 	if (charge_hugetlb_cgroup_rsvd &&
-	    hugetlb_cgroup_charge_cgroup_rsvd(idx, nr_pages, &h_cg_rsvd))
+	    hugetlb_cgroup_charge_cgroup_rsvd(idx, nr_pages, mm, &h_cg_rsvd))
 		return ERR_PTR(-ENOSPC);
 
-	if (hugetlb_cgroup_charge_cgroup(idx, nr_pages, &h_cg)) {
+	if (hugetlb_cgroup_charge_cgroup(idx, nr_pages, mm, &h_cg)) {
 		ret = -ENOSPC;
 		goto err_uncharge_hugetlb_cgroup_rsvd;
 	}
@@ -7011,7 +7012,7 @@ retry:
 	}
 
 	err = hugetlb_cgroup_charge_cgroup_rsvd(hstate_index(h),
-				chg * pages_per_huge_page(h), &h_cg);
+						chg * pages_per_huge_page(h), NULL, &h_cg);
 	if (err < 0)
 		goto out_err;
 

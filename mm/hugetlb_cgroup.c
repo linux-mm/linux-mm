@@ -281,9 +281,20 @@ static inline void hugetlb_event(struct hugetlb_cgroup *hugetlb, int idx,
 		 !hugetlb_cgroup_is_root(hugetlb));
 }
 
+static struct hugetlb_cgroup *hugetlb_cgroup_from_mm(struct mm_struct *mm)
+{
+	struct task_struct *task = current;
+
+#ifdef CONFIG_MEMCG
+	/* Like memcg, charge the owner of the mm we allocate for. */
+	if (mm)
+		task = rcu_dereference(mm->owner);
+#endif
+	return task ? hugetlb_cgroup_from_task(task) : NULL;
+}
+
 static int __hugetlb_cgroup_charge_cgroup(int idx, unsigned long nr_pages,
-					  struct hugetlb_cgroup **ptr,
-					  bool rsvd)
+		struct mm_struct *mm, struct hugetlb_cgroup **ptr, bool rsvd)
 {
 	int ret = 0;
 	struct page_counter *counter;
@@ -293,7 +304,12 @@ static int __hugetlb_cgroup_charge_cgroup(int idx, unsigned long nr_pages,
 		goto done;
 again:
 	rcu_read_lock();
-	h_cg = hugetlb_cgroup_from_task(current);
+	h_cg = hugetlb_cgroup_from_mm(mm);
+	if (!h_cg) {
+		rcu_read_unlock();
+		ret = -ENOMEM;
+		goto done;
+	}
 	if (!css_tryget(&h_cg->css)) {
 		rcu_read_unlock();
 		goto again;
@@ -318,15 +334,15 @@ done:
 }
 
 int hugetlb_cgroup_charge_cgroup(int idx, unsigned long nr_pages,
-				 struct hugetlb_cgroup **ptr)
+		struct mm_struct *mm, struct hugetlb_cgroup **ptr)
 {
-	return __hugetlb_cgroup_charge_cgroup(idx, nr_pages, ptr, false);
+	return __hugetlb_cgroup_charge_cgroup(idx, nr_pages, mm, ptr, false);
 }
 
 int hugetlb_cgroup_charge_cgroup_rsvd(int idx, unsigned long nr_pages,
-				      struct hugetlb_cgroup **ptr)
+		struct mm_struct *mm, struct hugetlb_cgroup **ptr)
 {
-	return __hugetlb_cgroup_charge_cgroup(idx, nr_pages, ptr, true);
+	return __hugetlb_cgroup_charge_cgroup(idx, nr_pages, mm, ptr, true);
 }
 
 /* Should be called with hugetlb_lock held */
