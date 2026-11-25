@@ -141,6 +141,18 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 })
 
 /*
+ * Like pcp_spin_unlock(), for callers that disabled IRQs (except on PREEMPT_RT)
+ * before taking zone->lock. An interrupt that arrives in between runs only once
+ * the pcp lock is dropped, so its softirqs can use the pcp lists. Disable IRQs
+ * after taking the pcp lock as other holders may be waiting for an IPI.
+ */
+#define pcp_spin_unlock_irqrestore(ptr, flags)				\
+({									\
+	spin_unlock_irqrestore(&(ptr)->lock, flags);			\
+	pcpu_task_unpin();						\
+})
+
+/*
  * On CONFIG_SMP=n the UP implementation of spin_trylock() never fails and thus
  * is not compatible with our locking scheme. However we do not need pcp for
  * scalability in the first place, so just make all the trylocks fail and take
@@ -152,6 +164,9 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 
 #define pcp_spin_unlock(ptr)		\
 		BUG_ON(1)
+
+#define pcp_spin_unlock_irqrestore(ptr, flags)	\
+		BUG_ON(1)
 #endif
 
 /*
@@ -162,6 +177,9 @@ static DEFINE_MUTEX(pcp_batch_high_lock);
 		spin_lock(&(ptr)->lock)
 #define pcp_spin_unlock_nopin(ptr)			\
 		spin_unlock(&(ptr)->lock)
+/* Like pcp_spin_unlock_irqrestore(), for callers that did not pin */
+#define pcp_spin_unlock_nopin_irqrestore(ptr, flags)	\
+		spin_unlock_irqrestore(&(ptr)->lock, flags)
 
 #ifdef CONFIG_USE_PERCPU_NUMA_NODE_ID
 DEFINE_PER_CPU(int, numa_node);
@@ -2584,6 +2602,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
 {
 	int high_min, to_drain, to_drain_batched, batch;
+	unsigned long flags = 0;
 	bool todo = false;
 
 	high_min = READ_ONCE(pcp->high_min);
@@ -2604,8 +2623,10 @@ bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
 	while (to_drain > 0) {
 		to_drain_batched = min(to_drain, batch);
 		pcp_spin_lock_nopin(pcp);
+		if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+			local_irq_save(flags);
 		free_pcppages_bulk(zone, to_drain_batched, pcp, 0);
-		pcp_spin_unlock_nopin(pcp);
+		pcp_spin_unlock_nopin_irqrestore(pcp, flags);
 		todo = true;
 
 		to_drain -= to_drain_batched;
@@ -2622,14 +2643,17 @@ bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
  */
 void drain_zone_pages(struct zone *zone, struct per_cpu_pages *pcp)
 {
+	unsigned long flags = 0;
 	int to_drain, batch;
 
 	batch = READ_ONCE(pcp->batch);
 	to_drain = min(pcp->count, batch);
 	if (to_drain > 0) {
 		pcp_spin_lock_nopin(pcp);
+		if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+			local_irq_save(flags);
 		free_pcppages_bulk(zone, to_drain, pcp, 0);
-		pcp_spin_unlock_nopin(pcp);
+		pcp_spin_unlock_nopin_irqrestore(pcp, flags);
 	}
 }
 #endif
@@ -2640,10 +2664,13 @@ void drain_zone_pages(struct zone *zone, struct per_cpu_pages *pcp)
 static void drain_pages_zone(unsigned int cpu, struct zone *zone)
 {
 	struct per_cpu_pages *pcp = per_cpu_ptr(zone->per_cpu_pageset, cpu);
+	unsigned long flags = 0;
 	int count;
 
 	do {
 		pcp_spin_lock_nopin(pcp);
+		if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+			local_irq_save(flags);
 		count = pcp->count;
 		if (count) {
 			int to_drain = min(count,
@@ -2652,7 +2679,7 @@ static void drain_pages_zone(unsigned int cpu, struct zone *zone)
 			free_pcppages_bulk(zone, to_drain, pcp, 0);
 			count -= to_drain;
 		}
-		pcp_spin_unlock_nopin(pcp);
+		pcp_spin_unlock_nopin_irqrestore(pcp, flags);
 	} while (count);
 }
 
@@ -2846,8 +2873,8 @@ static int nr_pcp_high(struct per_cpu_pages *pcp, struct zone *zone,
  * Tune pcp alloc factor and adjust count & free_count. Free pages to bring the
  * pcp's watermarks below high.
  *
- * May return a freed pcp, if during page freeing the pcp spinlock cannot be
- * reacquired. Return true if pcp is locked, false otherwise.
+ * May return with the pcp unlocked after freeing pages to the buddy allocator.
+ * Return true if pcp is locked, false otherwise.
  */
 static bool free_frozen_page_commit(struct zone *zone,
 		struct per_cpu_pages *pcp, struct page *page, int migratetype,
@@ -2904,14 +2931,19 @@ static bool free_frozen_page_commit(struct zone *zone,
 
 	to_free = nr_pcp_free(pcp, batch, high, free_high);
 	while (to_free > 0 && pcp->count > 0) {
+		unsigned long flags = 0;
+
 		to_free_batched = min(to_free, batch);
+		if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+			local_irq_save(flags);
 		free_pcppages_bulk(zone, to_free_batched, pcp, pindex);
 		to_free -= to_free_batched;
+		pcp_spin_unlock_irqrestore(pcp, flags);
 
-		if (to_free == 0 || pcp->count == 0)
+		if (!to_free) {
+			ret = false;
 			break;
-
-		pcp_spin_unlock(pcp);
+		}
 
 		pcp = pcp_spin_trylock(zone->per_cpu_pageset);
 		if (!pcp) {
@@ -3385,6 +3417,8 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	struct per_cpu_pages *pcp;
 	struct list_head *list;
 	struct page *page;
+	unsigned long flags;
+	bool refill;
 
 	/* spin_trylock may fail due to a parallel drain or IRQ reentrancy. */
 	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
@@ -3398,8 +3432,15 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	 */
 	pcp->free_count >>= 1;
 	list = &pcp->lists[order_to_pindex(migratetype, order)];
+	/* Refilling takes zone->lock, see pcp_spin_unlock_irqrestore() */
+	refill = !IS_ENABLED(CONFIG_PREEMPT_RT) && list_empty(list);
+	if (refill)
+		local_irq_save(flags);
 	page = __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
-	pcp_spin_unlock(pcp);
+	if (refill)
+		pcp_spin_unlock_irqrestore(pcp, flags);
+	else
+		pcp_spin_unlock(pcp);
 	if (page) {
 		__count_zid_vm_events(PGALLOC, page_zonenum(page), 1 << order);
 		zone_statistics(preferred_zone, zone, 1);
