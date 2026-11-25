@@ -2279,8 +2279,9 @@ static int do_move_pages_to_node(struct list_head *pagelist, int node)
 	return err;
 }
 
-static int __add_folio_for_migration(struct folio *folio, int node,
-		struct list_head *pagelist, bool migrate_all)
+static int __add_folio_for_migration(struct folio *folio,
+		struct folio_walk *fw, int node, struct list_head *pagelist,
+		bool migrate_all)
 {
 	if (is_zero_folio(folio) || is_huge_zero_folio(folio))
 		return -EFAULT;
@@ -2291,13 +2292,19 @@ static int __add_folio_for_migration(struct folio *folio, int node,
 	if (folio_nid(folio) == node)
 		return 0;
 
-	if (folio_maybe_mapped_shared(folio) && !migrate_all)
-		return -EACCES;
-
 	if (folio_test_hugetlb(folio)) {
+		/* fw->ptep aliases fw->pmdp and fw->pudp. */
+		if (!migrate_all && hugetlb_folio_maybe_mapped_shared(folio, fw->ptep))
+			return -EACCES;
 		if (folio_isolate_hugetlb(folio, pagelist))
 			return 1;
-	} else if (folio_isolate_lru(folio)) {
+		return -EBUSY;
+	}
+
+	if (!migrate_all && folio_maybe_mapped_shared(folio))
+		return -EACCES;
+
+	if (folio_isolate_lru(folio)) {
 		list_add_tail(&folio->lru, pagelist);
 		node_stat_mod_folio(folio,
 			NR_ISOLATED_ANON + folio_is_file_lru(folio),
@@ -2332,8 +2339,8 @@ static int add_folio_for_migration(struct mm_struct *mm, const void __user *p,
 	if (vma && vma_migratable(vma)) {
 		folio = folio_walk_start(&fw, vma, addr, FW_ZEROPAGE);
 		if (folio) {
-			err = __add_folio_for_migration(folio, node, pagelist,
-							migrate_all);
+			err = __add_folio_for_migration(folio, &fw, node,
+							pagelist, migrate_all);
 			folio_walk_end(&fw, vma);
 		} else {
 			err = -ENOENT;
