@@ -3103,8 +3103,9 @@ typedef enum {
  * allocation).  New call sites should (probably) never set it to true!!
  * When it's set, the allocation will bypass all vma level reservations.
  */
-struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
-				    unsigned long addr, bool cow_from_owner)
+static struct folio *__alloc_hugetlb_folio(struct vm_area_struct *vma,
+		unsigned long addr, bool cow_from_owner,
+		struct mm_struct *memcg_mm)
 {
 	struct hugepage_subpool *spool = subpool_vma(vma);
 	struct hstate *h = hstate_vma(vma);
@@ -3187,7 +3188,7 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 		.nodemask = nodemask,
 	};
 
-	folio = hugetlb_alloc_folio(h, &mpoli, vma->vm_mm, alloc_flags);
+	folio = hugetlb_alloc_folio(h, &mpoli, memcg_mm, alloc_flags);
 
 	mpol_cond_put(mpol);
 
@@ -3247,6 +3248,23 @@ out_end_reservation:
 	if (map_chg != MAP_CHG_ENFORCED)
 		vma_end_reservation(h, vma, addr);
 	return ERR_PTR(ret);
+}
+
+struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
+		unsigned long addr, bool cow_from_owner)
+{
+	return __alloc_hugetlb_folio(vma, addr, cow_from_owner, vma->vm_mm);
+}
+
+/*
+ * Allocate a folio for a copy in the child VMA during fork(), charged to the
+ * parent's mm: the child is not in its memory cgroup yet.
+ */
+static struct folio *alloc_hugetlb_folio_for_fork(struct vm_area_struct *dst_vma,
+		unsigned long addr, struct mm_struct *src_mm)
+{
+	return __alloc_hugetlb_folio(dst_vma, addr, /* cow_from_owner = */ false,
+				     src_mm);
 }
 
 static __init void *alloc_bootmem(struct hstate *h, int nid, bool node_exact)
@@ -5110,7 +5128,7 @@ again:
 				spin_unlock(src_ptl);
 				spin_unlock(dst_ptl);
 				/* Do not use reserve as it's private owned */
-				new_folio = alloc_hugetlb_folio(dst_vma, addr, false);
+				new_folio = alloc_hugetlb_folio_for_fork(dst_vma, addr, src);
 				if (IS_ERR(new_folio)) {
 					folio_put(pte_folio);
 					ret = PTR_ERR(new_folio);
