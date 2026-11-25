@@ -7264,15 +7264,23 @@ pte_t *huge_pmd_share(struct mm_struct *mm, struct vm_area_struct *vma,
 		if (svma == vma)
 			continue;
 
+		/*
+		 * Stabilize the svma flags, as mprotect() changes flags
+		 * before adjusting page tables.
+		 */
+		if (!mmap_read_trylock(svma->vm_mm))
+			continue;
+
 		saddr = page_table_shareable(svma, vma, addr, idx);
 		if (saddr) {
 			spte = hugetlb_walk(svma, saddr,
 					    vma_mmu_pagesize(svma));
-			if (spte) {
+			if (spte)
 				ptdesc_pmd_pts_inc(virt_to_ptdesc(spte));
-				break;
-			}
 		}
+		mmap_read_unlock(svma->vm_mm);
+		if (spte)
+			break;
 	}
 
 	if (!spte)
