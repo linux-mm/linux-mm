@@ -1559,8 +1559,11 @@ struct file *hugetlb_file_setup(const char *name, size_t size,
 				    S_IFREG | S_IRWXUGO, 0);
 	if (!inode)
 		goto out;
-	if (creat_flags == HUGETLB_SHMFS_INODE)
+	if (creat_flags == HUGETLB_SHMFS_INODE) {
 		inode->i_flags |= S_PRIVATE;
+		/* The size of a segment is fixed at shmget(). */
+		HUGETLBFS_I(inode)->seals |= F_SEAL_GROW;
+	}
 
 	inode->i_size = size;
 	clear_nlink(inode);
