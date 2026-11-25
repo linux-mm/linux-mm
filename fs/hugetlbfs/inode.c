@@ -656,7 +656,8 @@ static void hugetlbfs_zero_partial_page(struct hstate *h,
 	if (!end)
 		end = huge_page_size(h);
 
-	folio_zero_segment(folio, (size_t)start, (size_t)end);
+	if (!folio_test_hwpoison(folio))
+		folio_zero_segment(folio, (size_t)start, (size_t)end);
 
 	folio_unlock(folio);
 	folio_put(folio);
