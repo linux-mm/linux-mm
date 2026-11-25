@@ -2302,6 +2302,7 @@ static enum scan_result collapse_file(struct mm_struct *mm, unsigned long addr,
 	LIST_HEAD(pagelist);
 	XA_STATE_ORDER(xas, &mapping->i_pages, start, HPAGE_PMD_ORDER);
 	enum scan_result result = SCAN_SUCCEED;
+	unsigned int nofs_flags;
 	int nr_none = 0;
 	bool do_readahead = false;
 	bool readahead_done = false;
@@ -2319,6 +2320,13 @@ static enum scan_result collapse_file(struct mm_struct *mm, unsigned long addr,
 	if (result != SCAN_SUCCEED)
 		goto out;
 	new_pfn = folio_pfn(new_folio);
+
+	/*
+	 * We allocate while holding folio locks below, when swapping in shmem
+	 * folios and in filemap_release_folio(). Allocating with __GFP_FS
+	 * there can deadlock in reclaim or compaction.
+	 */
+	nofs_flags = memalloc_nofs_save();
 
 	mapping_set_update(&xas, mapping);
 
@@ -2698,7 +2706,7 @@ immap_locked:
 		folio_put_refs(folio, 2 + folio_nr_pages(folio));
 	}
 
-	goto out;
+	goto out_nofs;
 
 rollback:
 	/* Something went wrong: roll back page cache changes */
@@ -2744,6 +2752,8 @@ rollback:
 	}
 out_put:
 	folio_put(new_folio);
+out_nofs:
+	memalloc_nofs_restore(nofs_flags);
 out:
 	VM_BUG_ON(!list_empty(&pagelist));
 	trace_mm_khugepaged_collapse_file(mm, new_pfn, index, addr, is_shmem, file, HPAGE_PMD_NR, result);
