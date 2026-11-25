@@ -3405,6 +3405,8 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	struct per_cpu_pages *pcp;
 	struct list_head *list;
 	struct page *page;
+	unsigned long flags;
+	bool refill;
 
 	/* spin_trylock may fail due to a parallel drain or IRQ reentrancy. */
 	pcp = pcp_spin_trylock(zone->per_cpu_pageset);
@@ -3418,8 +3420,15 @@ static struct page *rmqueue_pcplist(struct zone *preferred_zone,
 	 */
 	pcp->free_count >>= 1;
 	list = &pcp->lists[order_to_pindex(migratetype, order)];
+	/* Refilling takes zone->lock, see pcp_spin_unlock_irqrestore() */
+	refill = !IS_ENABLED(CONFIG_PREEMPT_RT) && list_empty(list);
+	if (refill)
+		local_irq_save(flags);
 	page = __rmqueue_pcplist(zone, order, migratetype, alloc_flags, pcp, list);
-	pcp_spin_unlock(pcp);
+	if (refill)
+		pcp_spin_unlock_irqrestore(pcp, flags);
+	else
+		pcp_spin_unlock(pcp);
 	if (page) {
 		__count_zid_vm_events(PGALLOC, page_zonenum(page), 1 << order);
 		zone_statistics(preferred_zone, zone, 1);
