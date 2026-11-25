@@ -212,26 +212,17 @@ static bool vma_seqcount_is_write_locked(unsigned int vma_seq, unsigned int mm_s
 }
 
 /*
- * Try to read-lock a vma. The function is allowed to occasionally yield false
- * locked result to avoid performance overhead, in which case we fall back to
- * using mmap_lock. The function should never yield false unlocked result.
- * False locked result is possible if vma gets reused and attached to a
- * different mm before we lock it.
- * Returns the vma on success, NULL on failure to lock and EAGAIN if vma got
- * detached.
- *
- * IMPORTANT: RCU lock must be held upon entering the function, but upon error
- *            IT IS RELEASED. The caller must handle this correctly.
+ * Like vma_start_read(), but without RCU handling: the caller must make sure
+ * that the vma cannot be freed, for example by holding the RCU lock.
  */
-static struct vm_area_struct *vma_start_read(struct mm_struct *mm,
-					     struct vm_area_struct *vma)
+static struct vm_area_struct *__vma_start_read(struct mm_struct *mm,
+		struct vm_area_struct *vma)
 {
 	unsigned int vma_seq;
 	unsigned int mm_seq;
 	struct mm_struct *other_mm;
 	int oldcnt;
 
-	RCU_LOCKDEP_WARN(!rcu_read_lock_held(), "no rcu lock held");
 	/*
 	 * Check before locking. A race might cause false locked result.
 	 * We can use READ_ONCE() for the mm_lock_seq here, and don't need
@@ -241,10 +232,8 @@ static struct vm_area_struct *vma_start_read(struct mm_struct *mm,
 	 */
 	vma_seq = READ_ONCE(vma->vm_lock_seq);
 	mm_seq = READ_ONCE(mm->mm_lock_seq.sequence);
-	if (vma_seqcount_is_write_locked(vma_seq, mm_seq)) {
-		vma = NULL;
-		goto err;
-	}
+	if (vma_seqcount_is_write_locked(vma_seq, mm_seq))
+		return NULL;
 
 	/*
 	 * If VM_REFCNT_EXCLUDE_READERS_FLAG is set,
@@ -257,8 +246,7 @@ static struct vm_area_struct *vma_start_read(struct mm_struct *mm,
 	if (unlikely(!__refcount_inc_not_zero_limited_acquire(&vma->vm_refcnt, &oldcnt,
 							      VM_REFCNT_LIMIT))) {
 		/* return EAGAIN if vma got detached from under us */
-		vma = oldcnt ? NULL : ERR_PTR(-EAGAIN);
-		goto err;
+		return oldcnt ? NULL : ERR_PTR(-EAGAIN);
 	}
 
 	__vma_lockdep_acquire_read(vma);
@@ -288,13 +276,8 @@ static struct vm_area_struct *vma_start_read(struct mm_struct *mm,
 	mm_seq = raw_read_seqcount(&mm->mm_lock_seq);
 	if (unlikely(vma_seqcount_is_write_locked(vma_seq, mm_seq))) {
 		vma_refcount_put(vma);
-		vma = NULL;
-		goto err;
+		return NULL;
 	}
-
-	return vma;
-err:
-	rcu_read_unlock();
 
 	return vma;
 err_unstable:
@@ -309,9 +292,52 @@ err_unstable:
 	mmgrab(other_mm);
 	vma_refcount_put(vma);
 	mmdrop_async(other_mm);
-	rcu_read_unlock();
 
 	return NULL;
+}
+
+/**
+ * vma_start_read() - Try to read-lock a vma looked up under RCU.
+ * @mm: The mm the vma is expected to belong to.
+ * @vma: The vma to read-lock.
+ *
+ * The function is allowed to occasionally yield false locked result to avoid
+ * performance overhead, in which case we fall back to using mmap_lock. The
+ * function should never yield false unlocked result. False locked result is
+ * possible if vma gets reused and attached to a different mm before we lock it.
+ *
+ * Context: RCU lock must be held upon entering the function, but upon error
+ * IT IS RELEASED. The caller must handle this correctly.
+ *
+ * Return: The vma on success, NULL on failure to lock and ERR_PTR(-EAGAIN) if
+ * the vma got detached.
+ */
+static struct vm_area_struct *vma_start_read(struct mm_struct *mm,
+		struct vm_area_struct *vma)
+{
+	RCU_LOCKDEP_WARN(!rcu_read_lock_held(), "no rcu lock held");
+
+	vma = __vma_start_read(mm, vma);
+	if (IS_ERR_OR_NULL(vma))
+		rcu_read_unlock();
+	return vma;
+}
+
+/**
+ * vma_trylock_read() - Try to read-lock a VMA that belongs to its mm.
+ * @vma: The VMA to read-lock.
+ *
+ * Unlike vma_start_read(), this function does not deal with VMAs that might
+ * get freed and reused in another mm concurrently.
+ *
+ * Context: The caller must make sure that @vma remains part of @vma->vm_mm
+ * and cannot go away.
+ *
+ * Return: true if @vma is read-locked, false otherwise.
+ */
+bool vma_trylock_read(struct vm_area_struct *vma)
+{
+	return !IS_ERR_OR_NULL(__vma_start_read(vma->vm_mm, vma));
 }
 
 /*

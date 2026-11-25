@@ -278,6 +278,7 @@ static inline bool vma_start_read_locked(struct vm_area_struct *vma)
 
 struct vm_area_struct *vma_start_read_unlocked(struct mm_struct *mm,
 					       unsigned long address);
+bool vma_trylock_read(struct vm_area_struct *vma);
 
 static inline void vma_end_read(struct vm_area_struct *vma)
 {
