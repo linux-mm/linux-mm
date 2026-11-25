@@ -152,6 +152,7 @@ struct folio *memfd_alloc_folio(struct file *memfd, pgoff_t idx)
 			}
 
 			hugetlb_set_folio_subpool(folio, subpool_inode(inode));
+			folio_set_hugetlb_migratable(folio);
 			folio_unlock(folio);
 			filemap_invalidate_unlock_shared(memfd->f_mapping);
 			mutex_unlock(&hugetlb_fault_mutex_table[hash]);
