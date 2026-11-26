@@ -115,8 +115,7 @@ impl VmaRef {
     #[inline]
     pub fn zap_vma_range(&self, address: usize, size: usize) {
         let (end, did_overflow) = address.overflowing_add(size);
-        if did_overflow || address < self.start() || self.end() < end {
-            // TODO: call WARN_ONCE once Rust version of it is added
+        if crate::warn_once!(did_overflow || address < self.start() || self.end() < end) {
             return;
         }
 
