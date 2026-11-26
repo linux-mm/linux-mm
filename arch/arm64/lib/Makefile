@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0
 
+# Built via libs-y, so the flags in arch/arm64/Kbuild do not reach here.
+# Branch profiling isn't noinstr-safe.
+ccflags-$(CONFIG_TRACE_BRANCH_PROFILING) += -DDISABLE_BRANCH_PROFILING
+
 # KCSAN uses udelay for introducing watchpoint delay; avoid recursion.
 KCSAN_SANITIZE_delay.o := n
 
