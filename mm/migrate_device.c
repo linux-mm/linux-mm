@@ -1416,11 +1416,13 @@ void migrate_vma_finalize(struct migrate_vma *migrate)
 }
 EXPORT_SYMBOL(migrate_vma_finalize);
 
-static unsigned long migrate_device_pfn_lock(unsigned long pfn)
+static unsigned long migrate_device_pfn_lock(unsigned long pfn,
+					     struct folio **foliop)
 {
 	unsigned long src_pfn = migrate_pfn(pfn) | MIGRATE_PFN_MIGRATE;
 	struct folio *folio;
 
+	*foliop = NULL;
 	folio = folio_get_nontail_page(pfn_to_page(pfn));
 	if (!folio)
 		return 0;
@@ -1436,6 +1438,7 @@ static unsigned long migrate_device_pfn_lock(unsigned long pfn)
 		return 0;
 	}
 
+	*foliop = folio;
 	return src_pfn;
 }
 
@@ -1464,18 +1467,18 @@ int migrate_device_range(unsigned long *src_pfns, unsigned long start,
 	unsigned long i, j, pfn;
 
 	for (pfn = start, i = 0; i < npages; pfn++, i++) {
-		struct page *page = pfn_to_page(pfn);
-		struct folio *folio = page_folio(page);
-		unsigned int nr = 1;
+		struct folio *folio;
+		unsigned int nr;
 
-		src_pfns[i] = migrate_device_pfn_lock(pfn);
+		src_pfns[i] = migrate_device_pfn_lock(pfn, &folio);
+		if (!folio)
+			continue;
+
 		nr = folio_nr_pages(folio);
 		if (nr > npages - i) {
-			if (src_pfns[i] & MIGRATE_PFN_MIGRATE) {
-				unpin_anon_rmap(folio, src_pfns[i]);
-				folio_unlock(folio);
-				folio_put(folio);
-			}
+			unpin_anon_rmap(folio, src_pfns[i]);
+			folio_unlock(folio);
+			folio_put(folio);
 			memset(&src_pfns[i], 0,
 			       (npages - i) * sizeof(*src_pfns));
 			break;
@@ -1508,18 +1511,18 @@ int migrate_device_pfns(unsigned long *src_pfns, unsigned long npages)
 	unsigned long i, j;
 
 	for (i = 0; i < npages; i++) {
-		struct page *page = pfn_to_page(src_pfns[i]);
-		struct folio *folio = page_folio(page);
-		unsigned int nr = 1;
+		struct folio *folio;
+		unsigned int nr;
 
-		src_pfns[i] = migrate_device_pfn_lock(src_pfns[i]);
+		src_pfns[i] = migrate_device_pfn_lock(src_pfns[i], &folio);
+		if (!folio)
+			continue;
+
 		nr = folio_nr_pages(folio);
 		if (nr > npages - i) {
-			if (src_pfns[i] & MIGRATE_PFN_MIGRATE) {
-				unpin_anon_rmap(folio, src_pfns[i]);
-				folio_unlock(folio);
-				folio_put(folio);
-			}
+			unpin_anon_rmap(folio, src_pfns[i]);
+			folio_unlock(folio);
+			folio_put(folio);
 			memset(&src_pfns[i], 0,
 			       (npages - i) * sizeof(*src_pfns));
 			break;
