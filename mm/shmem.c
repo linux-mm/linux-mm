@@ -3352,6 +3352,13 @@ static struct inode *__shmem_get_inode(const struct mnt_idmap *idmap,
 	info->i_crtime = inode_get_mtime(inode);
 	info->fsflags = (dir == NULL) ? 0 :
 		SHMEM_I(dir)->fsflags & SHMEM_FL_INHERITED;
+	/*
+	 * FS_CASEFOLD_FL is directory-only; mask it for non-directories
+	 * like ext4_mask_flags()/f2fs_mask_flags() do, or the
+	 * shmem_set_inode_flags() call below fails with -ENOTDIR.
+	 */
+	if (!S_ISDIR(mode))
+		info->fsflags &= ~FS_CASEFOLD_FL;
 	if (info->fsflags)
 		shmem_set_inode_flags(inode, info->fsflags, NULL);
 	INIT_LIST_HEAD(&info->shrinklist);
