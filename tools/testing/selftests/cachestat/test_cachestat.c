@@ -289,7 +289,10 @@ bool run_cachestat_test(enum file_type type)
 	}
 
 close_fd:
-	shm_unlink(filename);
+	if (type == FILE_SHMEM)
+		shm_unlink(filename);
+	else
+		remove(filename);
 out:
 	return ret;
 }
