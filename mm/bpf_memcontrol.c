@@ -134,6 +134,23 @@ __bpf_kfunc unsigned long bpf_mem_cgroup_memory_events(struct mem_cgroup *memcg,
 }
 
 /**
+ * bpf_mem_cgroup_memory_events_local - Read memory cgroup's local memory event
+ * @memcg: memory cgroup
+ * @event: memory event id
+ *
+ * Return: The current value of the local memory event counter.
+ */
+__bpf_kfunc unsigned long
+bpf_mem_cgroup_memory_events_local(struct mem_cgroup *memcg,
+				   enum memcg_memory_event event)
+{
+	if (unlikely(event >= MEMCG_NR_MEMORY_EVENTS))
+		return (unsigned long)-1;
+
+	return atomic_long_read(&memcg->memory_events_local[event]);
+}
+
+/**
  * bpf_mem_cgroup_page_state - Read memory cgroup's page state counter
  * @memcg: memory cgroup
  * @idx: counter idx
@@ -215,6 +232,7 @@ BTF_ID_FLAGS(func, bpf_put_mem_cgroup, KF_RELEASE)
 
 BTF_ID_FLAGS(func, bpf_mem_cgroup_vm_events)
 BTF_ID_FLAGS(func, bpf_mem_cgroup_memory_events)
+BTF_ID_FLAGS(func, bpf_mem_cgroup_memory_events_local)
 BTF_ID_FLAGS(func, bpf_mem_cgroup_usage)
 BTF_ID_FLAGS(func, bpf_mem_cgroup_page_state)
 BTF_ID_FLAGS(func, bpf_mem_cgroup_flush_stats, KF_SLEEPABLE)
