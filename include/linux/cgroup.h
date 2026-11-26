@@ -551,6 +551,24 @@ static inline struct cgroup_subsys_state *task_css(struct task_struct *task,
 	return task_css_check(task, subsys_id, false);
 }
 
+struct css_set *task_procs_css_set(struct task_struct *task);
+
+/**
+ * task_procs_css - css of the process a CSS_TASK_ITER_PROCS walk returned
+ * @task: the task returned by the walk
+ * @subsys_id: the subsystem ID of interest
+ *
+ * The walk can return an exiting thread group leader that a cgroup.procs
+ * migration left behind for where the rest of its process is.  Use this
+ * instead of task_css() to find the css of the process.  Must be called
+ * under rcu_read_lock().
+ */
+static inline struct cgroup_subsys_state *task_procs_css(struct task_struct *task,
+							 int subsys_id)
+{
+	return task_procs_css_set(task)->subsys[subsys_id];
+}
+
 /**
  * task_get_css - find and get the css for (task, subsys)
  * @task: the target task

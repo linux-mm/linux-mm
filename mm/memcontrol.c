@@ -2023,7 +2023,7 @@ struct mem_cgroup *mem_cgroup_get_oom_group(struct task_struct *victim,
 
 	rcu_read_lock();
 
-	memcg = mem_cgroup_from_task(victim);
+	memcg = mem_cgroup_from_css(task_procs_css(victim, memory_cgrp_id));
 	if (mem_cgroup_is_root(memcg))
 		goto out;
 
