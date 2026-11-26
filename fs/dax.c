@@ -527,6 +527,24 @@ static struct page *dax_busy_page(void *entry)
 		return NULL;
 }
 
+/*
+ * Determine if an entry can be disassociated. It cannot be if it is its folio's
+ * last association and the folio still has a reference.
+ */
+static bool dax_can_disassociate(void *entry)
+{
+	struct folio *folio;
+
+	if (dax_is_zero_entry(entry) || dax_is_empty_entry(entry))
+		return true;
+
+	folio = dax_to_folio(entry);
+	if (dax_folio_is_shared(folio) && folio->share > 1)
+		return true;
+
+	return !folio_ref_count(folio);
+}
+
 /**
  * dax_lock_folio - Lock the DAX entry corresponding to a folio
  * @folio: The folio whose entry we want to lock
@@ -853,9 +871,14 @@ static int __dax_invalidate_entry(struct address_space *mapping,
 	entry = get_next_unlocked_entry(&xas, 0);
 	if (!entry || WARN_ON_ONCE(!xa_is_value(entry)))
 		goto out;
+	/*
+	 * Removing the last association of a folio releases the folio, so make
+	 * sure the folio has no reference.
+	 */
 	if (!trunc &&
 	    (xas_get_mark(&xas, PAGECACHE_TAG_DIRTY) ||
-	     xas_get_mark(&xas, PAGECACHE_TAG_TOWRITE)))
+	     xas_get_mark(&xas, PAGECACHE_TAG_TOWRITE) ||
+	     !dax_can_disassociate(entry)))
 		goto out;
 	dax_disassociate_entry(entry, mapping, trunc);
 	xas_store(&xas, NULL);
@@ -1017,7 +1040,8 @@ void dax_break_layout_final(struct inode *inode)
 EXPORT_SYMBOL_GPL(dax_break_layout_final);
 
 /*
- * Invalidate DAX entry if it is clean.
+ * Invalidate DAX entry if it is clean and dropping it would not release a folio
+ * that is still in use.
  */
 int dax_invalidate_mapping_entry_sync(struct address_space *mapping,
 				      pgoff_t index)
