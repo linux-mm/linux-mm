@@ -115,8 +115,10 @@ impl VmaRef {
     #[inline]
     pub fn zap_vma_range(&self, address: usize, size: usize) {
         let (end, did_overflow) = address.overflowing_add(size);
+        debug_assert!(!did_overflow && address >= self.start() && self.end() >= end);
         if did_overflow || address < self.start() || self.end() < end {
-            // TODO: call WARN_ONCE once Rust version of it is added
+            #[cfg(CONFIG_DEBUG_VM)]
+            crate::pr_warn_once!("Attempt to zap invalid VMA range\n");
             return;
         }
 
