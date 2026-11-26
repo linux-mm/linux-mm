@@ -2148,6 +2148,7 @@ static void vmstat_shepherd(struct work_struct *w)
 	/* Check processors whose vmstat worker threads have been disabled */
 	for_each_online_cpu(cpu) {
 		struct delayed_work *dw = &per_cpu(vmstat_work, cpu);
+		bool isolated;
 
 		/*
 		 * In kernel users of vmstat counters either require the precise value and
@@ -2161,12 +2162,17 @@ static void vmstat_shepherd(struct work_struct *w)
 		 * for all isolated CPUs to avoid interference with the isolated workload.
 		 */
 		scoped_guard(rcu) {
-			if (cpu_is_isolated(cpu))
-				continue;
-
-			if (!work_busy(&dw->work) && need_update(cpu))
+			isolated = cpu_is_isolated(cpu);
+			if (!isolated && !work_busy(&dw->work) && need_update(cpu))
 				queue_delayed_work_on(cpu, mm_percpu_wq, dw, 0);
 		}
+
+		/*
+		 * Isolated CPUs never run vmstat_update(), so the pcp->high
+		 * decay it performs has to be done remotely from here.
+		 */
+		if (isolated)
+			decay_pcp_high_cpu(cpu);
 
 		cond_resched();
 	}

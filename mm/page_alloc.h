@@ -326,6 +326,7 @@ static inline int gfp_migratetype(const gfp_t gfp_flags)
 #undef GFP_MOVABLE_SHIFT
 
 bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp);
+void decay_pcp_high_cpu(unsigned int cpu);
 void drain_zone_pages(struct zone *zone, struct per_cpu_pages *pcp);
 void drain_all_pages(struct zone *zone);
 
