@@ -4671,6 +4671,16 @@ static void filemap_cachestat(struct address_space *mapping,
 			void *shadow = (void *)folio;
 			bool workingset; /* not used */
 
+			/*
+			 * DAX exceptional entries track present pages, not
+			 * evicted folios.  They must not be decoded as
+			 * workingset shadows.
+			 */
+			if (dax_mapping(mapping)) {
+				cs->nr_cache += nr_pages;
+				goto resched;
+			}
+
 			cs->nr_evicted += nr_pages;
 
 #ifdef CONFIG_SWAP /* implies CONFIG_MMU */
