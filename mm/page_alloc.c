@@ -2587,8 +2587,13 @@ bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
 	int high_min, to_drain, to_drain_batched, batch;
 	bool todo = false;
 
-	high_min = READ_ONCE(pcp->high_min);
-	batch = READ_ONCE(pcp->batch);
+	/*
+	 * pcp->lock is taken because the pageset may belong to a remote CPU,
+	 * see decay_pcp_high_cpu().
+	 */
+	pcp_spin_lock_nopin(pcp);
+	high_min = pcp->high_min;
+	batch = pcp->batch;
 	/*
 	 * Decrease pcp->high periodically to try to free possible
 	 * idle PCP pages.  And, avoid to free too many pages to
@@ -2602,6 +2607,7 @@ bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
 	}
 
 	to_drain = pcp->count - pcp->high;
+	pcp_spin_unlock_nopin(pcp);
 	while (to_drain > 0) {
 		to_drain_batched = min(to_drain, batch);
 		pcp_spin_lock_nopin(pcp);
@@ -2613,6 +2619,39 @@ bool decay_pcp_high(struct zone *zone, struct per_cpu_pages *pcp)
 	}
 
 	return todo;
+}
+
+/*
+ * Isolated CPUs are skipped by vmstat_shepherd() and therefore never run
+ * vmstat_update(), which is the only caller of decay_pcp_high() for the
+ * local pagesets.  Once PCP auto-tuning has raised pcp->high on such a CPU,
+ * neither pcp->high nor the pages cached above high_min are ever given back,
+ * and they are not accounted as free memory either.
+ *
+ * Decay the pagesets of @cpu remotely instead.  This is called from the
+ * housekeeping CPU running vmstat_shepherd() and only takes the remote
+ * pcp->lock when there is something to do, so an isolated CPU whose
+ * pagesets are at or below high_min sees no interference.
+ */
+void decay_pcp_high_cpu(unsigned int cpu)
+{
+	struct zone *zone;
+
+	for_each_populated_zone(zone) {
+		struct per_cpu_pages *pcp = per_cpu_ptr(zone->per_cpu_pageset, cpu);
+
+		/*
+		 * Lockless peek to avoid taking the remote pcp->lock when
+		 * there is nothing to decay; a stale value only delays the
+		 * decay until the next vmstat_shepherd() run.
+		 */
+		if (data_race(pcp->high <= pcp->high_min &&
+			      pcp->count <= pcp->high))
+			continue;
+
+		decay_pcp_high(zone, pcp);
+		cond_resched();
+	}
 }
 
 #ifdef CONFIG_NUMA
