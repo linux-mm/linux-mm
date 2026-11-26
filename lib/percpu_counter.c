@@ -15,6 +15,101 @@ static LIST_HEAD(percpu_counters);
 static DEFINE_SPINLOCK(percpu_counters_lock);
 #endif
 
+#ifdef CONFIG_PREEMPT_RT
+static inline void fbc_lock(struct percpu_counter *fbc)
+{
+	raw_spin_lock(&fbc->lock);
+}
+
+static inline void fbc_unlock(struct percpu_counter *fbc)
+{
+	raw_spin_unlock(&fbc->lock);
+}
+
+static inline unsigned long fbc_lock_irqsave(struct percpu_counter *fbc)
+{
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&fbc->lock, flags);
+	return flags;
+}
+
+static inline void fbc_unlock_irqrestore(struct percpu_counter *fbc,
+					 unsigned long flags)
+{
+	raw_spin_unlock_irqrestore(&fbc->lock, flags);
+}
+
+static inline unsigned long fbc_read_lock_irqsave(struct percpu_counter *fbc)
+{
+	return fbc_lock_irqsave(fbc);
+}
+
+static inline void fbc_read_unlock_irqrestore(struct percpu_counter *fbc,
+					      unsigned long flags)
+{
+	fbc_unlock_irqrestore(fbc, flags);
+}
+
+static inline void fbc_lock_init(struct percpu_counter *fbc,
+				 struct lock_class_key *key)
+{
+	raw_spin_lock_init(&fbc->lock);
+	lockdep_set_class(&fbc->lock, key);
+}
+#else
+static inline void fbc_lock(struct percpu_counter *fbc)
+{
+	write_lock(&fbc->lock);
+}
+
+static inline void fbc_unlock(struct percpu_counter *fbc)
+{
+	write_unlock(&fbc->lock);
+}
+
+static inline unsigned long fbc_lock_irqsave(struct percpu_counter *fbc)
+{
+	unsigned long flags;
+
+	write_lock_irqsave(&fbc->lock, flags);
+	return flags;
+}
+
+static inline void fbc_unlock_irqrestore(struct percpu_counter *fbc,
+					 unsigned long flags)
+{
+	write_unlock_irqrestore(&fbc->lock, flags);
+}
+
+static inline unsigned long fbc_read_lock_irqsave(struct percpu_counter *fbc)
+{
+	unsigned long flags;
+
+	read_lock_irqsave(&fbc->lock, flags);
+	return flags;
+}
+
+static inline void fbc_read_unlock_irqrestore(struct percpu_counter *fbc,
+					      unsigned long flags)
+{
+	read_unlock_irqrestore(&fbc->lock, flags);
+}
+
+static inline void fbc_lock_init(struct percpu_counter *fbc,
+				 struct lock_class_key *key)
+{
+	rwlock_init(&fbc->lock);
+	/*
+	 * rwlock_t normally uses LD_WAIT_CONFIG because it sleeps on RT.
+	 * This counter uses a raw spinlock on RT, so it can be taken under
+	 * raw spinlocks or with IRQs off on every configuration.
+	 */
+	lockdep_init_map_wait(&fbc->lock.dep_map, "&fbc->lock", key, 0,
+			      LD_WAIT_SPIN);
+}
+#endif
+
 #ifdef CONFIG_DEBUG_OBJECTS_PERCPU_COUNTER
 
 static const struct debug_obj_descr percpu_counter_debug_descr;
@@ -62,13 +157,13 @@ void percpu_counter_set(struct percpu_counter *fbc, s64 amount)
 	int cpu;
 	unsigned long flags;
 
-	raw_spin_lock_irqsave(&fbc->lock, flags);
+	flags = fbc_lock_irqsave(fbc);
 	for_each_possible_cpu(cpu) {
 		s32 *pcount = per_cpu_ptr(fbc->counters, cpu);
 		*pcount = 0;
 	}
 	fbc->count = amount;
-	raw_spin_unlock_irqrestore(&fbc->lock, flags);
+	fbc_unlock_irqrestore(fbc, flags);
 }
 EXPORT_SYMBOL(percpu_counter_set);
 
@@ -98,7 +193,7 @@ void percpu_counter_add_batch(struct percpu_counter *fbc, s64 amount, s32 batch)
 	count = this_cpu_read(*fbc->counters);
 	do {
 		if (unlikely(abs(count + amount) >= batch)) {
-			raw_spin_lock_irqsave(&fbc->lock, flags);
+			flags = fbc_lock_irqsave(fbc);
 			/*
 			 * Note: by now we might have migrated to another CPU
 			 * or the value might have changed.
@@ -106,7 +201,7 @@ void percpu_counter_add_batch(struct percpu_counter *fbc, s64 amount, s32 batch)
 			count = __this_cpu_read(*fbc->counters);
 			fbc->count += count + amount;
 			__this_cpu_sub(*fbc->counters, count);
-			raw_spin_unlock_irqrestore(&fbc->lock, flags);
+			fbc_unlock_irqrestore(fbc, flags);
 			return;
 		}
 	} while (!this_cpu_try_cmpxchg(*fbc->counters, &count, count + amount));
@@ -125,10 +220,10 @@ void percpu_counter_add_batch(struct percpu_counter *fbc, s64 amount, s32 batch)
 	local_irq_save(flags);
 	count = __this_cpu_read(*fbc->counters) + amount;
 	if (abs(count) >= batch) {
-		raw_spin_lock(&fbc->lock);
+		fbc_lock(fbc);
 		fbc->count += count;
 		__this_cpu_sub(*fbc->counters, count - amount);
-		raw_spin_unlock(&fbc->lock);
+		fbc_unlock(fbc);
 	} else {
 		this_cpu_add(*fbc->counters, amount);
 	}
@@ -148,11 +243,11 @@ void percpu_counter_sync(struct percpu_counter *fbc)
 	unsigned long flags;
 	s64 count;
 
-	raw_spin_lock_irqsave(&fbc->lock, flags);
+	flags = fbc_lock_irqsave(fbc);
 	count = __this_cpu_read(*fbc->counters);
 	fbc->count += count;
 	__this_cpu_sub(*fbc->counters, count);
-	raw_spin_unlock_irqrestore(&fbc->lock, flags);
+	fbc_unlock_irqrestore(fbc, flags);
 }
 EXPORT_SYMBOL(percpu_counter_sync);
 
@@ -174,13 +269,13 @@ s64 __percpu_counter_sum(struct percpu_counter *fbc)
 	int cpu;
 	unsigned long flags;
 
-	raw_spin_lock_irqsave(&fbc->lock, flags);
+	flags = fbc_read_lock_irqsave(fbc);
 	ret = fbc->count;
 	for_each_cpu_or(cpu, cpu_online_mask, cpu_dying_mask) {
 		s32 *pcount = per_cpu_ptr(fbc->counters, cpu);
 		ret += *pcount;
 	}
-	raw_spin_unlock_irqrestore(&fbc->lock, flags);
+	fbc_read_unlock_irqrestore(fbc, flags);
 	return ret;
 }
 EXPORT_SYMBOL(__percpu_counter_sum);
@@ -203,8 +298,7 @@ int __percpu_counter_init_many(struct percpu_counter *fbc, s64 amount,
 	}
 
 	for (i = 0; i < nr_counters; i++) {
-		raw_spin_lock_init(&fbc[i].lock);
-		lockdep_set_class(&fbc[i].lock, key);
+		fbc_lock_init(&fbc[i], key);
 #ifdef CONFIG_HOTPLUG_CPU
 		INIT_LIST_HEAD(&fbc[i].list);
 #endif
@@ -274,11 +368,11 @@ static int percpu_counter_cpu_dead(unsigned int cpu)
 	list_for_each_entry(fbc, &percpu_counters, list) {
 		s32 *pcount;
 
-		raw_spin_lock(&fbc->lock);
+		fbc_lock(fbc);
 		pcount = per_cpu_ptr(fbc->counters, cpu);
 		fbc->count += *pcount;
 		*pcount = 0;
-		raw_spin_unlock(&fbc->lock);
+		fbc_unlock(fbc);
 	}
 	spin_unlock_irq(&percpu_counters_lock);
 #endif
@@ -354,7 +448,7 @@ bool __percpu_counter_limited_add(struct percpu_counter *fbc,
 		return true;
 	}
 
-	raw_spin_lock(&fbc->lock);
+	fbc_lock(fbc);
 	count = fbc->count + amount;
 
 	/* Skip percpu_counter_sum() when safe */
@@ -392,7 +486,7 @@ bool __percpu_counter_limited_add(struct percpu_counter *fbc,
 	fbc->count += count + amount;
 	__this_cpu_sub(*fbc->counters, count);
 out:
-	raw_spin_unlock(&fbc->lock);
+	fbc_unlock(fbc);
 	local_irq_restore(flags);
 	return good;
 }
