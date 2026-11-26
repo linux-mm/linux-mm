@@ -1,0 +1,40 @@
+C limit-free-level0-nomb
+
+(*
+ * Result: Sometimes
+ *
+ * Like limit-free-level0, without the full barrier after the addition.
+ * The release of the page does not order the addition before the
+ * unordered subtraction of CPU 1, for CPU 2. The precise sum can then
+ * see the subtraction without the addition.
+ *)
+
+{}
+
+P0(int *l0p, int *page)
+{
+	WRITE_ONCE(*l0p, 1);
+	smp_store_release(page, 1);
+}
+
+P1(int *l0n, int *page)
+{
+	int r0;
+	int r;
+
+	r0 = smp_load_acquire(page);
+	if (r0 == 1)
+		r = cmpxchg_relaxed(l0n, 0, 1);
+}
+
+P2(int *l0p, int *l0n)
+{
+	int r0;
+	int r1;
+
+	r0 = READ_ONCE(*l0n);
+	smp_rmb();
+	r1 = READ_ONCE(*l0p);
+}
+
+exists (1:r0=1 /\ 2:r0=1 /\ 2:r1=0)

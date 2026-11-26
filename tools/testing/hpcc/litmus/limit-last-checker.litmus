@@ -1,0 +1,33 @@
+C limit-last-checker
+
+(*
+ * Result: Never
+ *
+ * Two CPUs add to their level 0 counters a and b, then check with a
+ * precise sum, which reads the other counter. With a full barrier
+ * between the addition and the check, at least one of them sees the
+ * other addition. Of the additions which pass their check, the one
+ * checked last thus sees all of them.
+ *)
+
+{}
+
+P0(int *a, int *b)
+{
+	int r0;
+
+	WRITE_ONCE(*a, 1);
+	smp_mb();
+	r0 = READ_ONCE(*b);
+}
+
+P1(int *a, int *b)
+{
+	int r0;
+
+	WRITE_ONCE(*b, 1);
+	smp_mb();
+	r0 = READ_ONCE(*a);
+}
+
+exists (0:r0=0 /\ 1:r0=0)

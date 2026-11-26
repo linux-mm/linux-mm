@@ -108,6 +108,7 @@
 #include <linux/time_namespace.h>
 #include <linux/unaligned.h>
 #include <linux/vdso_datastore.h>
+#include <linux/percpu_counter_tree.h>
 #include <net/net_namespace.h>
 
 #include <asm/io.h>
@@ -1104,6 +1105,8 @@ void start_kernel(void)
 	sort_main_extable();
 	trap_init();
 	mm_core_init();
+	/* After parsing its boot parameters and setting up slab, before the first counter. */
+	percpu_counter_tree_subsystem_init();
 	maple_tree_init();
 	poking_init();
 	ftrace_init();

@@ -1,0 +1,37 @@
+C leave-first-precise-sum-relaxed
+
+(*
+ * Result: Sometimes
+ *
+ * Like leave-first-precise-sum, with a relaxed arrival at the middle
+ * item. The precise sum can then count the carry twice.
+ *)
+
+{
+	l0=1;
+}
+
+P0(int *l0, atomic_t *item, atomic_t *root)
+{
+	int r;
+
+	r = cmpxchg_relaxed(l0, 1, 0);
+	r = atomic_add_return_relaxed(1, item);
+	r = atomic_cmpxchg_relaxed(item, 1, 0);
+	r = atomic_add_return_release(1, root);
+}
+
+P1(int *l0, atomic_t *item, atomic_t *root)
+{
+	int r0;
+	int r1;
+	int r2;
+
+	r2 = atomic_read(root);
+	smp_rmb();
+	r1 = atomic_read(item);
+	smp_rmb();
+	r0 = READ_ONCE(*l0);
+}
+
+exists ((1:r2=1 /\ 1:r1=1) \/ (1:r2=1 /\ 1:r0=1) \/ (1:r1=1 /\ 1:r0=1))

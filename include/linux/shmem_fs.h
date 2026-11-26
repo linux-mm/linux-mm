@@ -7,6 +7,7 @@
 #include <linux/mempolicy.h>
 #include <linux/pagemap.h>
 #include <linux/percpu_counter.h>
+#include <linux/percpu_counter_tree.h>
 #include <linux/xattr.h>
 #include <linux/fs_parser.h>
 #include <linux/userfaultfd_k.h>
@@ -76,7 +77,7 @@ struct shmem_quota_limits {
 
 struct shmem_sb_info {
 	unsigned long max_blocks;   /* How many blocks are allowed */
-	struct percpu_counter used_blocks;  /* How many are allocated */
+	struct percpu_counter_tree_limit used_blocks; /* How many are allocated */
 	unsigned long max_inodes;   /* How many inodes are allowed */
 	unsigned long free_ispace;  /* How much ispace left for allocation */
 	raw_spinlock_t stat_lock;   /* Serialize shmem_sb_info changes */

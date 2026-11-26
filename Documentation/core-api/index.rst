@@ -48,6 +48,7 @@ Library functionality that is used throughout the kernel.
    generic-radix-tree
    packing
    this_cpu_ops
+   percpu-counter-tree
    timekeeping
    errseq
    wrappers/atomic_t

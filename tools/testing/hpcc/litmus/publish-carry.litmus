@@ -1,0 +1,43 @@
+C publish-carry
+
+(*
+ * Result: Never
+ *
+ * percpu_counter_tree_activate_many() zeroes the per-CPU counter l0mem
+ * and the root rootmem, which held stale values, then publishes approx_sum
+ * and level0 with releases. See "Publication of the tree" in
+ * lib/percpu_counter_tree.c.
+ *
+ * The carry slow path has read level0. Then it reads approx_sum after a
+ * read barrier, and the root through it. It never sees approx_sum
+ * unpublished or the stale root.
+ *)
+
+{
+	level0=nolevel0;
+	approx_sum=noroot;
+	l0mem=1;
+	rootmem=1;
+}
+
+P0(int **level0, int **approx_sum, int *l0mem, int *rootmem)
+{
+	WRITE_ONCE(*l0mem, 0);
+	WRITE_ONCE(*rootmem, 0);
+	smp_store_release(approx_sum, rootmem);
+	smp_store_release(level0, l0mem);
+}
+
+P1(int **level0, int **approx_sum)
+{
+	int *r0;
+	int *r1;
+	int r2;
+
+	r0 = READ_ONCE(*level0);
+	smp_rmb();
+	r1 = READ_ONCE(*approx_sum);
+	r2 = READ_ONCE(*r1);
+}
+
+exists (1:r0=l0mem /\ (1:r1=noroot \/ 1:r2=1))

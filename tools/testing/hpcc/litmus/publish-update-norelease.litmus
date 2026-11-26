@@ -1,0 +1,34 @@
+C publish-update-norelease
+
+(*
+ * Result: Sometimes
+ *
+ * Like publish-update, with plain stores instead of the releases. The
+ * update fast path can then see the stale per-CPU counter.
+ *)
+
+{
+	level0=nolevel0;
+	approx_sum=noroot;
+	l0mem=1;
+	rootmem=1;
+}
+
+P0(int **level0, int **approx_sum, int *l0mem, int *rootmem)
+{
+	WRITE_ONCE(*l0mem, 0);
+	WRITE_ONCE(*rootmem, 0);
+	WRITE_ONCE(*approx_sum, rootmem);
+	WRITE_ONCE(*level0, l0mem);
+}
+
+P1(int **level0, int **approx_sum)
+{
+	int *r0;
+	int r1;
+
+	r0 = READ_ONCE(*level0);
+	r1 = READ_ONCE(*r0);
+}
+
+exists (1:r0=l0mem /\ 1:r1=1)

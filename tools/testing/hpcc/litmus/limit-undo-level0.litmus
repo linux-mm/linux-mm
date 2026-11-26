@@ -1,0 +1,35 @@
+C limit-undo-level0
+
+(*
+ * Result: Never
+ *
+ * An addition which does not fit is undone on the same CPU. Both stay
+ * in the level 0 counters, l0p for the additions and l0n for the
+ * subtractions. The full barrier of percpu_counter_tree_limit_add()
+ * comes between them. The precise sum of the limit counter reads l0n,
+ * then l0p after a read barrier. It never sees the subtraction without
+ * the addition.
+ *)
+
+{}
+
+P0(int *l0p, int *l0n)
+{
+	int r;
+
+	WRITE_ONCE(*l0p, 1);
+	smp_mb();
+	r = cmpxchg_relaxed(l0n, 0, 1);
+}
+
+P1(int *l0p, int *l0n)
+{
+	int r0;
+	int r1;
+
+	r0 = READ_ONCE(*l0n);
+	smp_rmb();
+	r1 = READ_ONCE(*l0p);
+}
+
+exists (0:r=0 /\ 1:r0=1 /\ 1:r1=0)
