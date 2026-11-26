@@ -2455,6 +2455,42 @@ void try_to_unmap(struct folio *folio, enum ttu_flags flags)
 		rmap_walk(folio, &rwc);
 }
 
+/* Build the migration PTE that replaces pteval for a page. */
+static pte_t make_migration_pte(struct page *page, pte_t pteval,
+		bool writable, bool anon_exclusive)
+{
+	swp_entry_t entry;
+	pte_t swp_pte;
+
+	if (writable)
+		entry = make_writable_migration_entry(page_to_pfn(page));
+	else if (anon_exclusive)
+		entry = make_readable_exclusive_migration_entry(
+						page_to_pfn(page));
+	else
+		entry = make_readable_migration_entry(page_to_pfn(page));
+
+	if (likely(pte_present(pteval))) {
+		if (pte_young(pteval))
+			entry = make_migration_entry_young(entry);
+		if (pte_dirty(pteval))
+			entry = make_migration_entry_dirty(entry);
+		swp_pte = swp_entry_to_pte(entry);
+		if (pte_soft_dirty(pteval))
+			swp_pte = pte_swp_mksoft_dirty(swp_pte);
+		if (pte_uffd(pteval))
+			swp_pte = pte_swp_mkuffd(swp_pte);
+	} else {
+		swp_pte = swp_entry_to_pte(entry);
+		if (pte_swp_soft_dirty(pteval))
+			swp_pte = pte_swp_mksoft_dirty(swp_pte);
+		if (pte_swp_uffd(pteval))
+			swp_pte = pte_swp_mkuffd(swp_pte);
+	}
+
+	return swp_pte;
+}
+
 /*
  * @arg: enum ttu_flags will be passed to this argument.
  *
@@ -2685,7 +2721,6 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			 */
 			dec_mm_counter(mm, mm_counter(folio));
 		} else {
-			swp_entry_t entry;
 			pte_t swp_pte;
 
 			/*
@@ -2727,32 +2762,8 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			 * pte. do_swap_page() will wait until the migration
 			 * pte is removed and then restart fault handling.
 			 */
-			if (writable)
-				entry = make_writable_migration_entry(
-							page_to_pfn(subpage));
-			else if (anon_exclusive)
-				entry = make_readable_exclusive_migration_entry(
-							page_to_pfn(subpage));
-			else
-				entry = make_readable_migration_entry(
-							page_to_pfn(subpage));
-			if (likely(pte_present(pteval))) {
-				if (pte_young(pteval))
-					entry = make_migration_entry_young(entry);
-				if (pte_dirty(pteval))
-					entry = make_migration_entry_dirty(entry);
-				swp_pte = swp_entry_to_pte(entry);
-				if (pte_soft_dirty(pteval))
-					swp_pte = pte_swp_mksoft_dirty(swp_pte);
-				if (pte_uffd(pteval))
-					swp_pte = pte_swp_mkuffd(swp_pte);
-			} else {
-				swp_pte = swp_entry_to_pte(entry);
-				if (pte_swp_soft_dirty(pteval))
-					swp_pte = pte_swp_mksoft_dirty(swp_pte);
-				if (pte_swp_uffd(pteval))
-					swp_pte = pte_swp_mkuffd(swp_pte);
-			}
+			swp_pte = make_migration_pte(subpage, pteval,
+						     writable, anon_exclusive);
 			if (folio_test_hugetlb(folio))
 				set_huge_pte_at(mm, address, pvmw.pte, swp_pte,
 						hsz);
