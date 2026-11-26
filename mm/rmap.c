@@ -2492,6 +2492,138 @@ static pte_t make_migration_pte(struct page *page, pte_t pteval,
 }
 
 /*
+ * Replace the hugetlb page table mapping for folio with migration entries.
+ *
+ * @arg: enum ttu_flags will be passed to this argument.
+ */
+static bool try_to_migrate_hugetlb_one(struct folio *folio,
+		struct vm_area_struct *vma, unsigned long address, void *arg)
+{
+	const unsigned long hsz = huge_page_size(hstate_vma(vma));
+	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
+	enum ttu_flags flags = (enum ttu_flags)(long)arg;
+	bool anon_exclusive, writable, ret = true;
+	bool anon = folio_test_anon(folio);
+	struct mm_struct *mm = vma->vm_mm;
+	struct mmu_notifier_range range;
+	unsigned long pfn;
+	struct page *page;
+	pte_t pteval;
+
+	range.end = vma_address_end(&pvmw);
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma->vm_mm,
+				address, range.end);
+	/* If sharing is possible, start and end will be adjusted accordingly. */
+	adjust_range_if_pmd_sharing_possible(vma, &range.start, &range.end);
+	mmu_notifier_invalidate_range_start(&range);
+
+	/* There is only a single mapping in a VMA. */
+	if (!page_vma_mapped_walk(&pvmw))
+		goto range_end;
+
+	address = pvmw.address;
+	pteval = huge_ptep_get(mm, address, pvmw.pte);
+	if (likely(pte_present(pteval)))
+		pfn = pte_pfn(pteval);
+	else
+		pfn = softleaf_to_pfn(softleaf_from_pte(pteval));
+
+	page = folio_page(folio, pfn - folio_pfn(folio));
+	anon_exclusive = anon && PageAnonExclusive(page);
+
+	/*
+	 * huge_pmd_unshare may unmap an entire PMD page. There is no way of
+	 * knowing exactly which PMDs may be cached for this mm, so we must flush
+	 * them all. start/end were already adjusted above to cover this range.
+	 */
+	flush_cache_range(vma, range.start, range.end);
+
+	/*
+	 * To call huge_pmd_unshare, i_mmap_rwsem must be held in write mode.
+	 * Caller needs to explicitly do this outside rmap routines. We also must
+	 * hold hugetlb vma_lock in write mode. Lock order dictates acquiring
+	 * vma_lock BEFORE i_mmap_rwsem. We can only try lock here and fail if
+	 * unsuccessful.
+	 */
+	if (!anon) {
+		struct mmu_gather tlb;
+
+		VM_WARN_ON_ONCE(!(flags & TTU_RMAP_LOCKED));
+		if (!hugetlb_vma_trylock_write(vma)) {
+			ret = false;
+			goto walk_done;
+		}
+
+		tlb_gather_mmu_vma(&tlb, vma);
+		if (huge_pmd_unshare(&tlb, vma, address, pvmw.pte)) {
+			hugetlb_vma_unlock_write(vma);
+			huge_pmd_unshare_flush(&tlb, vma);
+			tlb_finish_mmu(&tlb);
+			/*
+			 * The PMD table was unmapped,
+			 * consequently unmapping the folio.
+			 */
+			goto walk_done;
+		}
+		hugetlb_vma_unlock_write(vma);
+		tlb_finish_mmu(&tlb);
+	}
+
+	/* Nuke the hugetlb page table entry */
+	pteval = huge_ptep_clear_flush(vma, address, pvmw.pte);
+	if (huge_pte_dirty(pteval))
+		folio_mark_dirty(folio);
+	writable = pte_write(pteval);
+
+	VM_WARN_ON_FOLIO(writable && anon && !anon_exclusive, folio);
+
+	if (PageHWPoison(page)) {
+		pteval = swp_entry_to_pte(make_hwpoison_entry(page));
+		hugetlb_count_sub(folio_nr_pages(folio), mm);
+		set_huge_pte_at(mm, address, pvmw.pte, pteval, hsz);
+	} else {
+		pte_t swp_pte;
+
+		/*
+		 * arch_unmap_one() is expected to be a NOP on architectures
+		 * where we could have PFN swap PTEs, so we'll not check/care.
+		 */
+		if (arch_unmap_one(mm, vma, address, pteval) < 0) {
+			set_huge_pte_at(mm, address, pvmw.pte, pteval, hsz);
+			ret = false;
+			goto walk_done;
+		}
+
+		/* See folio_try_share_anon_rmap_pte(): clear PTE first. */
+		if (anon_exclusive && hugetlb_try_share_anon_rmap(folio)) {
+			set_huge_pte_at(mm, address, pvmw.pte, pteval, hsz);
+			ret = false;
+			goto walk_done;
+		}
+
+		/*
+		 * Store the pfn of the page in a special migration pte. A
+		 * hugetlb fault waits for migration to complete before retrying.
+		 */
+		swp_pte = make_migration_pte(page, pteval, writable, anon_exclusive);
+		set_huge_pte_at(mm, address, pvmw.pte, swp_pte, hsz);
+		trace_set_migration_pte(address, pte_val(swp_pte),
+					folio_order(folio));
+	}
+
+	hugetlb_remove_rmap(folio);
+	if (vma_test_any_mask(vma, VMA_LOCKED_MASK))
+		mlock_drain_local();
+	folio_put(folio);
+walk_done:
+	page_vma_mapped_walk_done(&pvmw);
+range_end:
+	mmu_notifier_invalidate_range_end(&range);
+
+	return ret;
+}
+
+/*
  * @arg: enum ttu_flags will be passed to this argument.
  *
  * If TTU_SPLIT_HUGE_PMD is specified any PMD mappings will be split into PTEs
@@ -2508,7 +2640,6 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 	struct mmu_notifier_range range;
 	enum ttu_flags flags = (enum ttu_flags)(long)arg;
 	unsigned long pfn;
-	unsigned long hsz = 0;
 
 	/*
 	 * When racing against e.g. zap_pte_range() on another cpu,
@@ -2521,26 +2652,13 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 
 	/*
 	 * For THP, we have to assume the worse case ie pmd for invalidation.
-	 * For hugetlb, it could be much worse if we need to do pud
-	 * invalidation in the case of pmd sharing.
 	 *
 	 * Note that the page can not be free in this function as call of
-	 * try_to_unmap() must hold a reference on the page.
+	 * try_to_migrate() must hold a reference on the page.
 	 */
 	range.end = vma_address_end(&pvmw);
 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma->vm_mm,
 				address, range.end);
-	if (folio_test_hugetlb(folio)) {
-		/*
-		 * If sharing is possible, start and end will be adjusted
-		 * accordingly.
-		 */
-		adjust_range_if_pmd_sharing_possible(vma, &range.start,
-						     &range.end);
-
-		/* We need the huge page size for set_huge_pte_at() */
-		hsz = huge_page_size(hstate_vma(vma));
-	}
 	mmu_notifier_invalidate_range_start(&range);
 
 	while (page_vma_mapped_walk(&pvmw)) {
@@ -2587,10 +2705,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 		VM_BUG_ON_FOLIO(!pvmw.pte, folio);
 
 		address = pvmw.address;
-		if (folio_test_hugetlb(folio))
-			pteval = huge_ptep_get(mm, address, pvmw.pte);
-		else
-			pteval = ptep_get(pvmw.pte);
+		pteval = ptep_get(pvmw.pte);
 		if (likely(pte_present(pteval))) {
 			pfn = pte_pfn(pteval);
 		} else {
@@ -2601,66 +2716,13 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			const softleaf_t entry = softleaf_from_pte(pteval);
 
 			pfn = softleaf_to_pfn(entry);
-			VM_WARN_ON_FOLIO(folio_test_hugetlb(folio), folio);
 		}
 
 		subpage = folio_page(folio, pfn - folio_pfn(folio));
 		anon_exclusive = folio_test_anon(folio) &&
 				 PageAnonExclusive(subpage);
 
-		if (folio_test_hugetlb(folio)) {
-			bool anon = folio_test_anon(folio);
-
-			/*
-			 * huge_pmd_unshare may unmap an entire PMD page.
-			 * There is no way of knowing exactly which PMDs may
-			 * be cached for this mm, so we must flush them all.
-			 * start/end were already adjusted above to cover this
-			 * range.
-			 */
-			flush_cache_range(vma, range.start, range.end);
-
-			/*
-			 * To call huge_pmd_unshare, i_mmap_rwsem must be
-			 * held in write mode.  Caller needs to explicitly
-			 * do this outside rmap routines.
-			 *
-			 * We also must hold hugetlb vma_lock in write mode.
-			 * Lock order dictates acquiring vma_lock BEFORE
-			 * i_mmap_rwsem.  We can only try lock here and
-			 * fail if unsuccessful.
-			 */
-			if (!anon) {
-				struct mmu_gather tlb;
-
-				VM_BUG_ON(!(flags & TTU_RMAP_LOCKED));
-				if (!hugetlb_vma_trylock_write(vma)) {
-					page_vma_mapped_walk_done(&pvmw);
-					ret = false;
-					break;
-				}
-
-				tlb_gather_mmu_vma(&tlb, vma);
-				if (huge_pmd_unshare(&tlb, vma, address, pvmw.pte)) {
-					hugetlb_vma_unlock_write(vma);
-					huge_pmd_unshare_flush(&tlb, vma);
-					tlb_finish_mmu(&tlb);
-					/*
-					 * The PMD table was unmapped,
-					 * consequently unmapping the folio.
-					 */
-					page_vma_mapped_walk_done(&pvmw);
-					break;
-				}
-				hugetlb_vma_unlock_write(vma);
-				tlb_finish_mmu(&tlb);
-			}
-			/* Nuke the hugetlb page table entry */
-			pteval = huge_ptep_clear_flush(vma, address, pvmw.pte);
-			if (pte_dirty(pteval))
-				folio_mark_dirty(folio);
-			writable = pte_write(pteval);
-		} else if (likely(pte_present(pteval))) {
+		if (likely(pte_present(pteval))) {
 			flush_cache_page(vma, address, pfn);
 			/* Nuke the page table entry. */
 			if (should_defer_flush(mm, flags)) {
@@ -2699,14 +2761,8 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			VM_WARN_ON_FOLIO(folio_is_device_private(folio), folio);
 
 			pteval = swp_entry_to_pte(make_hwpoison_entry(subpage));
-			if (folio_test_hugetlb(folio)) {
-				hugetlb_count_sub(folio_nr_pages(folio), mm);
-				set_huge_pte_at(mm, address, pvmw.pte, pteval,
-						hsz);
-			} else {
-				dec_mm_counter(mm, mm_counter(folio));
-				set_pte_at(mm, address, pvmw.pte, pteval);
-			}
+			dec_mm_counter(mm, mm_counter(folio));
+			set_pte_at(mm, address, pvmw.pte, pteval);
 		} else if (likely(pte_present(pteval)) && pte_unused(pteval) &&
 			   !userfaultfd_armed(vma)) {
 			/*
@@ -2729,28 +2785,15 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			 * so we'll not check/care.
 			 */
 			if (arch_unmap_one(mm, vma, address, pteval) < 0) {
-				if (folio_test_hugetlb(folio))
-					set_huge_pte_at(mm, address, pvmw.pte,
-							pteval, hsz);
-				else
-					set_pte_at(mm, address, pvmw.pte, pteval);
+				set_pte_at(mm, address, pvmw.pte, pteval);
 				ret = false;
 				page_vma_mapped_walk_done(&pvmw);
 				break;
 			}
 
 			/* See folio_try_share_anon_rmap_pte(): clear PTE first. */
-			if (folio_test_hugetlb(folio)) {
-				if (anon_exclusive &&
-				    hugetlb_try_share_anon_rmap(folio)) {
-					set_huge_pte_at(mm, address, pvmw.pte,
-							pteval, hsz);
-					ret = false;
-					page_vma_mapped_walk_done(&pvmw);
-					break;
-				}
-			} else if (anon_exclusive &&
-				   folio_try_share_anon_rmap_pte(folio, subpage)) {
+			if (anon_exclusive &&
+			    folio_try_share_anon_rmap_pte(folio, subpage)) {
 				set_pte_at(mm, address, pvmw.pte, pteval);
 				ret = false;
 				page_vma_mapped_walk_done(&pvmw);
@@ -2764,11 +2807,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			 */
 			swp_pte = make_migration_pte(subpage, pteval,
 						     writable, anon_exclusive);
-			if (folio_test_hugetlb(folio))
-				set_huge_pte_at(mm, address, pvmw.pte, swp_pte,
-						hsz);
-			else
-				set_pte_at(mm, address, pvmw.pte, swp_pte);
+			set_pte_at(mm, address, pvmw.pte, swp_pte);
 			trace_set_migration_pte(address, pte_val(swp_pte),
 						folio_order(folio));
 			/*
@@ -2777,10 +2816,7 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 			 */
 		}
 
-		if (unlikely(folio_test_hugetlb(folio)))
-			hugetlb_remove_rmap(folio);
-		else
-			folio_remove_rmap_pte(folio, subpage, vma);
+		folio_remove_rmap_pte(folio, subpage, vma);
 		if (vma_test_any_mask(vma, VMA_LOCKED_MASK))
 			mlock_drain_local();
 		folio_put(folio);
@@ -2802,7 +2838,8 @@ static bool try_to_migrate_one(struct folio *folio, struct vm_area_struct *vma,
 void try_to_migrate(struct folio *folio, enum ttu_flags flags)
 {
 	struct rmap_walk_control rwc = {
-		.rmap_one = try_to_migrate_one,
+		.rmap_one = folio_test_hugetlb(folio) ?
+				try_to_migrate_hugetlb_one : try_to_migrate_one,
 		.arg = (void *)flags,
 		.done = folio_not_mapped,
 		.anon_lock = folio_lock_anon_vma_read,
