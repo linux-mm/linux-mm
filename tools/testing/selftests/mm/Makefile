@@ -6,6 +6,7 @@
 # If you do not YOUR TESTS WILL NOT RUN IN THE CI.
 
 LOCAL_HDRS += $(selfdir)/mm/local_config.h_gen $(top_srcdir)/mm/gup_test.h
+LOCAL_HDRS += $(selfdir)/mm/hmm-common.h
 LOCAL_HDRS += $(selfdir)/mm/mseal_helpers.h
 
 include local_config.mk
