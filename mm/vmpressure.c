@@ -156,6 +156,14 @@ void vmpressure(gfp_t gfp, int order, struct mem_cgroup *memcg, bool tree,
 		if (!memcg || mem_cgroup_is_root(memcg))
 			return;
 
+		/*
+		 * Costly-order reclaim relies on compaction, so its efficiency
+		 * is a poor signal for socket pressure. Exclude these samples
+		 * before they can affect the window.
+		 */
+		if (order > PAGE_ALLOC_COSTLY_ORDER)
+			return;
+
 		spin_lock(&vmpr->sr_lock);
 		scanned = vmpr->scanned += scanned;
 		reclaimed = vmpr->reclaimed += reclaimed;
@@ -168,15 +176,7 @@ void vmpressure(gfp_t gfp, int order, struct mem_cgroup *memcg, bool tree,
 
 		level = vmpressure_calc_level(scanned, reclaimed);
 
-		/*
-		 * Once we go above COSTLY_ORDER, reclaim relies heavily on
-		 * compaction to make progress. Reclaim efficiency was never a
-		 * great proxy for pressure to begin with, but it's outright
-		 * misleading with these high orders. Don't throttle sockets
-		 * because somebody is attempting something crazy like an order-7
-		 * and predictably struggling.
-		 */
-		if (level > VMPRESSURE_LOW && order <= PAGE_ALLOC_COSTLY_ORDER) {
+		if (level > VMPRESSURE_LOW) {
 			/*
 			 * Let the socket buffer allocator know that
 			 * we are having trouble reclaiming LRU pages.
