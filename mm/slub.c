@@ -8903,8 +8903,16 @@ int do_kmem_cache_create(struct kmem_cache *s, const char *name,
 		 * order increased.
 		 */
 		if (get_order(s->size) > get_order(s->object_size)) {
+
 			s->flags &= ~DEBUG_METADATA_FLAGS;
+			/*
+			 * Reset fields that the previous run may have set and
+			 * now might be different.
+			 */
+			s->flags &= ~SLAB_OBJ_EXT_IN_OBJ;
 			s->offset = 0;
+			s->red_left_pad = 0;
+
 			if (!calculate_sizes(args, s))
 				goto out;
 			/* Created as unmergeable, so it has to stay so */
