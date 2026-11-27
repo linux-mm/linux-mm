@@ -5235,8 +5235,10 @@ static int __prefill_sheaf_pfmemalloc(struct kmem_cache *s,
 		return 0;
 
 	gfp_nomemalloc = gfp | __GFP_NOMEMALLOC;
-	if (gfp_pfmemalloc_allowed(gfp))
+	if (gfp_pfmemalloc_allowed(gfp)) {
+		gfp_nomemalloc &= ~__GFP_NOFAIL;
 		gfp_nomemalloc |= __GFP_NOWARN;
+	}
 
 	ret = refill_sheaf(s, sheaf, gfp_nomemalloc);
 
@@ -5377,11 +5379,17 @@ void kmem_cache_return_sheaf(struct kmem_cache *s, gfp_t gfp,
 	stat(s, SHEAF_RETURN_SLOW);
 
 	/*
+	 * If we end up refilling the sheaf, don't try too hard.
+	 */
+	gfp &= ~__GFP_NOFAIL;
+	gfp |= __GFP_NOMEMALLOC | __GFP_NORETRY | __GFP_NOWARN;
+
+	/*
 	 * If the barn has too many full sheaves or we fail to refill the sheaf,
 	 * simply flush and free it.
 	 */
 	if (!barn || data_race(barn->nr_full) >= MAX_FULL_SHEAVES ||
-	    refill_sheaf(s, sheaf, gfp | __GFP_NOMEMALLOC | __GFP_NOWARN)) {
+	    refill_sheaf(s, sheaf, gfp)) {
 		sheaf_flush_unused(s, sheaf);
 		free_empty_sheaf(s, sheaf);
 		return;
