@@ -1905,6 +1905,12 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
 	if (err)
 		goto out;
 
+	/* Source node IDs must fit within the runtime nodemask. */
+	if (__next_node(nr_node_ids - 1, old, MAX_NUMNODES) < MAX_NUMNODES) {
+		err = -EINVAL;
+		goto out;
+	}
+
 	err = get_nodes(new, new_nodes, maxnode);
 	if (err)
 		goto out;
