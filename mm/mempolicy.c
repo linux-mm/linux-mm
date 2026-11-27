@@ -1208,7 +1208,7 @@ static void get_policy_nodemask(struct mempolicy *pol, nodemask_t *nodes)
 	}
 }
 
-static int lookup_node(struct mm_struct *mm, unsigned long addr)
+static int lookup_node(unsigned long addr)
 {
 	struct page *p = NULL;
 	int ret;
@@ -1275,7 +1275,7 @@ static long do_get_mempolicy(int *policy, nodemask_t *nmask,
 			vma = NULL;
 			mpol_get(pol);
 			mmap_read_unlock(mm);
-			err = lookup_node(mm, addr);
+			err = lookup_node(addr);
 			if (err < 0)
 				goto out;
 			*policy = err;
