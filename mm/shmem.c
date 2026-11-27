@@ -134,6 +134,7 @@ struct shmem_options {
 #define SHMEM_SEEN_HUGE 4
 #define SHMEM_SEEN_INUMS 8
 #define SHMEM_SEEN_QUOTA 16
+#define SHMEM_SEEN_MPOL 32
 };
 
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
@@ -4916,6 +4917,7 @@ static int shmem_parse_one(struct fs_context *fc, struct fs_parameter *param)
 			ctx->mpol = NULL;
 			if (mpol_parse_str(param->string, &ctx->mpol))
 				goto bad_value;
+			ctx->seen |= SHMEM_SEEN_MPOL;
 			break;
 		}
 		goto unsupported_parameter;
@@ -5128,7 +5130,7 @@ static int shmem_reconfigure(struct fs_context *fc)
 	/*
 	 * Preserve previous mempolicy unless mpol remount option was specified.
 	 */
-	if (ctx->mpol) {
+	if (ctx->seen & SHMEM_SEEN_MPOL) {
 		mpol = sbinfo->mpol;
 		sbinfo->mpol = ctx->mpol;	/* transfers initial ref */
 		ctx->mpol = NULL;
