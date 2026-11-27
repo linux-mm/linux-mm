@@ -4838,13 +4838,20 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
 	if (!allow_spin)
 		return NULL;
 
+	/*
+	 * We don't want refills to rely on __GFP_NOFAIL or memalloc reserves to
+	 * succeed, nor to warn on failure. Leave that to the fallback.
+	 */
+	gfp &= ~__GFP_NOFAIL;
+	gfp |= __GFP_NOMEMALLOC | __GFP_NOWARN;
+
 	if (!empty) {
 		empty = alloc_empty_sheaf(s, gfp, alloc_flags);
 		if (!empty)
 			return NULL;
 	}
 
-	if (refill_sheaf(s, empty, gfp | __GFP_NOMEMALLOC | __GFP_NOWARN)) {
+	if (refill_sheaf(s, empty, gfp)) {
 		/*
 		 * we must be very low on memory so don't bother
 		 * with the barn
@@ -5228,8 +5235,10 @@ static int __prefill_sheaf_pfmemalloc(struct kmem_cache *s,
 		return 0;
 
 	gfp_nomemalloc = gfp | __GFP_NOMEMALLOC;
-	if (gfp_pfmemalloc_allowed(gfp))
+	if (gfp_pfmemalloc_allowed(gfp)) {
+		gfp_nomemalloc &= ~__GFP_NOFAIL;
 		gfp_nomemalloc |= __GFP_NOWARN;
+	}
 
 	ret = refill_sheaf(s, sheaf, gfp_nomemalloc);
 
@@ -5370,11 +5379,17 @@ void kmem_cache_return_sheaf(struct kmem_cache *s, gfp_t gfp,
 	stat(s, SHEAF_RETURN_SLOW);
 
 	/*
+	 * If we end up refilling the sheaf, don't try too hard.
+	 */
+	gfp &= ~__GFP_NOFAIL;
+	gfp |= __GFP_NOMEMALLOC | __GFP_NORETRY | __GFP_NOWARN;
+
+	/*
 	 * If the barn has too many full sheaves or we fail to refill the sheaf,
 	 * simply flush and free it.
 	 */
 	if (!barn || data_race(barn->nr_full) >= MAX_FULL_SHEAVES ||
-	    refill_sheaf(s, sheaf, gfp | __GFP_NOMEMALLOC | __GFP_NOWARN)) {
+	    refill_sheaf(s, sheaf, gfp)) {
 		sheaf_flush_unused(s, sheaf);
 		free_empty_sheaf(s, sheaf);
 		return;
@@ -8888,10 +8903,20 @@ int do_kmem_cache_create(struct kmem_cache *s, const char *name,
 		 * order increased.
 		 */
 		if (get_order(s->size) > get_order(s->object_size)) {
+
 			s->flags &= ~DEBUG_METADATA_FLAGS;
+			/*
+			 * Reset fields that the previous run may have set and
+			 * now might be different.
+			 */
+			s->flags &= ~SLAB_OBJ_EXT_IN_OBJ;
 			s->offset = 0;
+			s->red_left_pad = 0;
+
 			if (!calculate_sizes(args, s))
 				goto out;
+			/* Created as unmergeable, so it has to stay so */
+			s->flags |= SLAB_NO_MERGE;
 		}
 	}
 
@@ -9853,10 +9878,6 @@ static int sysfs_slab_add(struct kmem_cache *s)
 	const char *name;
 	struct kset *kset = cache_kset(s);
 	int unmergeable = slab_unmergeable(s);
-
-	if (!unmergeable && disable_higher_order_debug &&
-			(slub_debug & DEBUG_METADATA_FLAGS))
-		unmergeable = 1;
 
 	if (unmergeable) {
 		/*
