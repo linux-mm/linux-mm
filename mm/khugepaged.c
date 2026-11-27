@@ -1839,14 +1839,18 @@ static enum scan_result set_huge_pmd(struct vm_area_struct *vma, unsigned long a
 	mmap_assert_locked(vma->vm_mm);
 
 	if (!pmdp) {
+		unsigned int nofs_flags;
+
+		/*
+		 * The folio is locked, and reclaim or compaction with __GFP_FS
+		 * could deadlock on it.
+		 */
+		nofs_flags = memalloc_nofs_save();
 		pgdp = pgd_offset(mm, addr);
 		p4dp = p4d_alloc(mm, pgdp, addr);
-		if (!p4dp)
-			return SCAN_FAIL;
-		pudp = pud_alloc(mm, p4dp, addr);
-		if (!pudp)
-			return SCAN_FAIL;
-		pmdp = pmd_alloc(mm, pudp, addr);
+		pudp = p4dp ? pud_alloc(mm, p4dp, addr) : NULL;
+		pmdp = pudp ? pmd_alloc(mm, pudp, addr) : NULL;
+		memalloc_nofs_restore(nofs_flags);
 		if (!pmdp)
 			return SCAN_FAIL;
 	}

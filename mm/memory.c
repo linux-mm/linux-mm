@@ -5806,9 +5806,17 @@ vm_fault_t do_set_pmd(struct vm_fault *vmf, struct folio *folio, struct page *pa
 	 * related to pte entry. Use the preallocated table for that.
 	 */
 	if (arch_needs_pgtable_deposit() && !vmf->prealloc_pte) {
+		unsigned int nofs_flags;
+
 		if (!may_alloc)
 			return VM_FAULT_FALLBACK;
+		/*
+		 * The folio is locked, and reclaim or compaction with __GFP_FS
+		 * could deadlock on it. pte_alloc_one() takes no gfp flags.
+		 */
+		nofs_flags = memalloc_nofs_save();
 		vmf->prealloc_pte = pte_alloc_one(vma->vm_mm);
+		memalloc_nofs_restore(nofs_flags);
 		if (!vmf->prealloc_pte)
 			return VM_FAULT_OOM;
 		pgtable_allocated = true;
@@ -5992,10 +6000,14 @@ fallback:
 				return ret;
 		}
 
-		if (vmf->prealloc_pte)
-			pmd_install(vma->vm_mm, vmf->pmd, &vmf->prealloc_pte);
-		else if (unlikely(pte_alloc(vma->vm_mm, vmf->pmd)))
-			return VM_FAULT_OOM;
+		/*
+		 * The page table was removed after __do_fault() found it, so
+		 * nothing was preallocated. Allocating with the folio locked
+		 * can deadlock in reclaim, so retry the fault instead.
+		 */
+		if (!vmf->prealloc_pte)
+			return VM_FAULT_NOPAGE;
+		pmd_install(vma->vm_mm, vmf->pmd, &vmf->prealloc_pte);
 	}
 
 	nr_pages = folio_nr_pages(folio);
