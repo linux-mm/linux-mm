@@ -553,8 +553,7 @@ static inline long change_pud_range(struct mmu_gather *tlb,
 	pud_t *pudp, pud;
 	unsigned long next;
 	long pages = 0, ret;
-
-	range.start = 0;
+	bool notified = false;
 
 	pudp = pud_offset(p4d, addr);
 	do {
@@ -570,7 +569,8 @@ again:
 		if (pud_none(pud))
 			continue;
 
-		if (!range.start) {
+		if (!notified) {
+			notified = true;
 			mmu_notifier_range_init(&range,
 						MMU_NOTIFY_PROTECTION_VMA, 0,
 						vma->vm_mm, addr, end);
@@ -598,7 +598,7 @@ again:
 					  cp_flags);
 	} while (pudp++, addr = next, addr != end);
 
-	if (range.start)
+	if (notified)
 		mmu_notifier_invalidate_range_end(&range);
 
 	return pages;
