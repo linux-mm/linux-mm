@@ -8907,6 +8907,8 @@ int do_kmem_cache_create(struct kmem_cache *s, const char *name,
 			s->offset = 0;
 			if (!calculate_sizes(args, s))
 				goto out;
+			/* Created as unmergeable, so it has to stay so */
+			s->flags |= SLAB_NO_MERGE;
 		}
 	}
 
@@ -9868,10 +9870,6 @@ static int sysfs_slab_add(struct kmem_cache *s)
 	const char *name;
 	struct kset *kset = cache_kset(s);
 	int unmergeable = slab_unmergeable(s);
-
-	if (!unmergeable && disable_higher_order_debug &&
-			(slub_debug & DEBUG_METADATA_FLAGS))
-		unmergeable = 1;
 
 	if (unmergeable) {
 		/*
