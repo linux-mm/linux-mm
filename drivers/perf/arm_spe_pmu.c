@@ -1442,7 +1442,7 @@ static int __init arm_spe_pmu_init(void)
 
 	ret = platform_driver_register(&arm_spe_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(arm_spe_pmu_online);
+		cpuhp_remove_state_multi(arm_spe_pmu_online);
 
 	return ret;
 }
@@ -1450,7 +1450,7 @@ static int __init arm_spe_pmu_init(void)
 static void __exit arm_spe_pmu_exit(void)
 {
 	platform_driver_unregister(&arm_spe_pmu_driver);
-	cpuhp_remove_multi_state(arm_spe_pmu_online);
+	cpuhp_remove_state_multi(arm_spe_pmu_online);
 }
 
 module_init(arm_spe_pmu_init);

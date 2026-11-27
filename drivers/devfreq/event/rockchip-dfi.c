@@ -614,7 +614,7 @@ static void rockchip_ddr_cpuhp_remove_state(void *data)
 {
 	struct rockchip_dfi *dfi = data;
 
-	cpuhp_remove_multi_state(dfi->cpuhp_state);
+	cpuhp_remove_state_multi(dfi->cpuhp_state);
 
 	rockchip_dfi_disable(dfi);
 }

@@ -6779,9 +6779,9 @@ static int __init ibmvnic_module_init(void)
 
 	return 0;
 err_vio_register:
-	cpuhp_remove_multi_state(CPUHP_IBMVNIC_DEAD);
+	cpuhp_remove_state_multi(CPUHP_IBMVNIC_DEAD);
 err_dead:
-	cpuhp_remove_multi_state(ibmvnic_online);
+	cpuhp_remove_state_multi(ibmvnic_online);
 out:
 	return ret;
 }
@@ -6789,8 +6789,8 @@ out:
 static void __exit ibmvnic_module_exit(void)
 {
 	vio_unregister_driver(&ibmvnic_driver);
-	cpuhp_remove_multi_state(CPUHP_IBMVNIC_DEAD);
-	cpuhp_remove_multi_state(ibmvnic_online);
+	cpuhp_remove_state_multi(CPUHP_IBMVNIC_DEAD);
+	cpuhp_remove_state_multi(ibmvnic_online);
 }
 
 module_init(ibmvnic_module_init);

@@ -852,7 +852,7 @@ static int __init dsu_pmu_init(void)
 	dsu_pmu_cpuhp_state = ret;
 	ret = platform_driver_register(&dsu_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(dsu_pmu_cpuhp_state);
+		cpuhp_remove_state_multi(dsu_pmu_cpuhp_state);
 
 	return ret;
 }
@@ -860,7 +860,7 @@ static int __init dsu_pmu_init(void)
 static void __exit dsu_pmu_exit(void)
 {
 	platform_driver_unregister(&dsu_pmu_driver);
-	cpuhp_remove_multi_state(dsu_pmu_cpuhp_state);
+	cpuhp_remove_state_multi(dsu_pmu_cpuhp_state);
 }
 
 module_init(dsu_pmu_init);

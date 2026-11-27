@@ -998,7 +998,7 @@ static int fme_perf_init(struct platform_device *pdev,
 pmu_register_err:
 	cpuhp_state_remove_instance_nocalls(priv->cpuhp_state, &priv->node);
 cpuhp_instance_err:
-	cpuhp_remove_multi_state(priv->cpuhp_state);
+	cpuhp_remove_state_multi(priv->cpuhp_state);
 	return ret;
 }
 
@@ -1009,7 +1009,7 @@ static void fme_perf_uinit(struct platform_device *pdev,
 
 	fme_perf_pmu_unregister(priv);
 	cpuhp_state_remove_instance_nocalls(priv->cpuhp_state, &priv->node);
-	cpuhp_remove_multi_state(priv->cpuhp_state);
+	cpuhp_remove_state_multi(priv->cpuhp_state);
 }
 
 const struct dfl_feature_id fme_perf_id_table[] = {

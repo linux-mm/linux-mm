@@ -1656,7 +1656,7 @@ static int __init hns3_pmu_module_init(void)
 	ret = pci_register_driver(&hns3_pmu_driver);
 	if (ret) {
 		pr_err("failed to register pci driver, ret = %d.\n", ret);
-		cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_HNS3_PMU_ONLINE);
+		cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_HNS3_PMU_ONLINE);
 	}
 
 	return ret;
@@ -1666,7 +1666,7 @@ module_init(hns3_pmu_module_init);
 static void __exit hns3_pmu_module_exit(void)
 {
 	pci_unregister_driver(&hns3_pmu_driver);
-	cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_HNS3_PMU_ONLINE);
+	cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_HNS3_PMU_ONLINE);
 }
 module_exit(hns3_pmu_module_exit);
 

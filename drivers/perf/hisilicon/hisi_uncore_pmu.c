@@ -639,7 +639,7 @@ module_init(hisi_uncore_pmu_init);
 
 static void __exit hisi_uncore_pmu_exit(void)
 {
-	cpuhp_remove_multi_state(hisi_uncore_pmu_cpuhp_state);
+	cpuhp_remove_state_multi(hisi_uncore_pmu_cpuhp_state);
 }
 module_exit(hisi_uncore_pmu_exit);
 

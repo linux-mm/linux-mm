@@ -1345,7 +1345,7 @@ static int __init cn10k_ddr_pmu_init(void)
 
 	ret = platform_driver_register(&cn10k_ddr_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(
+		cpuhp_remove_state_multi(
 				CPUHP_AP_PERF_ARM_MARVELL_CN10K_DDR_ONLINE);
 	return ret;
 }
@@ -1353,7 +1353,7 @@ static int __init cn10k_ddr_pmu_init(void)
 static void __exit cn10k_ddr_pmu_exit(void)
 {
 	platform_driver_unregister(&cn10k_ddr_pmu_driver);
-	cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_MARVELL_CN10K_DDR_ONLINE);
+	cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_MARVELL_CN10K_DDR_ONLINE);
 }
 
 module_init(cn10k_ddr_pmu_init);

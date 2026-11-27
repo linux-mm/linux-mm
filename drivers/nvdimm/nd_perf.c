@@ -245,7 +245,7 @@ static int nvdimm_pmu_cpu_hotplug_init(struct nvdimm_pmu *nd_pmu)
 	/* Register the pmu instance for cpu hotplug */
 	rc = cpuhp_state_add_instance_nocalls(nd_pmu->cpuhp_state, &nd_pmu->node);
 	if (rc) {
-		cpuhp_remove_multi_state(nd_pmu->cpuhp_state);
+		cpuhp_remove_state_multi(nd_pmu->cpuhp_state);
 		return rc;
 	}
 
@@ -253,7 +253,7 @@ static int nvdimm_pmu_cpu_hotplug_init(struct nvdimm_pmu *nd_pmu)
 	rc = create_cpumask_attr_group(nd_pmu);
 	if (rc) {
 		cpuhp_state_remove_instance_nocalls(nd_pmu->cpuhp_state, &nd_pmu->node);
-		cpuhp_remove_multi_state(nd_pmu->cpuhp_state);
+		cpuhp_remove_state_multi(nd_pmu->cpuhp_state);
 		return rc;
 	}
 
@@ -263,7 +263,7 @@ static int nvdimm_pmu_cpu_hotplug_init(struct nvdimm_pmu *nd_pmu)
 static void nvdimm_pmu_free_hotplug_memory(struct nvdimm_pmu *nd_pmu)
 {
 	cpuhp_state_remove_instance_nocalls(nd_pmu->cpuhp_state, &nd_pmu->node);
-	cpuhp_remove_multi_state(nd_pmu->cpuhp_state);
+	cpuhp_remove_state_multi(nd_pmu->cpuhp_state);
 
 	if (nd_pmu->pmu.attr_groups[NVDIMM_PMU_CPUMASK_ATTR])
 		kfree(nd_pmu->pmu.attr_groups[NVDIMM_PMU_CPUMASK_ATTR]->attrs);

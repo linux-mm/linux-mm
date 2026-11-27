@@ -1524,7 +1524,7 @@ static int arm_trbe_probe_cpuhp(struct trbe_drvdata *drvdata)
 
 	ret = cpuhp_state_add_instance(trbe_online, &drvdata->hotplug_node);
 	if (ret) {
-		cpuhp_remove_multi_state(trbe_online);
+		cpuhp_remove_state_multi(trbe_online);
 		return ret;
 	}
 	drvdata->trbe_online = trbe_online;
@@ -1534,7 +1534,7 @@ static int arm_trbe_probe_cpuhp(struct trbe_drvdata *drvdata)
 static void arm_trbe_remove_cpuhp(struct trbe_drvdata *drvdata)
 {
 	cpuhp_state_remove_instance(drvdata->trbe_online, &drvdata->hotplug_node);
-	cpuhp_remove_multi_state(drvdata->trbe_online);
+	cpuhp_remove_state_multi(drvdata->trbe_online);
 }
 
 static int arm_trbe_probe_irq(struct platform_device *pdev,

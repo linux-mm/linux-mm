@@ -799,7 +799,7 @@ static int __init ali_drw_pmu_init(void)
 
 	ret = platform_driver_register(&ali_drw_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(ali_drw_cpuhp_state_num);
+		cpuhp_remove_state_multi(ali_drw_cpuhp_state_num);
 
 	return ret;
 }
@@ -807,7 +807,7 @@ static int __init ali_drw_pmu_init(void)
 static void __exit ali_drw_pmu_exit(void)
 {
 	platform_driver_unregister(&ali_drw_pmu_driver);
-	cpuhp_remove_multi_state(ali_drw_cpuhp_state_num);
+	cpuhp_remove_state_multi(ali_drw_cpuhp_state_num);
 }
 
 module_init(ali_drw_pmu_init);

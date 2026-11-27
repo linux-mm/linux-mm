@@ -1040,7 +1040,7 @@ static int __init nv_c2c_pmu_init(void)
 static void __exit nv_c2c_pmu_exit(void)
 {
 	platform_driver_unregister(&nv_c2c_pmu_driver);
-	cpuhp_remove_multi_state(nv_c2c_pmu_cpuhp_state);
+	cpuhp_remove_state_multi(nv_c2c_pmu_cpuhp_state);
 }
 
 module_init(nv_c2c_pmu_init);

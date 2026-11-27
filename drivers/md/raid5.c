@@ -9402,7 +9402,7 @@ err_unregister_raid5:
 err_unregister_raid6:
 	unregister_md_submodule(&raid6_personality.head);
 err_cpuhp_remove:
-	cpuhp_remove_multi_state(CPUHP_MD_RAID5_PREPARE);
+	cpuhp_remove_state_multi(CPUHP_MD_RAID5_PREPARE);
 err_destroy_wq:
 	destroy_workqueue(raid5_wq);
 	return ret;
@@ -9413,7 +9413,7 @@ static void __exit raid5_exit(void)
 	unregister_md_submodule(&raid6_personality.head);
 	unregister_md_submodule(&raid5_personality.head);
 	unregister_md_submodule(&raid4_personality.head);
-	cpuhp_remove_multi_state(CPUHP_MD_RAID5_PREPARE);
+	cpuhp_remove_state_multi(CPUHP_MD_RAID5_PREPARE);
 	destroy_workqueue(raid5_wq);
 }
 

@@ -407,14 +407,14 @@ static int __init pem_pmu_init(void)
 
 	ret = platform_driver_register(&pem_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_MRVL_PEM_ONLINE);
+		cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_MRVL_PEM_ONLINE);
 	return ret;
 }
 
 static void __exit pem_pmu_exit(void)
 {
 	platform_driver_unregister(&pem_pmu_driver);
-	cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_MRVL_PEM_ONLINE);
+	cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_MRVL_PEM_ONLINE);
 }
 
 module_init(pem_pmu_init);

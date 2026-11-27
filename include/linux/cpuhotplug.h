@@ -450,14 +450,14 @@ static inline void cpuhp_remove_state_nocalls_cpuslocked(enum cpuhp_state state)
 }
 
 /**
- * cpuhp_remove_multi_state - Remove hotplug multi state callback
+ * cpuhp_remove_state_multi - Remove hotplug multi state callback
  * @state:	The state for which the calls are removed
  *
  * Removes the callback functions from a multi state. This is the reverse of
  * cpuhp_setup_state_multi(). All instances should have been removed before
  * invoking this function.
  */
-static inline void cpuhp_remove_multi_state(enum cpuhp_state state)
+static inline void cpuhp_remove_state_multi(enum cpuhp_state state)
 {
 	__cpuhp_remove_state(state, false);
 }

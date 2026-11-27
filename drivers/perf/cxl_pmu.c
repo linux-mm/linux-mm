@@ -1138,7 +1138,7 @@ static __init int cxl_pmu_init(void)
 
 	rc = cxl_driver_register(&cxl_pmu_driver);
 	if (rc)
-		cpuhp_remove_multi_state(cxl_pmu_cpuhp_state_num);
+		cpuhp_remove_state_multi(cxl_pmu_cpuhp_state_num);
 
 	return rc;
 }
@@ -1146,7 +1146,7 @@ static __init int cxl_pmu_init(void)
 static __exit void cxl_pmu_exit(void)
 {
 	cxl_driver_unregister(&cxl_pmu_driver);
-	cpuhp_remove_multi_state(cxl_pmu_cpuhp_state_num);
+	cpuhp_remove_state_multi(cxl_pmu_cpuhp_state_num);
 }
 
 MODULE_DESCRIPTION("CXL Performance Monitor Driver");

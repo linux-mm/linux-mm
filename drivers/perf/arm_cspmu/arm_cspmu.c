@@ -1449,7 +1449,7 @@ static int __init arm_cspmu_init(void)
 static void __exit arm_cspmu_exit(void)
 {
 	platform_driver_unregister(&arm_cspmu_driver);
-	cpuhp_remove_multi_state(arm_cspmu_cpuhp_state);
+	cpuhp_remove_state_multi(arm_cspmu_cpuhp_state);
 }
 
 int arm_cspmu_impl_register(const struct arm_cspmu_impl_match *impl_match)

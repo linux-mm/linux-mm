@@ -844,14 +844,14 @@ static int __init arm_ni_init(void)
 
 	ret = platform_driver_register(&arm_ni_driver);
 	if (ret)
-		cpuhp_remove_multi_state(arm_ni_hp_state);
+		cpuhp_remove_state_multi(arm_ni_hp_state);
 	return ret;
 }
 
 static void __exit arm_ni_exit(void)
 {
 	platform_driver_unregister(&arm_ni_driver);
-	cpuhp_remove_multi_state(arm_ni_hp_state);
+	cpuhp_remove_state_multi(arm_ni_hp_state);
 }
 
 module_init(arm_ni_init);
