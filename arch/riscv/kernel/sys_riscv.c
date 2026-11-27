@@ -5,8 +5,9 @@
  * Copyright (C) 2017 SiFive
  */
 
+#include <linux/cacheflush.h>
+#include <linux/mm.h>
 #include <linux/syscalls.h>
-#include <asm/cacheflush.h>
 #include <asm-generic/mman-common.h>
 
 static long riscv_sys_mmap(unsigned long addr, unsigned long len,
@@ -52,6 +53,33 @@ SYSCALL_DEFINE6(mmap2, unsigned long, addr, unsigned long, len,
 }
 #endif
 
+#ifdef CONFIG_RISCV_ESP32P4_CLIC
+static int esp32p4_flush_icache_mapped_range(unsigned long start,
+					   unsigned long end)
+{
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
+	unsigned long covered = start;
+	int ret = -EFAULT;
+
+	VMA_ITERATOR(vmi, mm, start);
+
+	mmap_read_lock(mm);
+	for_each_vma_range(vmi, vma, end) {
+		if (vma->vm_start > covered)
+			break;
+		covered = vma->vm_end;
+		if (covered >= end) {
+			ret = flush_icache_user_range_checked(start, end);
+			break;
+		}
+	}
+	mmap_read_unlock(mm);
+
+	return ret;
+}
+#endif
+
 /*
  * Allows the instruction cache to be flushed from userspace.  Despite RISC-V
  * having a direct 'fence.i' instruction available to userspace (which we
@@ -63,8 +91,8 @@ SYSCALL_DEFINE6(mmap2, unsigned long, addr, unsigned long, len,
  *
  * sys_riscv_flush_icache() is defined to flush the instruction cache over an
  * address range, with the flush applying to either all threads or just the
- * caller.  We don't currently do anything with the address range, that's just
- * in there for forwards compatibility.
+ * caller. The generic implementation uses a whole-cache flush. ESP32-P4
+ * also synchronizes mapped PSRAM in the requested range.
  */
 SYSCALL_DEFINE3(riscv_flush_icache, uintptr_t, start, uintptr_t, end,
 	uintptr_t, flags)
@@ -72,6 +100,13 @@ SYSCALL_DEFINE3(riscv_flush_icache, uintptr_t, start, uintptr_t, end,
 	/* Check the reserved flags. */
 	if (unlikely(flags & ~SYS_RISCV_FLUSH_ICACHE_ALL))
 		return -EINVAL;
+
+#ifdef CONFIG_RISCV_ESP32P4_CLIC
+	if (end < start)
+		return -EINVAL;
+	if (end > start)
+		return esp32p4_flush_icache_mapped_range(start, end);
+#endif
 
 	flush_icache_mm(current->mm, flags & SYS_RISCV_FLUSH_ICACHE_LOCAL);
 
