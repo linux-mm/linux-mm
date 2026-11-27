@@ -3124,11 +3124,41 @@ static long pagemap_scan_flush_buffer(struct pagemap_scan_private *p)
 	return n;
 }
 
-static long do_pagemap_scan(struct mm_struct *mm, unsigned long uarg)
+/*
+ * Ensure the caller has PTRACE_MODE_ATTACH_FSCREDS permission for wp scan, and
+ * that the file's mm still matches the process's.
+ */
+static int pagemap_scan_check_wp(struct file *file, struct mm_struct *mm)
+{
+	struct task_struct *task;
+	struct mm_struct *task_mm;
+	bool same_mm;
+
+	if (mm == current->mm)
+		return 0;
+
+	task = get_proc_task(file_inode(file));
+	if (!task)
+		return -ESRCH;
+
+	task_mm = mm_access(task, PTRACE_MODE_ATTACH_FSCREDS);
+	put_task_struct(task);
+	if (IS_ERR(task_mm))
+		return PTR_ERR(task_mm);
+
+	same_mm = task_mm == mm;
+	mmput(task_mm);
+
+	return same_mm ? 0 : -EACCES;
+}
+
+static long do_pagemap_scan(struct file *file, unsigned long uarg)
 {
 	struct pagemap_scan_private p = {0};
+	struct mm_struct *mm = file->private_data;
 	unsigned long walk_start;
 	size_t n_ranges_out = 0;
+	bool scan_wp;
 	int ret;
 
 	if (!mmget_not_zero(mm))
@@ -3137,6 +3167,13 @@ static long do_pagemap_scan(struct mm_struct *mm, unsigned long uarg)
 	ret = pagemap_scan_get_args(&p.arg, uarg);
 	if (ret)
 		goto out_mmput;
+
+	scan_wp = p.arg.flags & PM_SCAN_WP_MATCHING;
+	if (scan_wp) {
+		ret = pagemap_scan_check_wp(file, mm);
+		if (ret)
+			goto out_mmput;
+	}
 
 	p.masks_of_interest = p.arg.category_mask | p.arg.category_anyof_mask |
 			      p.arg.return_mask;
@@ -3159,7 +3196,7 @@ static long do_pagemap_scan(struct mm_struct *mm, unsigned long uarg)
 			break;
 
 		/* Protection change for the range is going to happen. */
-		if (p.arg.flags & PM_SCAN_WP_MATCHING) {
+		if (scan_wp) {
 			mmu_notifier_range_init(&range, MMU_NOTIFY_PROTECTION_VMA, 0,
 						mm, walk_start, p.arg.end);
 			mmu_notifier_invalidate_range_start(&range);
@@ -3168,7 +3205,7 @@ static long do_pagemap_scan(struct mm_struct *mm, unsigned long uarg)
 		ret = walk_page_range(mm, walk_start, p.arg.end,
 				      &pagemap_scan_ops, &p);
 
-		if (p.arg.flags & PM_SCAN_WP_MATCHING)
+		if (scan_wp)
 			mmu_notifier_invalidate_range_end(&range);
 
 		mmap_read_unlock(mm);
@@ -3205,11 +3242,9 @@ out_mmput:
 static long do_pagemap_cmd(struct file *file, unsigned int cmd,
 			   unsigned long arg)
 {
-	struct mm_struct *mm = file->private_data;
-
 	switch (cmd) {
 	case PAGEMAP_SCAN:
-		return do_pagemap_scan(mm, arg);
+		return do_pagemap_scan(file, arg);
 
 	default:
 		return -ENOIOCTLCMD;
