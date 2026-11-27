@@ -202,6 +202,11 @@ static void __init setup_cpu_entry_area(unsigned int cpu)
 			     per_cpu_ptr(&entry_stack_storage, cpu), 1,
 			     PAGE_KERNEL);
 
+#ifdef CONFIG_TRACK_CR3
+	cea_map_percpu_pages(&cea->kernel_cr3_loaded,
+			     per_cpu_ptr(&kernel_cr3_loaded, cpu), 1,
+			     PAGE_KERNEL);
+#endif
 	/*
 	 * The Intel SDM says (Volume 3, 7.2.1):
 	 *

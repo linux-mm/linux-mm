@@ -118,6 +118,9 @@ static void __used common(void)
 	OFFSET(CPU_ENTRY_AREA_entry_stack, cpu_entry_area, entry_stack_page);
 	DEFINE(SIZEOF_entry_stack, sizeof(struct entry_stack));
 	DEFINE(MASK_entry_stack, (~(sizeof(struct entry_stack) - 1)));
+#ifdef CONFIG_TRACK_CR3
+	OFFSET(CPU_ENTRY_AREA_kernel_cr3, cpu_entry_area, kernel_cr3_loaded);
+#endif
 
 	/* Offset for fields in tss_struct */
 	OFFSET(TSS_sp0, tss_struct, x86_tss.sp0);
