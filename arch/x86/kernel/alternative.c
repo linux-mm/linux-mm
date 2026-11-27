@@ -9,6 +9,7 @@
 #include <linux/cleanup.h>
 #include <linux/kgdb.h>
 #include <linux/mmap_lock.h>
+#include <linux/sched/isolation.h>
 
 #include <asm/text-patching.h>
 #include <asm/insn.h>
@@ -16,6 +17,7 @@
 #include <asm/ibt.h>
 #include <asm/set_memory.h>
 #include <asm/nmi.h>
+#include <asm/tlbflush.h>
 
 int __read_mostly alternatives_patched;
 
@@ -2637,10 +2639,45 @@ static void do_sync_core(void *info)
 	sync_core();
 }
 
+static void __smp_text_poke_sync_each_cpu(smp_cond_func_t cond_func)
+{
+	on_each_cpu_cond(cond_func, do_sync_core, NULL, 1);
+}
+
 void smp_text_poke_sync_each_cpu(void)
 {
-	on_each_cpu(do_sync_core, NULL, 1);
+	__smp_text_poke_sync_each_cpu(NULL);
 }
+
+#ifdef CONFIG_TRACK_CR3
+/*
+ * This returns true if the IPI must be sent to @cpu;
+ *
+ * do that if @cpu is a housekeeping CPU, or if it is already executing
+ * in kernelspace.
+ */
+static bool kernel_cr3_poke_quiesce_cond(int cpu, void *info)
+{
+	if (housekeeping_cpu(cpu, HK_TYPE_KERNEL_NOISE))
+		return true;
+
+	return atomic_read(&per_cpu(kernel_cr3_loaded, cpu)) & KERNEL_CR3_IN_KERNEL;
+}
+
+void smp_text_poke_sync_each_cpu_quiescable(void)
+{
+	/*
+	 * Pairs with the MOV CR3 serializing instruction in SWITCH_TO_KERNEL_CR3
+	 *
+	 * Ensures any previous operations are visible on a remote CPU
+	 * entering the kernel and updating CR3, if this one decides to quiesce
+	 * the IPI.
+	 */
+	smp_mb();
+
+	__smp_text_poke_sync_each_cpu(kernel_cr3_poke_quiesce_cond);
+}
+#endif
 
 /*
  * NOTE: crazy scheme to allow patching Jcc.d32 but not increase the size of
@@ -2809,6 +2846,7 @@ out_put:
  */
 void smp_text_poke_batch_finish(void)
 {
+	void (*sync_fn)(void) = smp_text_poke_sync_each_cpu_quiescable;
 	unsigned char int3 = INT3_INSN_OPCODE;
 	unsigned int i;
 	int do_sync;
@@ -2845,11 +2883,20 @@ void smp_text_poke_batch_finish(void)
 	 * First step: add a INT3 trap to the address that will be patched.
 	 */
 	for (i = 0; i < text_poke_array.nr_entries; i++) {
-		text_poke_array.vec[i].old = *(u8 *)text_poke_addr(&text_poke_array.vec[i]);
-		text_poke(text_poke_addr(&text_poke_array.vec[i]), &int3, INT3_INSN_SIZE);
+		void *addr = text_poke_addr(&text_poke_array.vec[i]);
+
+		/*
+		 * There's no safe way to defer IPIs for patching text in
+		 * entry, record whether there is at least one such poke.
+		 */
+		if (is_kernel_entrytext((unsigned long)addr))
+			sync_fn = smp_text_poke_sync_each_cpu;
+
+		text_poke_array.vec[i].old = *((u8 *)addr);
+		text_poke(addr, &int3, INT3_INSN_SIZE);
 	}
 
-	smp_text_poke_sync_each_cpu();
+	sync_fn();
 
 	/*
 	 * Second step: update all but the first byte of the patched range.
@@ -2911,7 +2958,7 @@ void smp_text_poke_batch_finish(void)
 		 * not necessary and we'd be safe even without it. But
 		 * better safe than sorry (plus there's not only Intel).
 		 */
-		smp_text_poke_sync_each_cpu();
+		sync_fn();
 	}
 
 	/*
@@ -2932,7 +2979,7 @@ void smp_text_poke_batch_finish(void)
 	}
 
 	if (do_sync)
-		smp_text_poke_sync_each_cpu();
+		sync_fn();
 
 	/*
 	 * Remove and wait for refs to be zero.

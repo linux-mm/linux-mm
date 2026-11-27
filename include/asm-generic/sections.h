@@ -200,6 +200,20 @@ static inline bool is_kernel_inittext(unsigned long addr)
 }
 
 /**
+ * is_kernel_entrytext - checks if the pointer address is located in the
+ *                      .entry.text section
+ *
+ * @addr: address to check
+ *
+ * Returns: true if the address is located in .entry.text, false otherwise.
+ */
+static inline bool is_kernel_entrytext(unsigned long addr)
+{
+	return addr >= (unsigned long)__entry_text_start &&
+	       addr < (unsigned long)__entry_text_end;
+}
+
+/**
  * __is_kernel_text - checks if the pointer address is located in the
  *                    .text section
  *
