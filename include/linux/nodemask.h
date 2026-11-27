@@ -103,6 +103,22 @@ extern unsigned int nr_online_nodes;
 #define nr_online_nodes		1U
 #endif
 
+/*
+ * Compile-time bounds for optimized nodemask operations. See comments
+ * for small_cpumask_bits and large_cpumask_bits in linux/cpumask.h for
+ * detailed description.
+ */
+#if MAX_NUMNODES <= BITS_PER_LONG
+#define small_nodemask_bits ((unsigned int)MAX_NUMNODES)
+#define large_nodemask_bits ((unsigned int)MAX_NUMNODES)
+#elif MAX_NUMNODES <= 4 * BITS_PER_LONG
+#define small_nodemask_bits nr_node_ids
+#define large_nodemask_bits ((unsigned int)MAX_NUMNODES)
+#else
+#define small_nodemask_bits nr_node_ids
+#define large_nodemask_bits nr_node_ids
+#endif
+
 /**
  * nodemask_pr_args - printf args to output a nodemask
  * @maskp: nodemask to be printed
