@@ -793,8 +793,9 @@ TRACE_EVENT(sched_skip_cpuset_numa,
 		__entry->ngid		 = task_numa_group_id(tsk);
 		BUILD_BUG_ON(sizeof(nodemask_t) != \
 			     BITS_TO_LONGS(MAX_NUMNODES) * sizeof(long));
-		memcpy(__entry->mem_allowed, mem_allowed_ptr->bits,
-		       sizeof(__entry->mem_allowed));
+		/* Clear unused bits in the fixed-size trace field. */
+		nodes_copy_and_extend(*(nodemask_t *)__entry->mem_allowed,
+				      *mem_allowed_ptr);
 	),
 
 	TP_printk("comm=%s pid=%d tgid=%d ngid=%d mem_nodes_allowed=%*pbl",
@@ -802,7 +803,7 @@ TRACE_EVENT(sched_skip_cpuset_numa,
 		  __entry->pid,
 		  __entry->tgid,
 		  __entry->ngid,
-		  MAX_NUMNODES, __entry->mem_allowed)
+		  nr_node_ids, __entry->mem_allowed)
 );
 #endif /* CONFIG_NUMA_BALANCING */
 
