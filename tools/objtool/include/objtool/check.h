@@ -16,6 +16,7 @@ struct insn_state {
 	bool uaccess;
 	bool df;
 	bool noinstr;
+	bool entry;
 	s8 instr;
 };
 
@@ -98,6 +99,7 @@ struct instruction {
 	struct symbol *_sym;
 	struct stack_op *stack_ops;
 	struct cfi_state *cfi;
+	struct symbol *key;
 };
 
 /*

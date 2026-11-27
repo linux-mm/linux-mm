@@ -127,6 +127,10 @@ struct cpu_entry_area {
 	 * Reserve enough fixmap PTEs.
 	 */
 	struct debug_store_buffers cpu_debug_buffers;
+
+#ifdef CONFIG_TRACK_CR3
+	atomic_t kernel_cr3_loaded __aligned(PAGE_SIZE);
+#endif
 };
 
 #define CPU_ENTRY_AREA_SIZE		(sizeof(struct cpu_entry_area))

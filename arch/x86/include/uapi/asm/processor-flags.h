@@ -82,6 +82,9 @@
 #define X86_CR3_PCID_BITS	12
 #define X86_CR3_PCID_MASK	(_AC((1UL << X86_CR3_PCID_BITS) - 1, UL))
 
+#define X86_CR3_REENTRY_BIT 60 /* NOT a CPU flag, but a pure software abuse of the CR3 layout */
+#define X86_CR3_REENTRY    _BITULL(X86_CR3_REENTRY_BIT)
+
 #define X86_CR3_LAM_U57_BIT	61 /* Activate LAM for userspace, 62:57 bits masked */
 #define X86_CR3_LAM_U57		_BITULL(X86_CR3_LAM_U57_BIT)
 #define X86_CR3_LAM_U48_BIT	62 /* Activate LAM for userspace, 62:48 bits masked */
