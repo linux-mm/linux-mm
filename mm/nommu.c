@@ -16,6 +16,7 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/cacheflush.h>
 #include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/sched/mm.h>
@@ -395,10 +396,9 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		return brk;
 	}
 
-	/*
-	 * Ok, looks good - let it rip.
-	 */
-	flush_icache_user_range(mm->brk, brk);
+	if (flush_icache_user_range_checked(mm->brk, brk))
+		return mm->brk;
+
 	return mm->brk = brk;
 }
 
@@ -1193,7 +1193,7 @@ unsigned long do_mmap(struct file *file,
 	/* okay... we have a mapping; now we have to register it */
 	result = vma->vm_start;
 
-	current->mm->total_vm += len >> PAGE_SHIFT;
+
 
 share:
 	BUG_ON(!vma->vm_region);
@@ -1201,19 +1201,25 @@ share:
 	if (vma_iter_prealloc(&vmi, vma))
 		goto error_vma_iter_prealloc;
 
+	/* Flush the region before publishing its first executable mapping. */
+	if (vma->vm_flags & VM_EXEC && !region->vm_icache_flushed) {
+		ret = flush_icache_user_range_checked(region->vm_start,
+						      region->vm_end);
+		if (ret)
+			goto error_free_mapped;
+
+		region->vm_icache_flushed = true;
+	}
+
+	if (region->vm_usage == 1)
+		current->mm->total_vm += len >> PAGE_SHIFT;
+
 	add_nommu_region(region);
 
 	setup_vma_to_mm(vma, current->mm);
 	current->mm->map_count++;
 	/* add the VMA to the tree */
 	vma_iter_store_new(&vmi, vma);
-
-	/* we flush the region from the icache only when the first executable
-	 * mapping of it is made  */
-	if (vma->vm_flags & VM_EXEC && !region->vm_icache_flushed) {
-		flush_icache_user_range(region->vm_start, region->vm_end);
-		region->vm_icache_flushed = true;
-	}
 
 	up_write(&nommu_region_sem);
 
@@ -1250,6 +1256,7 @@ error_vma_iter_prealloc:
 	show_mem();
 	ret = -ENOMEM;
 
+error_free_mapped:
 	/* in case that the region is allocated via do_mmap_private() */
 	if ((region->vm_usage == 1) && (region->vm_flags & VM_MAPPED_COPY))
 		free_page_series(region->vm_start, region->vm_top);
