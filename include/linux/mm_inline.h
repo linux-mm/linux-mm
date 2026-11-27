@@ -106,6 +106,10 @@ static __always_inline enum lru_list folio_lru_list(const struct folio *folio)
 	return lru;
 }
 
+/* no limit on that side of the seq range for lru_gen_add_folio() */
+#define MIN_SEQ_UNBOUNDED	0UL
+#define MAX_SEQ_UNBOUNDED	ULONG_MAX
+
 #ifdef CONFIG_LRU_GEN
 
 static inline bool lru_gen_switching(void)
@@ -299,8 +303,7 @@ static inline void lru_gen_update_size(struct lruvec *lruvec, struct folio *foli
 }
 
 static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
-					      const struct folio *folio,
-					      bool reclaiming)
+					      const struct folio *folio)
 {
 	int gen;
 	int type = folio_is_file_lru(folio);
@@ -320,8 +323,6 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 	 */
 	if (folio_test_active(folio))
 		gen = MIN_NR_GENS - folio_test_workingset(folio);
-	else if (reclaiming)
-		gen = MAX_NR_GENS;
 	else if ((!folio_is_file_lru(folio) && !folio_test_swapcache(folio)) ||
 		 (folio_test_reclaim(folio) &&
 		  (folio_test_dirty(folio) || folio_test_writeback(folio))))
@@ -332,8 +333,14 @@ static inline unsigned long lru_gen_folio_seq(const struct lruvec *lruvec,
 	return max(READ_ONCE(lrugen->max_seq) - gen + 1, READ_ONCE(lrugen->min_seq[type]));
 }
 
-static inline bool __lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
-		unsigned long scanned_seq, bool reclaiming)
+/*
+ * Cap the seq to [min_seq, max_seq], see MIN_SEQ_UNBOUNDED and
+ * MAX_SEQ_UNBOUNDED for no limit. tail only picks which end of the list
+ * the folio is added to.
+ */
+static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
+				     unsigned long min_seq, unsigned long max_seq,
+				     bool tail)
 {
 	unsigned long seq;
 	unsigned long flags;
@@ -347,9 +354,9 @@ static inline bool __lru_gen_add_folio(struct lruvec *lruvec, struct folio *foli
 	if (folio_test_unevictable(folio) || !lrugen->enabled)
 		return false;
 
-	seq = lru_gen_folio_seq(lruvec, folio, reclaiming);
-	if (scanned_seq != -1UL)
-		seq = max(seq, min(scanned_seq + 1, lrugen->max_seq));
+	seq = lru_gen_folio_seq(lruvec, folio);
+	seq = max(seq, min(min_seq, lrugen->max_seq));
+	seq = min(seq, max_seq);
 	gen = lru_gen_from_seq(seq);
 	flags = (gen + 1UL) << LRU_GEN_PGOFF;
 	/* see the comment on MIN_NR_GENS about PG_active */
@@ -357,23 +364,12 @@ static inline bool __lru_gen_add_folio(struct lruvec *lruvec, struct folio *foli
 
 	lru_gen_update_size(lruvec, folio, -1, gen);
 	/* for folio_rotate_reclaimable() */
-	if (reclaiming)
+	if (tail)
 		list_add_tail(&folio->lru, &lrugen->folios[gen][type][zone]);
 	else
 		list_add(&folio->lru, &lrugen->folios[gen][type][zone]);
 
 	return true;
-}
-
-static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
-{
-	return __lru_gen_add_folio(lruvec, folio, -1UL, reclaiming);
-}
-
-static inline bool lru_gen_add_rejected_folio(struct lruvec *lruvec, struct folio *folio,
-		unsigned long scanned_seq)
-{
-	return __lru_gen_add_folio(lruvec, folio, scanned_seq, false);
 }
 
 static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
@@ -429,13 +425,9 @@ static inline bool lru_gen_in_fault(void)
 	return false;
 }
 
-static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
-{
-	return false;
-}
-
-static inline bool lru_gen_add_rejected_folio(struct lruvec *lruvec, struct folio *folio,
-		unsigned long scanned_seq)
+static inline bool lru_gen_add_folio(struct lruvec *lruvec, struct folio *folio,
+				     unsigned long min_seq, unsigned long max_seq,
+				     bool tail)
 {
 	return false;
 }
@@ -459,7 +451,7 @@ void lruvec_add_folio(struct lruvec *lruvec, struct folio *folio)
 
 	VM_WARN_ON_ONCE_FOLIO(!folio_matches_lruvec(folio, lruvec), folio);
 
-	if (lru_gen_add_folio(lruvec, folio, false))
+	if (lru_gen_add_folio(lruvec, folio, MIN_SEQ_UNBOUNDED, MAX_SEQ_UNBOUNDED, false))
 		return;
 
 	update_lru_size(lruvec, lru, folio_zonenum(folio),
@@ -475,8 +467,13 @@ void lruvec_add_folio_tail(struct lruvec *lruvec, struct folio *folio)
 
 	VM_WARN_ON_ONCE_FOLIO(!folio_matches_lruvec(folio, lruvec), folio);
 
-	if (lru_gen_add_folio(lruvec, folio, true))
+#ifdef CONFIG_LRU_GEN
+	/* the tail of the LRU is the tail of the oldest gen */
+	if (lru_gen_add_folio(lruvec, folio, MIN_SEQ_UNBOUNDED,
+			      READ_ONCE(lruvec->lrugen.min_seq[folio_is_file_lru(folio)]),
+			      true))
 		return;
+#endif
 
 	update_lru_size(lruvec, lru, folio_zonenum(folio),
 			folio_nr_pages(folio));

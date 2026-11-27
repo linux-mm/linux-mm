@@ -1916,7 +1916,8 @@ static unsigned int move_folios_to_lru(struct list_head *list, unsigned long seq
 		    !folio_test_referenced(folio) &&
 		    folio_ref_count(folio) == folio_expected_ref_count(folio))
 			lruvec_add_folio_tail(lruvec, folio);
-		else if (seq == -1UL || !lru_gen_add_rejected_folio(lruvec, folio, seq))
+		else if (seq == -1UL ||
+			 !lru_gen_add_folio(lruvec, folio, seq + 1, MAX_SEQ_UNBOUNDED, false))
 			lruvec_add_folio(lruvec, folio);
 
 		nr_pages = folio_nr_pages(folio);
@@ -5513,10 +5514,11 @@ static bool fill_evictable(struct lruvec *lruvec)
 		while (!list_empty(head)) {
 			bool success;
 			struct folio *folio;
+			unsigned long max_seq;
 
 			/*
 			 * lru_gen_add_folio() uses list_add_tail() rather
-			 * than list_add() when reclaiming is true.  Match
+			 * than list_add() when tail is true.  Match
 			 * its ordering to avoid cold/hot inversion.
 			 */
 			if (active)
@@ -5530,11 +5532,11 @@ static bool fill_evictable(struct lruvec *lruvec)
 			VM_WARN_ON_ONCE_FOLIO(folio_lru_gen(folio) != -1, folio);
 
 			lruvec_del_folio(lruvec, folio);
-			/*
-			 * Borrow reclaiming=true to place inactive folios in
-			 * the older gens.
-			 */
-			success = lru_gen_add_folio(lruvec, folio, !active);
+			/* inactive folios go to the tail of the oldest gen */
+			max_seq = active ? MAX_SEQ_UNBOUNDED :
+				  READ_ONCE(lruvec->lrugen.min_seq[type]);
+			success = lru_gen_add_folio(lruvec, folio, MIN_SEQ_UNBOUNDED,
+						    max_seq, !active);
 			VM_WARN_ON_ONCE(!success);
 
 			if (!--remaining)
