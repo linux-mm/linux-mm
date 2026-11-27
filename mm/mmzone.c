@@ -19,7 +19,7 @@ struct pglist_data *next_online_pgdat(struct pglist_data *pgdat)
 {
 	int nid = next_online_node(pgdat->node_id);
 
-	if (nid == MAX_NUMNODES)
+	if (nid >= nr_node_ids)
 		return NULL;
 	return NODE_DATA(nid);
 }

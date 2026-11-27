@@ -55,7 +55,7 @@ static inline bool hstate_is_gigantic_no_runtime(struct hstate *h)
 static inline int next_node_allowed(int nid, nodemask_t *nodes_allowed)
 {
 	nid = next_node_in(nid, *nodes_allowed);
-	VM_BUG_ON(nid >= MAX_NUMNODES);
+	VM_BUG_ON(nid >= nr_node_ids);
 
 	return nid;
 }

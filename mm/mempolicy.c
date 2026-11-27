@@ -1123,7 +1123,7 @@ static long do_set_mempolicy(unsigned short mode, unsigned short flags,
 	current->mempolicy = new;
 	if (new && (new->mode == MPOL_INTERLEAVE ||
 		    new->mode == MPOL_WEIGHTED_INTERLEAVE)) {
-		current->il_prev = MAX_NUMNODES-1;
+		current->il_prev = nr_node_ids - 1;
 		current->il_weight = 0;
 	}
 	task_unlock(current);
@@ -2141,7 +2141,7 @@ retry:
 		node = next_node_in(node, policy->nodes);
 		if (read_mems_allowed_retry(cpuset_mems_cookie))
 			goto retry;
-		if (node == MAX_NUMNODES)
+		if (node >= nr_node_ids)
 			return node;
 		current->il_prev = node;
 		current->il_weight = get_il_weight(node);
@@ -2162,7 +2162,7 @@ static unsigned int interleave_nodes(struct mempolicy *policy)
 		nid = next_node_in(current->il_prev, policy->nodes);
 	} while (read_mems_allowed_retry(cpuset_mems_cookie));
 
-	if (nid < MAX_NUMNODES)
+	if (nid < nr_node_ids)
 		current->il_prev = nid;
 	return nid;
 }
@@ -2261,7 +2261,7 @@ static unsigned int weighted_interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 	 * Clamp this loop to a single pass (nnodes) to keep the walk
 	 * bounded by node count.
 	 */
-	while (target && nnodes-- && nid < MAX_NUMNODES) {
+	while (target && nnodes-- && nid < nr_node_ids) {
 		/* detect system default usage */
 		weight = table ? table[nid] : 1;
 		if (target < weight)
@@ -2272,7 +2272,7 @@ static unsigned int weighted_interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 	rcu_read_unlock();
 
 	/* the mask emptied under the walk */
-	if (nid >= MAX_NUMNODES)
+	if (nid >= nr_node_ids)
 		return numa_node_id();
 	return nid;
 }
@@ -2295,11 +2295,11 @@ static unsigned int interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 	nid = first_node(pol->nodes);
 
 	/* A concurrent cpuset rebind may cause us to see an empty nodemask */
-	for (i = 0; i < target && nid < MAX_NUMNODES; i++)
+	for (i = 0; i < target && nid < nr_node_ids; i++)
 		nid = next_node_in(nid, pol->nodes);
 
 	/* the mask emptied under the walk */
-	if (nid >= MAX_NUMNODES)
+	if (nid >= nr_node_ids)
 		return numa_node_id();
 	return nid;
 }
@@ -2697,7 +2697,7 @@ static unsigned long alloc_pages_bulk_weighted_interleave(gfp_t gfp,
 	unsigned int weight_total = 0;
 	unsigned long rem_pages = nr_pages;
 	int nnodes, node;
-	int resume_node = MAX_NUMNODES - 1;
+	int resume_node = nr_node_ids - 1;
 	u8 resume_weight = 0;
 	int prev_node;
 	int i;
@@ -2759,12 +2759,12 @@ static unsigned long alloc_pages_bulk_weighted_interleave(gfp_t gfp,
 	rounds = rem_pages / weight_total;
 	delta = rem_pages % weight_total;
 	resume_node = next_node_in(prev_node, pol->nodes);
-	if (resume_node >= MAX_NUMNODES)
+	if (resume_node >= nr_node_ids)
 		goto out;
 	resume_weight = table ? table[resume_node] : 1;
 	for (i = 0; i < nnodes; i++) {
 		node = next_node_in(prev_node, pol->nodes);
-		if (node >= MAX_NUMNODES)
+		if (node >= nr_node_ids)
 			break;
 		weight = table ? table[node] : 1;
 		node_pages = weight * rounds;
