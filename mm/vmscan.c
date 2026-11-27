@@ -4812,6 +4812,8 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 			struct folio *folio = lru_to_folio(head);
 			int delta = folio_nr_pages(folio);
 
+			prefetchw_prev_lru_folio(folio, head);
+
 			VM_WARN_ON_ONCE_FOLIO(folio_test_unevictable(folio), folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_test_active(folio), folio);
 			VM_WARN_ON_ONCE_FOLIO(folio_is_file_lru(folio) != type, folio);
