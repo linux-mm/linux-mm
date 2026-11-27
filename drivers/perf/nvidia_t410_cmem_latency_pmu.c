@@ -725,7 +725,7 @@ static int __init cmem_lat_pmu_init(void)
 static void __exit cmem_lat_pmu_exit(void)
 {
 	platform_driver_unregister(&cmem_lat_pmu_driver);
-	cpuhp_remove_multi_state(cmem_lat_pmu_cpuhp_state);
+	cpuhp_remove_state_multi(cmem_lat_pmu_cpuhp_state);
 }
 
 module_init(cmem_lat_pmu_init);

@@ -998,7 +998,7 @@ void iova_cache_put(void)
 	}
 	iova_cache_users--;
 	if (!iova_cache_users) {
-		cpuhp_remove_multi_state(CPUHP_IOMMU_IOVA_DEAD);
+		cpuhp_remove_state_multi(CPUHP_IOMMU_IOVA_DEAD);
 		kmem_cache_destroy(iova_cache);
 		kmem_cache_destroy(iova_magazine_cache);
 	}

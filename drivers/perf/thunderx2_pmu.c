@@ -1026,7 +1026,7 @@ static int __init tx2_uncore_driver_init(void)
 	}
 	ret = platform_driver_register(&tx2_uncore_driver);
 	if (ret)
-		cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_CAVIUM_TX2_UNCORE_ONLINE);
+		cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_CAVIUM_TX2_UNCORE_ONLINE);
 
 	return ret;
 }
@@ -1035,7 +1035,7 @@ module_init(tx2_uncore_driver_init);
 static void __exit tx2_uncore_driver_exit(void)
 {
 	platform_driver_unregister(&tx2_uncore_driver);
-	cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_CAVIUM_TX2_UNCORE_ONLINE);
+	cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_CAVIUM_TX2_UNCORE_ONLINE);
 }
 module_exit(tx2_uncore_driver_exit);
 

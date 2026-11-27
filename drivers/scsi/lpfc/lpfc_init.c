@@ -15715,7 +15715,7 @@ lpfc_init(void)
 	return error;
 
 unwind:
-	cpuhp_remove_multi_state(lpfc_cpuhp_state);
+	cpuhp_remove_state_multi(lpfc_cpuhp_state);
 cpuhp_failure:
 	fc_release_transport(lpfc_transport_template);
 	fc_release_transport(lpfc_vport_transport_template);
@@ -15816,7 +15816,7 @@ lpfc_exit(void)
 {
 	misc_deregister(&lpfc_mgmt_dev);
 	pci_unregister_driver(&lpfc_driver);
-	cpuhp_remove_multi_state(lpfc_cpuhp_state);
+	cpuhp_remove_state_multi(lpfc_cpuhp_state);
 	fc_release_transport(lpfc_transport_template);
 	fc_release_transport(lpfc_vport_transport_template);
 	idr_destroy(&lpfc_hba_index);

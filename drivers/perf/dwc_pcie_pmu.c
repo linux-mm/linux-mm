@@ -928,7 +928,7 @@ static int __init dwc_pcie_pmu_init(void)
 err_unregister_driver:
 	platform_driver_unregister(&dwc_pcie_pmu_driver);
 err_remove_cpuhp:
-	cpuhp_remove_multi_state(dwc_pcie_pmu_hp_state);
+	cpuhp_remove_state_multi(dwc_pcie_pmu_hp_state);
 err_cleanup:
 	dwc_pcie_cleanup_devices();
 	return ret;
@@ -940,7 +940,7 @@ static void __exit dwc_pcie_pmu_exit(void)
 		bus_unregister_notifier(&pci_bus_type, &dwc_pcie_pmu_nb);
 	dwc_pcie_cleanup_devices();
 	platform_driver_unregister(&dwc_pcie_pmu_driver);
-	cpuhp_remove_multi_state(dwc_pcie_pmu_hp_state);
+	cpuhp_remove_state_multi(dwc_pcie_pmu_hp_state);
 }
 
 module_init(dwc_pcie_pmu_init);

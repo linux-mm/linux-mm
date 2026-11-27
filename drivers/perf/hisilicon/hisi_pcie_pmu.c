@@ -989,7 +989,7 @@ static int __init hisi_pcie_module_init(void)
 
 	ret = pci_register_driver(&hisi_pcie_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_HISI_PCIE_PMU_ONLINE);
+		cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_HISI_PCIE_PMU_ONLINE);
 
 	return ret;
 }
@@ -998,7 +998,7 @@ module_init(hisi_pcie_module_init);
 static void __exit hisi_pcie_module_exit(void)
 {
 	pci_unregister_driver(&hisi_pcie_pmu_driver);
-	cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_HISI_PCIE_PMU_ONLINE);
+	cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_HISI_PCIE_PMU_ONLINE);
 }
 module_exit(hisi_pcie_module_exit);
 

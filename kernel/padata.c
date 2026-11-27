@@ -1111,7 +1111,7 @@ void __init padata_init(void)
 
 remove_online_state:
 #ifdef CONFIG_HOTPLUG_CPU
-	cpuhp_remove_multi_state(hp_online);
+	cpuhp_remove_state_multi(hp_online);
 err:
 #endif
 	pr_warn("padata: initialization failed\n");

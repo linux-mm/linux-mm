@@ -1016,7 +1016,7 @@ static int __init arm_smmu_pmu_init(void)
 
 	ret = platform_driver_register(&smmu_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(cpuhp_state_num);
+		cpuhp_remove_state_multi(cpuhp_state_num);
 
 	return ret;
 }
@@ -1025,7 +1025,7 @@ module_init(arm_smmu_pmu_init);
 static void __exit arm_smmu_pmu_exit(void)
 {
 	platform_driver_unregister(&smmu_pmu_driver);
-	cpuhp_remove_multi_state(cpuhp_state_num);
+	cpuhp_remove_state_multi(cpuhp_state_num);
 }
 
 module_exit(arm_smmu_pmu_exit);

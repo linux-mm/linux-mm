@@ -1425,7 +1425,7 @@ static int __init hisi_ptt_init(void)
 
 	ret = pci_register_driver(&hisi_ptt_driver);
 	if (ret)
-		cpuhp_remove_multi_state(hisi_ptt_pmu_online);
+		cpuhp_remove_state_multi(hisi_ptt_pmu_online);
 
 	return ret;
 }
@@ -1434,7 +1434,7 @@ module_init(hisi_ptt_init);
 static void __exit hisi_ptt_exit(void)
 {
 	pci_unregister_driver(&hisi_ptt_driver);
-	cpuhp_remove_multi_state(hisi_ptt_pmu_online);
+	cpuhp_remove_state_multi(hisi_ptt_pmu_online);
 }
 module_exit(hisi_ptt_exit);
 

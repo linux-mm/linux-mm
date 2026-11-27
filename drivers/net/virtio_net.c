@@ -7354,9 +7354,9 @@ static __init int virtio_net_driver_init(void)
 		goto err_virtio;
 	return 0;
 err_virtio:
-	cpuhp_remove_multi_state(CPUHP_VIRT_NET_DEAD);
+	cpuhp_remove_state_multi(CPUHP_VIRT_NET_DEAD);
 err_dead:
-	cpuhp_remove_multi_state(virtionet_online);
+	cpuhp_remove_state_multi(virtionet_online);
 out:
 	return ret;
 }
@@ -7365,8 +7365,8 @@ module_init(virtio_net_driver_init);
 static __exit void virtio_net_driver_exit(void)
 {
 	unregister_virtio_driver(&virtio_net_driver);
-	cpuhp_remove_multi_state(CPUHP_VIRT_NET_DEAD);
-	cpuhp_remove_multi_state(virtionet_online);
+	cpuhp_remove_state_multi(CPUHP_VIRT_NET_DEAD);
+	cpuhp_remove_state_multi(virtionet_online);
 }
 module_exit(virtio_net_driver_exit);
 

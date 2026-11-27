@@ -477,7 +477,7 @@ static int __init tad_pmu_init(void)
 	tad_pmu_cpuhp_state = ret;
 	ret = platform_driver_register(&tad_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(tad_pmu_cpuhp_state);
+		cpuhp_remove_state_multi(tad_pmu_cpuhp_state);
 
 	return ret;
 }
@@ -485,7 +485,7 @@ static int __init tad_pmu_init(void)
 static void __exit tad_pmu_exit(void)
 {
 	platform_driver_unregister(&tad_pmu_driver);
-	cpuhp_remove_multi_state(tad_pmu_cpuhp_state);
+	cpuhp_remove_state_multi(tad_pmu_cpuhp_state);
 }
 
 module_init(tad_pmu_init);

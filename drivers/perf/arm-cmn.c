@@ -2969,7 +2969,7 @@ static int __init arm_cmn_init(void)
 
 	ret = platform_driver_register(&arm_cmn_driver);
 	if (ret) {
-		cpuhp_remove_multi_state(arm_cmn_hp_state);
+		cpuhp_remove_state_multi(arm_cmn_hp_state);
 		debugfs_remove(arm_cmn_debugfs);
 	}
 	return ret;
@@ -2978,7 +2978,7 @@ static int __init arm_cmn_init(void)
 static void __exit arm_cmn_exit(void)
 {
 	platform_driver_unregister(&arm_cmn_driver);
-	cpuhp_remove_multi_state(arm_cmn_hp_state);
+	cpuhp_remove_state_multi(arm_cmn_hp_state);
 	debugfs_remove(arm_cmn_debugfs);
 }
 

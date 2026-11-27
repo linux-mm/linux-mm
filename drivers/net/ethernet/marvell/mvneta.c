@@ -5967,9 +5967,9 @@ static int __init mvneta_driver_init(void)
 	return 0;
 
 err:
-	cpuhp_remove_multi_state(CPUHP_NET_MVNETA_DEAD);
+	cpuhp_remove_state_multi(CPUHP_NET_MVNETA_DEAD);
 err_dead:
-	cpuhp_remove_multi_state(online_hpstate);
+	cpuhp_remove_state_multi(online_hpstate);
 out:
 	return ret;
 }
@@ -5978,8 +5978,8 @@ module_init(mvneta_driver_init);
 static void __exit mvneta_driver_exit(void)
 {
 	platform_driver_unregister(&mvneta_driver);
-	cpuhp_remove_multi_state(CPUHP_NET_MVNETA_DEAD);
-	cpuhp_remove_multi_state(online_hpstate);
+	cpuhp_remove_state_multi(CPUHP_NET_MVNETA_DEAD);
+	cpuhp_remove_state_multi(online_hpstate);
 }
 module_exit(mvneta_driver_exit);
 

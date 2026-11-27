@@ -471,7 +471,7 @@ To remove a previously set up state, the following functions are provided:
 * cpuhp_remove_state(state)
 * cpuhp_remove_state_nocalls(state)
 * cpuhp_remove_state_nocalls_cpuslocked(state)
-* cpuhp_remove_multi_state(state)
+* cpuhp_remove_state_multi(state)
 
 The @state argument is either a statically allocated state or the state
 number which was allocated in the dynamic range by cpuhp_setup_state*(). If
@@ -481,7 +481,7 @@ available for dynamic allocation again.
 The functions differ in the way how the installed callbacks are treated:
 
   * cpuhp_remove_state_nocalls(), cpuhp_remove_state_nocalls_cpuslocked()
-    and cpuhp_remove_multi_state() only remove the callbacks.
+    and cpuhp_remove_state_multi() only remove the callbacks.
 
   * cpuhp_remove_state() removes the callbacks and invokes the teardown
     callback (if not NULL) for all online CPUs which have currently a state
@@ -611,7 +611,7 @@ ONLINE section for notifications on online and offline operation::
    ....
    cpuhp_state_remove_instance(state, &inst2->node);
    ....
-   cpuhp_remove_multi_state(state);
+   cpuhp_remove_state_multi(state);
 
 
 Testing of hotplug states

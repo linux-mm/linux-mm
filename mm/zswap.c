@@ -1880,7 +1880,7 @@ lru_fail:
 shrinker_fail:
 	destroy_workqueue(shrink_wq);
 shrink_wq_fail:
-	cpuhp_remove_multi_state(CPUHP_MM_ZSWP_POOL_PREPARE);
+	cpuhp_remove_state_multi(CPUHP_MM_ZSWP_POOL_PREPARE);
 hp_fail:
 	kmem_cache_destroy(zswap_entry_cache);
 cache_fail:

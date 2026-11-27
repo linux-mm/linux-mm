@@ -765,7 +765,7 @@ static int __init dmc620_pmu_init(void)
 
 	ret = platform_driver_register(&dmc620_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(cpuhp_state_num);
+		cpuhp_remove_state_multi(cpuhp_state_num);
 
 	return ret;
 }
@@ -773,7 +773,7 @@ static int __init dmc620_pmu_init(void)
 static void __exit dmc620_pmu_exit(void)
 {
 	platform_driver_unregister(&dmc620_pmu_driver);
-	cpuhp_remove_multi_state(cpuhp_state_num);
+	cpuhp_remove_state_multi(cpuhp_state_num);
 }
 
 module_init(dmc620_pmu_init);

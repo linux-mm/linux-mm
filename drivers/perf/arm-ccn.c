@@ -1543,14 +1543,14 @@ static int __init arm_ccn_init(void)
 
 	ret = platform_driver_register(&arm_ccn_driver);
 	if (ret)
-		cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_CCN_ONLINE);
+		cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_CCN_ONLINE);
 	return ret;
 }
 
 static void __exit arm_ccn_exit(void)
 {
 	platform_driver_unregister(&arm_ccn_driver);
-	cpuhp_remove_multi_state(CPUHP_AP_PERF_ARM_CCN_ONLINE);
+	cpuhp_remove_state_multi(CPUHP_AP_PERF_ARM_CCN_ONLINE);
 }
 
 module_init(arm_ccn_init);

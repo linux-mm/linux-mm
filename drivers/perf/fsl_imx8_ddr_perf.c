@@ -877,7 +877,7 @@ static int ddr_perf_probe(struct platform_device *pdev)
 ddr_perf_err:
 	cpuhp_state_remove_instance_nocalls(pmu->cpuhp_state, &pmu->node);
 cpuhp_instance_err:
-	cpuhp_remove_multi_state(pmu->cpuhp_state);
+	cpuhp_remove_state_multi(pmu->cpuhp_state);
 idr_free:
 	ida_free(ida, pmu->id);
 	dev_warn(&pdev->dev, "i.MX8 DDR Perf PMU failed (%d), disabled\n", ret);
@@ -889,7 +889,7 @@ static void ddr_perf_remove(struct platform_device *pdev)
 	struct ddr_pmu *pmu = platform_get_drvdata(pdev);
 
 	cpuhp_state_remove_instance_nocalls(pmu->cpuhp_state, &pmu->node);
-	cpuhp_remove_multi_state(pmu->cpuhp_state);
+	cpuhp_remove_state_multi(pmu->cpuhp_state);
 
 	perf_pmu_unregister(&pmu->pmu);
 

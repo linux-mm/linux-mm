@@ -593,7 +593,7 @@ static int __init fujitsu_uncore_pmu_init(void)
 
 	ret = platform_driver_register(&fujitsu_uncore_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(uncore_pmu_cpuhp_state);
+		cpuhp_remove_state_multi(uncore_pmu_cpuhp_state);
 
 	return ret;
 }
@@ -601,7 +601,7 @@ static int __init fujitsu_uncore_pmu_init(void)
 static void __exit fujitsu_uncore_pmu_exit(void)
 {
 	platform_driver_unregister(&fujitsu_uncore_pmu_driver);
-	cpuhp_remove_multi_state(uncore_pmu_cpuhp_state);
+	cpuhp_remove_state_multi(uncore_pmu_cpuhp_state);
 }
 
 module_init(fujitsu_uncore_pmu_init);

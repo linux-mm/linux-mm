@@ -952,7 +952,7 @@ static int __init hisi_l3c_pmu_module_init(void)
 
 	ret = platform_driver_register(&hisi_l3c_pmu_driver);
 	if (ret)
-		cpuhp_remove_multi_state(hisi_l3c_pmu_cpuhp_state);
+		cpuhp_remove_state_multi(hisi_l3c_pmu_cpuhp_state);
 
 	return ret;
 }
@@ -961,7 +961,7 @@ module_init(hisi_l3c_pmu_module_init);
 static void __exit hisi_l3c_pmu_module_exit(void)
 {
 	platform_driver_unregister(&hisi_l3c_pmu_driver);
-	cpuhp_remove_multi_state(hisi_l3c_pmu_cpuhp_state);
+	cpuhp_remove_state_multi(hisi_l3c_pmu_cpuhp_state);
 }
 module_exit(hisi_l3c_pmu_module_exit);
 

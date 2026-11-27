@@ -10073,7 +10073,7 @@ out_free_savedcmd:
 out_free_temp_buffer:
 	ring_buffer_free(temp_buffer);
 out_rm_hp_state:
-	cpuhp_remove_multi_state(CPUHP_TRACE_RB_PREPARE);
+	cpuhp_remove_state_multi(CPUHP_TRACE_RB_PREPARE);
 out_free_cpumask:
 	free_cpumask_var(global_trace.tracing_cpumask);
 out_free_buffer_mask:
