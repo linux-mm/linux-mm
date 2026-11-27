@@ -30,6 +30,7 @@
  * void nodes_or(dst, src1, src2)	dst = src1 | src2  [union]
  * void nodes_xor(dst, src1, src2)	dst = src1 ^ src2
  * bool nodes_andnot(dst, src1, src2)	dst = src1 & ~src2
+ * void nodes_copy_and_extend(dst, src)	Copy runtime nodes, clear remaining bits
  * void nodes_complement(dst, src)	dst = ~src
  *
  * bool nodes_equal(mask1, mask2)	Does mask1 == mask2?
@@ -216,6 +217,16 @@ static __always_inline void __nodes_copy(nodemask_t *dstp,
 					const nodemask_t *srcp, unsigned int nbits)
 {
 	bitmap_copy(dstp->bits, srcp->bits, nbits);
+}
+
+/* Copy runtime nodes and clear the rest of the destination's storage. */
+#define nodes_copy_and_extend(dst, src) \
+		__nodes_copy_and_extend(&(dst), &(src), nr_node_ids, MAX_NUMNODES)
+static __always_inline void __nodes_copy_and_extend(nodemask_t *dstp,
+					const nodemask_t *srcp,
+					unsigned int nbits, unsigned int size)
+{
+	bitmap_copy_and_extend(dstp->bits, srcp->bits, nbits, size);
 }
 
 #define nodes_complement(dst, src) \
