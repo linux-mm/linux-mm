@@ -4838,13 +4838,20 @@ __pcs_replace_empty_main(struct kmem_cache *s, struct slub_percpu_sheaves *pcs,
 	if (!allow_spin)
 		return NULL;
 
+	/*
+	 * We don't want refills to rely on __GFP_NOFAIL or memalloc reserves to
+	 * succeed, nor to warn on failure. Leave that to the fallback.
+	 */
+	gfp &= ~__GFP_NOFAIL;
+	gfp |= __GFP_NOMEMALLOC | __GFP_NOWARN;
+
 	if (!empty) {
 		empty = alloc_empty_sheaf(s, gfp, alloc_flags);
 		if (!empty)
 			return NULL;
 	}
 
-	if (refill_sheaf(s, empty, gfp | __GFP_NOMEMALLOC | __GFP_NOWARN)) {
+	if (refill_sheaf(s, empty, gfp)) {
 		/*
 		 * we must be very low on memory so don't bother
 		 * with the barn
