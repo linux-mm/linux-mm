@@ -9,6 +9,8 @@
 #include <asm/ptrace-abi.h>
 #include <asm/msr.h>
 #include <asm/nospec-branch.h>
+#include <asm/jump_label.h>
+#include <asm/pti.h>
 
 /*
 
@@ -170,9 +172,74 @@ For 32-bit we have the following conventions - kernel is built with
 	andq    $(~PTI_USER_PGTABLE_AND_PCID_MASK), \reg
 .endm
 
+.macro TRACK_CR3_KERNEL_ENTRY
+#ifdef CONFIG_TRACK_CR3
+	STATIC_BRANCH_FALSE_LIKELY housekeeping_overridden, .Lend_\@
+	orl $KERNEL_CR3_IN_KERNEL, PER_CPU_VAR(kernel_cr3_loaded)
+.Lend_\@:
+#endif // CONFIG_TRACK_CR3
+.endm
+
+.macro TRACK_CR3_KERNEL_EXIT
+#ifdef CONFIG_TRACK_CR3
+	STATIC_BRANCH_FALSE_LIKELY housekeeping_overridden, .Lend_\@
+	movl $KERNEL_CR3_IN_USER, PER_CPU_VAR(kernel_cr3_loaded)
+.Lend_\@:
+#endif // CONFIG_TRACK_CR3
+.endm
+
+.macro PARANOID_TRACK_CR3_KERNEL_ENTRY scratch_reg:req save_reg:req
+#ifdef CONFIG_TRACK_CR3
+	STATIC_BRANCH_FALSE_LIKELY housekeeping_overridden, .Lend_\@
+
+	/*
+	 * Due to FSGSBASE hilarity, we don't have a viable GS to rely on to
+	 * do a classic percpu access here.
+	 * Instead, fetch the percpu address via the CEA.
+	 */
+	subq $10, %rsp
+	sgdt (%rsp)
+	movq 2(%rsp), \scratch_reg /* GDT address */
+	addq $10, %rsp
+
+	/*
+	 * We may have just interrupted another entry that has set
+	 * $KERNEL_CR3_IN_KERNEL, but hasn't written to CR3 yet.
+	 * Abuse \save_reg to remember that at exit and to leave
+	 * @kernel_cr3_loaded as it was.
+	 */
+	testl $KERNEL_CR3_IN_KERNEL, CPU_ENTRY_AREA_kernel_cr3(\scratch_reg)
+	jz .Ltrack_\@
+	bts $X86_CR3_REENTRY_BIT, \save_reg
+	jmp .Lend_restore_\@
+.Ltrack_\@:
+	movl $KERNEL_CR3_IN_KERNEL, CPU_ENTRY_AREA_kernel_cr3(\scratch_reg)
+.Lend_restore_\@:
+	/* CEA hackery done; restore @scratch_reg */
+	mov \save_reg, \scratch_reg
+	btr $X86_CR3_REENTRY_BIT, \scratch_reg
+.Lend_\@:
+#endif // CONFIG_TRACK_CR3
+.endm
+
+.macro PARANOID_TRACK_CR3_KERNEL_EXIT save_reg:req
+#ifdef CONFIG_TRACK_CR3
+	STATIC_BRANCH_FALSE_LIKELY housekeeping_overridden, .Lend_\@
+	/*
+	 * If we entered with @kernel_cr3_loaded already written to, leave it
+	 * as is.
+	 */
+	btr $X86_CR3_REENTRY_BIT, \save_reg
+	jc .Lend_\@
+	movl $KERNEL_CR3_IN_USER, PER_CPU_VAR(kernel_cr3_loaded)
+.Lend_\@:
+#endif // CONFIG_TRACK_CR3
+.endm
+
 .macro SWITCH_TO_KERNEL_CR3 scratch_reg:req
 	ALTERNATIVE "jmp .Lend_\@", "", X86_FEATURE_PTI
 	mov	%cr3, \scratch_reg
+	TRACK_CR3_KERNEL_ENTRY
 	ADJUST_KERNEL_CR3 \scratch_reg
 	mov	\scratch_reg, %cr3
 .Lend_\@:
@@ -182,6 +249,7 @@ For 32-bit we have the following conventions - kernel is built with
 	PER_CPU_VAR(cpu_tlbstate + TLB_STATE_user_pcid_flush_mask)
 
 .macro SWITCH_TO_USER_CR3 scratch_reg:req scratch_reg2:req
+	TRACK_CR3_KERNEL_EXIT
 	mov	%cr3, \scratch_reg
 
 	ALTERNATIVE "jmp .Lwrcr3_\@", "", X86_FEATURE_PCID
@@ -239,6 +307,7 @@ For 32-bit we have the following conventions - kernel is built with
 	bt	$PTI_USER_PGTABLE_BIT, \scratch_reg
 	jnc	.Ldone_\@
 
+	PARANOID_TRACK_CR3_KERNEL_ENTRY \scratch_reg \save_reg
 	ADJUST_KERNEL_CR3 \scratch_reg
 	movq	\scratch_reg, %cr3
 
@@ -256,6 +325,8 @@ For 32-bit we have the following conventions - kernel is built with
 	 */
 	bt	$PTI_USER_PGTABLE_BIT, \save_reg
 	jnc	.Lend_\@
+
+	PARANOID_TRACK_CR3_KERNEL_EXIT \save_reg
 
 	ALTERNATIVE "jmp .Lwrcr3_\@", "", X86_FEATURE_PCID
 
