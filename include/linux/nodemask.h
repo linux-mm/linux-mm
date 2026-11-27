@@ -271,29 +271,32 @@ static __always_inline int __nodes_weight(const nodemask_t *srcp, unsigned int n
 /* FIXME: better would be to fix all architectures to never return
           > MAX_NUMNODES, then the silly min()s could be dropped. */
 
-#define first_node(src) __first_node(&(src))
-static __always_inline unsigned int __first_node(const nodemask_t *srcp)
+#define first_node(src) __first_node(&(src), MAX_NUMNODES)
+static __always_inline unsigned int __first_node(const nodemask_t *srcp,
+						unsigned int nbits)
 {
-	return min(MAX_NUMNODES, find_first_bit(srcp->bits, MAX_NUMNODES));
+	return min(nbits, find_first_bit(srcp->bits, nbits));
 }
 
-#define next_node(n, src) __next_node((n), &(src))
-static __always_inline unsigned int __next_node(int n, const nodemask_t *srcp)
+#define next_node(n, src) __next_node((n), &(src), MAX_NUMNODES)
+static __always_inline unsigned int __next_node(int n, const nodemask_t *srcp,
+					       unsigned int nbits)
 {
-	return min(MAX_NUMNODES, find_next_bit(srcp->bits, MAX_NUMNODES, n+1));
+	return min(nbits, find_next_bit(srcp->bits, nbits, n + 1));
 }
 
 /*
  * Find the next present node in src, starting after node n, wrapping around to
  * the first node in src if needed.  Returns MAX_NUMNODES if src is empty.
  */
-#define next_node_in(n, src) __next_node_in((n), &(src))
-static __always_inline unsigned int __next_node_in(int node, const nodemask_t *srcp)
+#define next_node_in(n, src) __next_node_in((n), &(src), MAX_NUMNODES)
+static __always_inline unsigned int __next_node_in(int node, const nodemask_t *srcp,
+						  unsigned int nbits)
 {
-	unsigned int ret = __next_node(node, srcp);
+	unsigned int ret = __next_node(node, srcp, nbits);
 
-	if (ret == MAX_NUMNODES)
-		ret = __first_node(srcp);
+	if (ret == nbits)
+		ret = __first_node(srcp, nbits);
 	return ret;
 }
 
