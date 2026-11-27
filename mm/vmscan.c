@@ -4730,7 +4730,8 @@ static bool sort_folio(struct lruvec *lruvec, struct folio *folio, struct scan_c
 	return false;
 }
 
-static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct scan_control *sc)
+static bool isolate_folio(struct lruvec *lruvec, struct folio *folio,
+			  struct scan_control *sc, long *nr_taken)
 {
 	bool success;
 
@@ -4748,7 +4749,7 @@ static bool isolate_folio(struct lruvec *lruvec, struct folio *folio, struct sca
 	if (!folio_test_referenced(folio))
 		folio_set_lru_refs(folio, 0);
 
-	success = lru_gen_del_folio(lruvec, folio, true);
+	success = __lru_gen_del_folio(lruvec, folio, true, nr_taken);
 	VM_WARN_ON_ONCE_FOLIO(!success, folio);
 
 	return true;
@@ -4799,6 +4800,8 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 	for (zone_idx = sc->reclaim_idx; zone_idx >= 0; zone_idx--) {
 		LIST_HEAD(moved);
 		int skipped_zone = 0;
+		/* isolated pages, indexed by lru_gen_is_active() */
+		long nr_taken[2] = {};
 		struct zone *zone = &pgdat->node_zones[zone_idx];
 		struct list_head *head = &lrugen->folios[gen][type][zone_idx];
 
@@ -4817,7 +4820,7 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 			scanned += delta;
 			if (sort_folio(lruvec, folio, sc, gen, max_gen, tier))
 				sorted += delta;
-			else if (isolate_folio(lruvec, folio, sc)) {
+			else if (isolate_folio(lruvec, folio, sc, nr_taken)) {
 				list_add(&folio->lru, list);
 				isolated += delta;
 			} else {
@@ -4828,6 +4831,13 @@ static int scan_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
 			if (!--remaining || max(isolated, skipped_zone) >= MIN_LRU_BATCH)
 				break;
 		}
+
+		/* Like update_lru_sizes(), once per zone instead of per folio */
+		if (nr_taken[0])
+			__update_lru_size(lruvec, type * LRU_FILE, zone_idx, -nr_taken[0]);
+		if (nr_taken[1])
+			__update_lru_size(lruvec, type * LRU_FILE + LRU_ACTIVE, zone_idx,
+					  -nr_taken[1]);
 
 		if (skipped_zone) {
 			list_splice(&moved, head);

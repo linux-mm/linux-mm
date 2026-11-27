@@ -376,7 +376,13 @@ static inline bool lru_gen_add_rejected_folio(struct lruvec *lruvec, struct foli
 	return __lru_gen_add_folio(lruvec, folio, scanned_seq, false);
 }
 
-static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
+/*
+ * If @nr_taken is not NULL, the caller updates the node, memcg and zone LRU
+ * sizes for the folios it isolates: this updates lrugen->nr_pages and adds
+ * @folio's pages to @nr_taken[], indexed by whether its gen is active.
+ */
+static inline bool __lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
+				       bool reclaiming, long *nr_taken)
 {
 	unsigned long flags;
 	int gen = folio_lru_gen(folio);
@@ -392,10 +398,26 @@ static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio,
 	flags = set_mask_bits(folio_flags(folio, 0), LRU_GEN_MASK, flags);
 	gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 
-	lru_gen_update_size(lruvec, folio, gen, -1);
+	if (nr_taken) {
+		struct lru_gen_folio *lrugen = &lruvec->lrugen;
+		int type = folio_is_file_lru(folio);
+		int zone = folio_zonenum(folio);
+		int delta = folio_nr_pages(folio);
+
+		WRITE_ONCE(lrugen->nr_pages[gen][type][zone],
+			   lrugen->nr_pages[gen][type][zone] - delta);
+		nr_taken[lru_gen_is_active(lruvec, gen)] += delta;
+	} else {
+		lru_gen_update_size(lruvec, folio, gen, -1);
+	}
 	list_del(&folio->lru);
 
 	return true;
+}
+
+static inline bool lru_gen_del_folio(struct lruvec *lruvec, struct folio *folio, bool reclaiming)
+{
+	return __lru_gen_del_folio(lruvec, folio, reclaiming, NULL);
 }
 
 /**
