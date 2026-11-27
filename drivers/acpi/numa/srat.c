@@ -74,7 +74,7 @@ int acpi_map_pxm_to_node(int pxm)
 
 	if (node == NUMA_NO_NODE) {
 		node = first_unset_node(nodes_found_map);
-		if (node >= MAX_NUMNODES)
+		if (node >= nr_node_ids)
 			return NUMA_NO_NODE;
 		__acpi_map_pxm_to_node(pxm, node);
 		node_set(node, nodes_found_map);
