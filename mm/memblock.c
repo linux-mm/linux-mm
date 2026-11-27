@@ -1068,10 +1068,15 @@ static int __init_memblock memblock_setclr_flag(struct memblock_type *type,
 	for (i = start_rgn; i < end_rgn; i++) {
 		struct memblock_region *r = &type->regions[i];
 
-		if (set)
+		if (set) {
+			enum memblock_flags map_flags =
+				MEMBLOCK_NOMAP | MEMBLOCK_PTEMAP;
+
 			r->flags |= flag;
-		else
+			WARN_ON_ONCE((r->flags & map_flags) == map_flags);
+		} else {
 			r->flags &= ~flag;
+		}
 	}
 
 	memblock_merge_regions(type, start_rgn, end_rgn);
@@ -1219,6 +1224,35 @@ __init int memblock_clear_kho_noprsrv(phys_addr_t base, phys_addr_t size)
 {
 	return memblock_setclr_flag(&memblock.memory, base, size, 0,
 				    MEMBLOCK_KHO_NOPRSRV);
+}
+
+/**
+ * memblock_mark_ptemap - Mark a memory region with flag MEMBLOCK_PTEMAP.
+ * @base: the base phys addr of the region
+ * @size: the size of the region
+ *
+ * If supported by the architecture, such region is mapped using PTE-level
+ * mappings in the kernel direct map.
+ *
+ * Return: 0 on success, -errno on failure.
+ */
+int __init_memblock memblock_mark_ptemap(phys_addr_t base, phys_addr_t size)
+{
+	return memblock_setclr_flag(&memblock.memory, base, size, 1,
+				    MEMBLOCK_PTEMAP);
+}
+
+/**
+ * memblock_clear_ptemap - Clear flag MEMBLOCK_PTEMAP for a specified region.
+ * @base: the base phys addr of the region
+ * @size: the size of the region
+ *
+ * Return: 0 on success, -errno on failure.
+ */
+int __init_memblock memblock_clear_ptemap(phys_addr_t base, phys_addr_t size)
+{
+	return memblock_setclr_flag(&memblock.memory, base, size, 0,
+				    MEMBLOCK_PTEMAP);
 }
 
 static bool should_skip_region(struct memblock_type *type,
@@ -2864,6 +2898,7 @@ static const char * const flagname[] = {
 	[ilog2(MEMBLOCK_RSRV_KERN)] = "RSV_KERN",
 	[ilog2(MEMBLOCK_KHO_NOPRSRV)] = "KHO_NOPRSRV",
 	[ilog2(MEMBLOCK_RSRV_HUGETLB)] = "RSV_HUGETLB",
+	[ilog2(MEMBLOCK_PTEMAP)] = "PTEMAP",
 };
 
 static int memblock_debug_show(struct seq_file *m, void *private)
