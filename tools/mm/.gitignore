@@ -5,4 +5,5 @@ page_owner_sort
 page_owner_filter
 thp_swap_allocator_test
 gup_bench
+hmm-bench
 memory-failure/hwpoison-panic

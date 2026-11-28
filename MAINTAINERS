@@ -12196,6 +12196,7 @@ F:	Documentation/mm/hmm.rst
 F:	include/linux/hmm*
 F:	lib/test_hmm*
 F:	mm/hmm*
+F:	tools/mm/hmm-bench.c
 F:	tools/testing/selftests/mm/*hmm*
 
 HONEYWELL ABP2030PA PRESSURE SENSOR SERIES IIO DRIVER

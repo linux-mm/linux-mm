@@ -944,13 +944,13 @@ bool detect_huge_zeropage(void)
 		      O_RDONLY);
 	bool enabled = 0;
 	char buf[15];
-	int ret;
+	ssize_t ret;
 
 	if (fd < 0)
 		return 0;
 
 	ret = pread(fd, buf, sizeof(buf), 0);
-	if (ret > 0 && ret < sizeof(buf)) {
+	if (ret > 0 && (size_t)ret < sizeof(buf)) {
 		buf[ret] = 0;
 
 		if (strtoul(buf, NULL, 10) == 1)
