@@ -579,11 +579,21 @@ enum {
 	MM_LEAF_YOUNG,		/* young leaf entries */
 	MM_NONLEAF_FOUND,	/* non-leaf entries found in Bloom filters */
 	MM_NONLEAF_ADDED,	/* non-leaf entries added to Bloom filters */
+	MM_WALK_TOTAL,		/* page-table walks completed */
+	MM_WALK_EMPTY,		/* walks that found no young leaf for this lruvec */
+	MM_LEAF_EMPTY_WALKS,	/* leaf entries scanned during empty walks */
+	MM_PUD_EMPTY_SKIPPED,	/* PUD subtrees skipped by the PUD-level filter */
 	NR_MM_STATS
 };
 
 /* double-buffering Bloom filters */
 #define NR_BLOOM_FILTERS	2
+
+enum bloom_filter_level {
+	BLOOM_FILTER_PUD,
+	BLOOM_FILTER_PMD,
+	BLOOM_FILTER_LEVELS,
+};
 
 struct lru_gen_mm_state {
 	/* synced with max_seq after each iteration */
@@ -592,8 +602,8 @@ struct lru_gen_mm_state {
 	struct list_head *head;
 	/* where the last iteration ended before */
 	struct list_head *tail;
-	/* Bloom filters flip after each iteration */
-	unsigned long *filters[NR_BLOOM_FILTERS];
+	/* Bloom filters flip after each iteration, indexed by level */
+	unsigned long *filters[BLOOM_FILTER_LEVELS][NR_BLOOM_FILTERS];
 	/* the mm stats for debugging */
 	unsigned long stats[NR_HIST_GENS][NR_MM_STATS];
 };
@@ -668,6 +678,7 @@ struct lru_gen_memcg {
 void lru_gen_init_pgdat(struct pglist_data *pgdat);
 void lru_gen_init_lruvec(struct lruvec *lruvec);
 bool lru_gen_look_around(struct page_vma_mapped_walk *pvmw, unsigned int nr);
+void lru_gen_mark_pud(struct mm_struct *mm, struct folio *folio, unsigned long addr);
 
 void lru_gen_init_memcg(struct mem_cgroup *memcg);
 void lru_gen_exit_memcg(struct mem_cgroup *memcg);
@@ -691,6 +702,11 @@ static inline bool lru_gen_look_around(struct page_vma_mapped_walk *pvmw,
 		unsigned int nr)
 {
 	return false;
+}
+
+static inline void lru_gen_mark_pud(struct mm_struct *mm, struct folio *folio,
+				    unsigned long addr)
+{
 }
 
 static inline void lru_gen_init_memcg(struct mem_cgroup *memcg)
