@@ -2891,6 +2891,8 @@ static void damos_apply_scheme(struct damon_ctx *c, struct damon_target *t,
 	}
 
 	if (c->ops.apply_scheme) {
+		if (damos_core_filter_out(c, t, r, s))
+			return;
 		if (damos_quota_is_set(quota) &&
 				quota->charged_sz + sz > quota->esz) {
 			sz = ALIGN_DOWN(quota->esz - quota->charged_sz,
@@ -2900,8 +2902,6 @@ static void damos_apply_scheme(struct damon_ctx *c, struct damon_target *t,
 			if (damon_split_region_at(c, t, r, sz))
 				goto update_stat;
 		}
-		if (damos_core_filter_out(c, t, r, s))
-			return;
 		sz = damon_sz_region(r);
 		ktime_get_coarse_ts64(&begin);
 		trace_damos_before_apply(cidx, sidx, tidx, r, nr_accesses,
