@@ -60,6 +60,10 @@ int kho_debugfs_blob_add(struct kho_debugfs *dbg, const char *name,
 	else
 		dir = dbg->sub_fdt_dir;
 
+	/* The directories are NULL if they could not be created. */
+	if (!dir)
+		return 0;
+
 	return __kho_debugfs_blob_add(&dbg->fdt_list, dir, name, blob, size);
 }
 
@@ -101,6 +105,9 @@ __init void kho_in_debugfs_init(struct kho_debugfs *dbg, const void *fdt)
 	int err, child;
 
 	INIT_LIST_HEAD(&dbg->fdt_list);
+
+	if (IS_ERR(debugfs_root))
+		return;
 
 	dir = debugfs_create_dir("in", debugfs_root);
 	if (IS_ERR(dir)) {
@@ -172,7 +179,7 @@ err_out:
 	}
 }
 
-__init int kho_out_debugfs_init(struct kho_debugfs *dbg)
+__init void kho_out_debugfs_init(struct kho_debugfs *dbg)
 {
 	struct dentry *dir, *f, *sub_fdt_dir;
 
@@ -180,7 +187,7 @@ __init int kho_out_debugfs_init(struct kho_debugfs *dbg)
 
 	dir = debugfs_create_dir("out", debugfs_root);
 	if (IS_ERR(dir))
-		return -ENOMEM;
+		return;
 
 	sub_fdt_dir = debugfs_create_dir("sub_fdts", dir);
 	if (IS_ERR(sub_fdt_dir))
@@ -198,17 +205,13 @@ __init int kho_out_debugfs_init(struct kho_debugfs *dbg)
 
 	dbg->dir = dir;
 	dbg->sub_fdt_dir = sub_fdt_dir;
-	return 0;
+	return;
 
 err_rmdir:
 	debugfs_remove_recursive(dir);
-	return -ENOENT;
 }
 
-__init int kho_debugfs_init(void)
+__init void kho_debugfs_init(void)
 {
 	debugfs_root = debugfs_create_dir("kho", NULL);
-	if (IS_ERR(debugfs_root))
-		return -ENOENT;
-	return 0;
 }
