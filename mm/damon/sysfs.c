@@ -2240,18 +2240,52 @@ enum damon_sysfs_cmd {
 	NR_DAMON_SYSFS_CMDS,
 };
 
-/* Should match with enum damon_sysfs_cmd */
-static const char * const damon_sysfs_cmd_strs[] = {
-	"on",
-	"off",
-	"commit",
-	"commit_schemes_quota_goals",
-	"update_schemes_stats",
-	"update_schemes_tried_bytes",
-	"update_schemes_tried_regions",
-	"clear_schemes_tried_regions",
-	"update_schemes_effective_quotas",
-	"update_tuned_intervals",
+struct damon_sysfs_cmd_name {
+	enum damon_sysfs_cmd cmd;
+	char *name;
+};
+
+static const struct damon_sysfs_cmd_name damon_sysfs_cmd_names[] = {
+	{
+		.cmd = DAMON_SYSFS_CMD_ON,
+		.name = "on",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_OFF,
+		.name = "off",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_COMMIT,
+		.name = "commit",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_COMMIT_SCHEMES_QUOTA_GOALS,
+		.name = "commit_schemes_quota_goals",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_UPDATE_SCHEMES_STATS,
+		.name = "update_schemes_stats",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_UPDATE_SCHEMES_TRIED_BYTES,
+		.name = "update_schemes_tried_bytes",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_UPDATE_SCHEMES_TRIED_REGIONS,
+		.name = "update_schemes_tried_regions",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_CLEAR_SCHEMES_TRIED_REGIONS,
+		.name = "clear_schemes_tried_regions",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_UPDATE_SCHEMES_EFFECTIVE_QUOTAS,
+		.name = "update_schemes_effective_quotas",
+	},
+	{
+		.cmd = DAMON_SYSFS_CMD_UPDATE_TUNED_INTERVALS,
+		.name = "update_tuned_intervals",
+	},
 };
 
 static ssize_t state_show(struct kobject *kobj, struct kobj_attribute *attr,
@@ -2261,6 +2295,8 @@ static ssize_t state_show(struct kobject *kobj, struct kobj_attribute *attr,
 			struct damon_sysfs_kdamond, kobj);
 	struct damon_ctx *ctx;
 	bool running = false;
+	enum damon_sysfs_cmd cmd;
+	int i;
 
 	if (!mutex_trylock(&damon_sysfs_lock))
 		return -EBUSY;
@@ -2271,9 +2307,15 @@ static ssize_t state_show(struct kobject *kobj, struct kobj_attribute *attr,
 
 	mutex_unlock(&damon_sysfs_lock);
 
-	return sysfs_emit(buf, "%s\n", running ?
-			damon_sysfs_cmd_strs[DAMON_SYSFS_CMD_ON] :
-			damon_sysfs_cmd_strs[DAMON_SYSFS_CMD_OFF]);
+	cmd = running ? DAMON_SYSFS_CMD_ON : DAMON_SYSFS_CMD_OFF;
+	for (i = 0; i < ARRAY_SIZE(damon_sysfs_cmd_names); i++) {
+		const struct damon_sysfs_cmd_name *cmd_name;
+
+		cmd_name = &damon_sysfs_cmd_names[i];
+		if (cmd_name->cmd == cmd)
+			return sysfs_emit(buf, "%s\n", cmd_name->name);
+	}
+	return -EINVAL;
 }
 
 static int damon_sysfs_set_attrs(struct damon_ctx *ctx,
@@ -2800,14 +2842,17 @@ static ssize_t state_store(struct kobject *kobj, struct kobj_attribute *attr,
 {
 	struct damon_sysfs_kdamond *kdamond = container_of(kobj,
 			struct damon_sysfs_kdamond, kobj);
-	enum damon_sysfs_cmd cmd;
 	ssize_t ret = -EINVAL;
+	int i;
 
 	if (!mutex_trylock(&damon_sysfs_lock))
 		return -EBUSY;
-	for (cmd = 0; cmd < NR_DAMON_SYSFS_CMDS; cmd++) {
-		if (sysfs_streq(buf, damon_sysfs_cmd_strs[cmd])) {
-			ret = damon_sysfs_handle_cmd(cmd, kdamond);
+	for (i = 0; i < ARRAY_SIZE(damon_sysfs_cmd_names); i++) {
+		const struct damon_sysfs_cmd_name *cmd_name;
+
+		cmd_name = &damon_sysfs_cmd_names[i];
+		if (sysfs_streq(buf, cmd_name->name)) {
+			ret = damon_sysfs_handle_cmd(cmd_name->cmd, kdamond);
 			break;
 		}
 	}
