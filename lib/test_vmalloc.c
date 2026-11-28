@@ -17,6 +17,7 @@
 #include <linux/rcupdate.h>
 #include <linux/srcu.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 #define __param(type, name, init, msg)		\
 	static type name = init;				\
@@ -422,55 +423,71 @@ cleanup:
 	return nr_allocated != map_nr_pages;
 }
 
-static int vrealloc_test(void)
+static void vrealloc_fill(u8 *ptr, size_t size)
 {
-	void *ptr, *tmp;
+	for (size_t i = 0; i < size; i++)
+		ptr[i] = i % 251 + 1;
+}
+
+static int vrealloc_check(const u8 *ptr, size_t size, size_t preserved,
+			  gfp_t flags)
+{
+	struct vm_struct *vm = find_vm_area(ptr);
+
+	/* vrealloc() allocates order-0 pages, allowing tail pages to be freed. */
+	if (!vm || vm->nr_pages != DIV_ROUND_UP(size, PAGE_SIZE)) {
+		pr_err("vrealloc: unexpected page count for size %zu\n", size);
+		return -1;
+	}
+
+	for (size_t i = 0; i < preserved; i++) {
+		if (ptr[i] != i % 251 + 1) {
+			pr_err("vrealloc: data mismatch at offset %zu\n", i);
+			return -1;
+		}
+	}
+
+	if ((flags & __GFP_ZERO) &&
+	    memchr_inv(ptr + preserved, 0, size - preserved)) {
+		pr_err("vrealloc: nonzero bytes in newly exposed range\n");
+		return -1;
+	}
+
+	return 0;
+}
+
+static int vrealloc_test_flags(gfp_t flags)
+{
+	static const size_t sizes[] = {
+		PAGE_SIZE,
+		4 * PAGE_SIZE, /* Grow beyond allocated pages. */
+		PAGE_SIZE + 17, /* Shrink to a partial final page. */
+		PAGE_SIZE, /* Free the remaining tail page. */
+		PAGE_SIZE / 2, /* Shrink within the same page. */
+		PAGE_SIZE, /* Grow within the allocated page. */
+		4 * PAGE_SIZE, /* Grow beyond pages retained after shrink. */
+	};
 	int i;
 
 	for (i = 0; i < test_loop_count; i++) {
+		void *ptr = NULL, *tmp;
+		size_t old_size = 0;
 		int err = -1;
 
-		ptr = vrealloc(NULL, PAGE_SIZE, GFP_KERNEL);
-		if (!ptr)
-			return -1;
+		for (size_t j = 0; j < ARRAY_SIZE(sizes); j++) {
+			/* __GFP_ZERO must be used consistently, including at allocation. */
+			tmp = vrealloc(ptr, sizes[j], flags);
+			if (!tmp)
+				goto error;
+			ptr = tmp;
 
-		*((__u8 *)ptr) = 'a';
+			if (vrealloc_check(ptr, sizes[j], min(old_size, sizes[j]),
+					   flags))
+				goto error;
 
-		/* Grow: beyond allocated pages, triggers full realloc. */
-		tmp = vrealloc(ptr, 4 * PAGE_SIZE, GFP_KERNEL);
-		if (!tmp)
-			goto error;
-		ptr = tmp;
-
-		if (*((__u8 *)ptr) != 'a')
-			goto error;
-
-		/* Shrink: crosses page boundary, frees tail pages. */
-		tmp = vrealloc(ptr, PAGE_SIZE, GFP_KERNEL);
-		if (!tmp)
-			goto error;
-		ptr = tmp;
-
-		if (*((__u8 *)ptr) != 'a')
-			goto error;
-
-		/* Shrink: within same page, no page freeing. */
-		tmp = vrealloc(ptr, PAGE_SIZE / 2, GFP_KERNEL);
-		if (!tmp)
-			goto error;
-		ptr = tmp;
-
-		if (*((__u8 *)ptr) != 'a')
-			goto error;
-
-		/* Grow: within allocated page, in-place, no realloc. */
-		tmp = vrealloc(ptr, PAGE_SIZE, GFP_KERNEL);
-		if (!tmp)
-			goto error;
-		ptr = tmp;
-
-		if (*((__u8 *)ptr) != 'a')
-			goto error;
+			vrealloc_fill(ptr, sizes[j]);
+			old_size = sizes[j];
+		}
 
 		err = 0;
 error:
@@ -480,6 +497,17 @@ error:
 	}
 
 	return 0;
+}
+
+static int vrealloc_test(void)
+{
+	int ret;
+
+	ret = vrealloc_test_flags(GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	return vrealloc_test_flags(GFP_KERNEL | __GFP_ZERO);
 }
 
 struct test_case_desc {
