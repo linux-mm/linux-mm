@@ -1847,13 +1847,8 @@ static __init int kho_init(void)
 		goto err_free_kho_radix_tree;
 	}
 
-	err = kho_debugfs_init();
-	if (err)
-		goto err_free_fdt;
-
-	err = kho_out_debugfs_init(&kho_out.dbg);
-	if (err)
-		goto err_free_fdt;
+	kho_debugfs_init();
+	kho_out_debugfs_init(&kho_out.dbg);
 
 	err = kho_out_fdt_setup();
 	if (err)
