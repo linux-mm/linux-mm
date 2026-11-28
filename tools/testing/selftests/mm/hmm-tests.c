@@ -10,59 +10,22 @@
  * bugs.
  */
 
-#include <errno.h>
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <unistd.h>
-#include <strings.h>
 #include <time.h>
 #include <pthread.h>
-#include <limits.h>
 #include <linux/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <sys/time.h>
 #include <sys/syscall.h>
 #include <sys/eventfd.h>
 #include <linux/userfaultfd.h>
 #include <poll.h>
 #include <mm/hugepage_settings.h>
-
-#include "kselftest_harness.h"
-
-/*
- * This is a private UAPI to the kernel test module so it isn't exported
- * in the usual include/uapi/... directory.
- */
-#include <lib/test_hmm_uapi.h>
 #include <mm/gup_test.h>
-#include <mm/vm_util.h>
-
-struct hmm_buffer {
-	void		*ptr;
-	void		*mirror;
-	unsigned long	size;
-	int		fd;
-	uint64_t	cpages;
-	uint64_t	faults;
-};
-
-enum {
-	HMM_PRIVATE_DEVICE_ONE,
-	HMM_PRIVATE_DEVICE_TWO,
-	HMM_COHERENCE_DEVICE_ONE,
-	HMM_COHERENCE_DEVICE_TWO,
-};
+#include "hmm-common.h"
 
 #define ONEKB		(1 << 10)
 #define ONEMEG		(1 << 20)
-#define TWOMEG		(1 << 21)
 #define HMM_BUFFER_SIZE (1024 << 12)
-#define HMM_PATH_MAX    64
 #define NTIMES		10
 
 /* Just the flags we need, copied from mm.h: */
@@ -76,28 +39,6 @@ enum {
 #endif
 
 HUGETLB_SETUP_DEFAULT_PAGES(1)
-
-FIXTURE(hmm)
-{
-	int		fd;
-	unsigned int	page_size;
-	unsigned int	page_shift;
-};
-
-FIXTURE_VARIANT(hmm)
-{
-	int     device_number;
-};
-
-FIXTURE_VARIANT_ADD(hmm, hmm_device_private)
-{
-	.device_number = HMM_PRIVATE_DEVICE_ONE,
-};
-
-FIXTURE_VARIANT_ADD(hmm, hmm_device_coherent)
-{
-	.device_number = HMM_COHERENCE_DEVICE_ONE,
-};
 
 FIXTURE(hmm2)
 {
@@ -125,35 +66,6 @@ FIXTURE_VARIANT_ADD(hmm2, hmm2_device_coherent)
 	.device_number1 = HMM_COHERENCE_DEVICE_TWO,
 };
 
-static int hmm_open(int unit)
-{
-	char pathname[HMM_PATH_MAX];
-	int fd;
-
-	snprintf(pathname, sizeof(pathname), "/dev/hmm_dmirror%d", unit);
-	fd = open(pathname, O_RDWR, 0);
-	if (fd < 0)
-		fprintf(stderr, "could not open hmm dmirror driver (%s)\n",
-			pathname);
-	return fd;
-}
-
-static bool hmm_is_coherent_type(int dev_num)
-{
-	return (dev_num >= HMM_COHERENCE_DEVICE_ONE);
-}
-
-FIXTURE_SETUP(hmm)
-{
-	self->page_size = sysconf(_SC_PAGE_SIZE);
-	self->page_shift = ffs(self->page_size) - 1;
-
-	self->fd = hmm_open(variant->device_number);
-	if (self->fd < 0 && hmm_is_coherent_type(variant->device_number))
-		SKIP(return, "DEVICE_COHERENT not available");
-	ASSERT_GE(self->fd, 0);
-}
-
 FIXTURE_SETUP(hmm2)
 {
 	self->page_size = sysconf(_SC_PAGE_SIZE);
@@ -167,14 +79,6 @@ FIXTURE_SETUP(hmm2)
 	ASSERT_GE(self->fd1, 0);
 }
 
-FIXTURE_TEARDOWN(hmm)
-{
-	int ret = close(self->fd);
-
-	ASSERT_EQ(ret, 0);
-	self->fd = -1;
-}
-
 FIXTURE_TEARDOWN(hmm2)
 {
 	int ret = close(self->fd0);
@@ -185,93 +89,6 @@ FIXTURE_TEARDOWN(hmm2)
 	ret = close(self->fd1);
 	ASSERT_EQ(ret, 0);
 	self->fd1 = -1;
-}
-
-static int hmm_dmirror_cmd(int fd,
-			   unsigned long request,
-			   struct hmm_buffer *buffer,
-			   unsigned long npages)
-{
-	struct hmm_dmirror_cmd cmd;
-	int ret;
-
-	/* Simulate a device reading system memory. */
-	cmd.addr = ptr_to_u64(buffer->ptr);
-	cmd.ptr = ptr_to_u64(buffer->mirror);
-	cmd.npages = npages;
-
-	for (;;) {
-		ret = ioctl(fd, request, &cmd);
-		if (ret == 0)
-			break;
-		if (errno == EINTR)
-			continue;
-		return -errno;
-	}
-	buffer->cpages = cmd.cpages;
-	buffer->faults = cmd.faults;
-
-	return 0;
-}
-
-static void hmm_buffer_free(struct hmm_buffer *buffer)
-{
-	if (buffer == NULL)
-		return;
-
-	if (buffer->ptr) {
-		munmap(buffer->ptr, buffer->size);
-		buffer->ptr = NULL;
-	}
-	free(buffer->mirror);
-	free(buffer);
-}
-
-/*
- * Allocate a buffer structure with memory mapping and mirror.
- *
- * @mmap_size:   total size of the mmap region (may differ from @mirror_size
- *               for alignment padding in THP tests).
- * @mirror_size: size of the mirror data buffer (the actual working set).
- * @prot:        protection flags for the mmap (e.g. PROT_READ | PROT_WRITE).
- * @flags:       flags for the mmap (e.g. MAP_PRIVATE, MAP_SHARED,
- *               MAP_ANONYMOUS, MAP_HUGETLB).
- * @fd:          file descriptor for the mmap; pass -1 for MAP_ANONYMOUS.
- *
- * All internal allocations are checked; returns NULL and cleans up on any
- * failure. Caller must ASSERT_NE or otherwise check the return value.
- */
-static struct hmm_buffer *hmm_buffer_alloc(unsigned long mmap_size,
-						unsigned long mirror_size,
-						int prot, int flags,
-						int fd)
-{
-	struct hmm_buffer *buffer;
-
-	buffer = malloc(sizeof(*buffer));
-	if (!buffer) {
-		perror("malloc buffer");
-		return NULL;
-	}
-
-	buffer->fd = fd;
-	buffer->size = mmap_size;
-	buffer->mirror = malloc(mirror_size);
-	if (!buffer->mirror) {
-		perror("malloc mirror");
-		free(buffer);
-		return NULL;
-	}
-
-	buffer->ptr = mmap(NULL, mmap_size, prot, flags, fd, 0);
-	if (buffer->ptr == MAP_FAILED) {
-		perror("mmap");
-		free(buffer->mirror);
-		free(buffer);
-		return NULL;
-	}
-
-	return buffer;
 }
 
 /*
@@ -324,20 +141,6 @@ static void hmm_nanosleep(unsigned int n)
 	t.tv_sec = 0;
 	t.tv_nsec = n;
 	nanosleep(&t, NULL);
-}
-
-static int hmm_migrate_sys_to_dev(int fd,
-				   struct hmm_buffer *buffer,
-				   unsigned long npages)
-{
-	return hmm_dmirror_cmd(fd, HMM_DMIRROR_MIGRATE_TO_DEV, buffer, npages);
-}
-
-static int hmm_migrate_dev_to_sys(int fd,
-				   struct hmm_buffer *buffer,
-				   unsigned long npages)
-{
-	return hmm_dmirror_cmd(fd, HMM_DMIRROR_MIGRATE_TO_SYS, buffer, npages);
 }
 
 /*
@@ -2475,191 +2278,6 @@ TEST_F(hmm, migrate_anon_huge_zero_err)
 	hmm_buffer_free(buffer);
 }
 
-struct benchmark_results {
-	double sys_to_dev_time;
-	double dev_to_sys_time;
-	double throughput_s2d;
-	double throughput_d2s;
-};
-
-static double get_time_ms(void)
-{
-	struct timeval tv;
-
-	gettimeofday(&tv, NULL);
-	return (tv.tv_sec * 1000.0) + (tv.tv_usec / 1000.0);
-}
-
-static void print_benchmark_results(const char *test_name, size_t buffer_size,
-				     struct benchmark_results *thp,
-				     struct benchmark_results *regular)
-{
-	double s2d_improvement = ((regular->sys_to_dev_time - thp->sys_to_dev_time) /
-				 regular->sys_to_dev_time) * 100.0;
-	double d2s_improvement = ((regular->dev_to_sys_time - thp->dev_to_sys_time) /
-				 regular->dev_to_sys_time) * 100.0;
-	double throughput_s2d_improvement = ((thp->throughput_s2d - regular->throughput_s2d) /
-					    regular->throughput_s2d) * 100.0;
-	double throughput_d2s_improvement = ((thp->throughput_d2s - regular->throughput_d2s) /
-					    regular->throughput_d2s) * 100.0;
-
-	printf("\n=== %s (%.1f MB) ===\n", test_name, buffer_size / (1024.0 * 1024.0));
-	printf("                     | With THP        | Without THP     | Improvement\n");
-	printf("---------------------------------------------------------------------\n");
-	printf("Sys->Dev Migration   | %.3f ms        | %.3f ms        | %.1f%%\n",
-	       thp->sys_to_dev_time, regular->sys_to_dev_time, s2d_improvement);
-	printf("Dev->Sys Migration   | %.3f ms        | %.3f ms        | %.1f%%\n",
-	       thp->dev_to_sys_time, regular->dev_to_sys_time, d2s_improvement);
-	printf("S->D Throughput      | %.2f GB/s      | %.2f GB/s      | %.1f%%\n",
-	       thp->throughput_s2d, regular->throughput_s2d, throughput_s2d_improvement);
-	printf("D->S Throughput      | %.2f GB/s      | %.2f GB/s      | %.1f%%\n",
-	       thp->throughput_d2s, regular->throughput_d2s, throughput_d2s_improvement);
-}
-
-/*
- * Run a single migration benchmark
- * fd: file descriptor for hmm device
- * use_thp: whether to use THP
- * buffer_size: size of buffer to allocate
- * iterations: number of iterations
- * results: where to store results
- */
-static inline int run_migration_benchmark(int fd, int use_thp, size_t buffer_size,
-					   int iterations, struct benchmark_results *results)
-{
-	struct hmm_buffer *buffer;
-	unsigned long npages = buffer_size / sysconf(_SC_PAGESIZE);
-	double start, end;
-	double s2d_total = 0, d2s_total = 0;
-	int ret, i;
-	int *ptr;
-
-	buffer = hmm_buffer_alloc(buffer_size, buffer_size,
-				  PROT_READ | PROT_WRITE,
-				  MAP_PRIVATE | MAP_ANONYMOUS, -1);
-	if (!buffer) {
-		ret = -1;
-		goto cleanup;
-	}
-	memset(buffer->mirror, 0xFF, buffer_size);
-
-	/* Apply THP hint if requested */
-	if (use_thp)
-		ret = madvise(buffer->ptr, buffer_size, MADV_HUGEPAGE);
-	else
-		ret = madvise(buffer->ptr, buffer_size, MADV_NOHUGEPAGE);
-
-	if (ret)
-		goto cleanup;
-
-	/* Initialize memory to make sure pages are allocated */
-	ptr = (int *)buffer->ptr;
-	for (i = 0; i < buffer_size / sizeof(int); i++)
-		ptr[i] = i & 0xFF;
-
-	/* Warmup iteration */
-	ret = hmm_migrate_sys_to_dev(fd, buffer, npages);
-	if (ret)
-		goto cleanup;
-
-	ret = hmm_migrate_dev_to_sys(fd, buffer, npages);
-	if (ret)
-		goto cleanup;
-
-	/* Benchmark iterations */
-	for (i = 0; i < iterations; i++) {
-		/* System to device migration */
-		start = get_time_ms();
-
-		ret = hmm_migrate_sys_to_dev(fd, buffer, npages);
-		if (ret)
-			goto cleanup;
-
-		end = get_time_ms();
-		s2d_total += (end - start);
-
-		/* Device to system migration */
-		start = get_time_ms();
-
-		ret = hmm_migrate_dev_to_sys(fd, buffer, npages);
-		if (ret)
-			goto cleanup;
-
-		end = get_time_ms();
-		d2s_total += (end - start);
-	}
-
-	/* Calculate average times and throughput */
-	results->sys_to_dev_time = s2d_total / iterations;
-	results->dev_to_sys_time = d2s_total / iterations;
-	results->throughput_s2d = (buffer_size / (1024.0 * 1024.0 * 1024.0)) /
-				 (results->sys_to_dev_time / 1000.0);
-	results->throughput_d2s = (buffer_size / (1024.0 * 1024.0 * 1024.0)) /
-				 (results->dev_to_sys_time / 1000.0);
-
-cleanup:
-	hmm_buffer_free(buffer);
-	return ret;
-}
-
-/*
- * Benchmark THP migration with different buffer sizes
- */
-TEST_F_TIMEOUT(hmm, benchmark_thp_migration, 120)
-{
-	struct benchmark_results thp_results, regular_results;
-	size_t thp_size = pmd_psize();
-	int iterations = 5;
-
-	if (!thp_size)
-		thp_size = TWOMEG;
-
-	printf("\nHMM THP Migration Benchmark\n");
-	printf("---------------------------\n");
-	printf("System page size: %ld bytes\n", sysconf(_SC_PAGESIZE));
-
-	/* Test different buffer sizes */
-	size_t test_sizes[] = {
-		thp_size / 4,      /* quarter THP */
-		thp_size / 2,      /* half THP */
-		thp_size,          /* single THP */
-		thp_size * 2,      /* two THPs */
-		thp_size * 4,      /* four THPs */
-		thp_size * 8,      /* eight THPs */
-		thp_size * 128,    /* one twenty eight THPs */
-	};
-
-	static const char *const test_names[] = {
-		"Small Buffer",
-		"Half THP Size",
-		"Single THP Size",
-		"Two THP Size",
-		"Four THP Size",
-		"Eight THP Size",
-		"One twenty eight THP Size"
-	};
-
-	int num_tests = ARRAY_SIZE(test_sizes);
-
-	/* Run all tests */
-	for (int i = 0; i < num_tests; i++) {
-		/* Skip test sizes exceeding INT_MAX to avoid overflow */
-		if (test_sizes[i] > INT_MAX)
-			break;
-
-		/* Test with THP */
-		ASSERT_EQ(run_migration_benchmark(self->fd, 1, test_sizes[i],
-					iterations, &thp_results), 0);
-
-		/* Test without THP */
-		ASSERT_EQ(run_migration_benchmark(self->fd, 0, test_sizes[i],
-					iterations, &regular_results), 0);
-
-		/* Print results */
-		print_benchmark_results(test_names[i], test_sizes[i],
-					&thp_results, &regular_results);
-	}
-}
 /*
  * Test that HMM can fault in pages backed by userfaultfd using the
  * hmm_range_fault_unlocked_timeout() path with no timeout. This exercises
