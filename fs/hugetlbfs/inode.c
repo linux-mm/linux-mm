@@ -1138,7 +1138,8 @@ static int hugetlbfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 			spin_lock_irq(&sbinfo->spool->lock);
 			buf->f_blocks = sbinfo->spool->max_hpages;
 			free_pages = sbinfo->spool->max_hpages
-				- sbinfo->spool->used_hpages;
+				- sbinfo->spool->used_hpages
+				- sbinfo->spool->pending_hpages;
 			buf->f_bavail = buf->f_bfree = free_pages;
 			spin_unlock_irq(&sbinfo->spool->lock);
 		}

@@ -148,7 +148,7 @@ static inline bool subpool_is_free(struct hugepage_subpool *spool)
 	if (spool->count)
 		return false;
 	if (spool->max_hpages != -1)
-		return spool->used_hpages == 0;
+		return !spool->used_hpages && !spool->pending_hpages;
 	if (spool->min_hpages != -1)
 		return spool->rsv_hpages == spool->min_hpages;
 
@@ -216,7 +216,10 @@ void hugepage_put_subpool(struct hugepage_subpool *spool)
  * request.  Otherwise, return the number of pages by which the
  * global pools must be adjusted (upward).  The returned value may
  * only be different than the passed value (delta) in the case where
- * a subpool minimum size must be maintained.
+ * a subpool minimum size must be maintained.  When both max_hpages and a
+ * positive min_hpages are set, pages counted in a positive return value
+ * stay in pending_hpages until the caller commits them with
+ * hugepage_subpool_commit_pages() or drops them on failure.
  */
 static long hugepage_subpool_get_pages(struct hugepage_subpool *spool,
 				      long delta)
@@ -228,13 +231,11 @@ static long hugepage_subpool_get_pages(struct hugepage_subpool *spool,
 
 	spin_lock_irq(&spool->lock);
 
-	if (spool->max_hpages != -1) {		/* maximum size accounting */
-		if ((spool->used_hpages + delta) <= spool->max_hpages)
-			spool->used_hpages += delta;
-		else {
-			ret = -ENOMEM;
-			goto unlock_ret;
-		}
+	if (spool->max_hpages != -1 &&
+	    (spool->used_hpages + spool->pending_hpages + delta) >
+	    spool->max_hpages) {
+		ret = -ENOMEM;
+		goto unlock_ret;
 	}
 
 	/* minimum size accounting */
@@ -252,8 +253,49 @@ static long hugepage_subpool_get_pages(struct hugepage_subpool *spool,
 		}
 	}
 
+	if (spool->max_hpages != -1) {
+		if (spool->min_hpages > 0) {
+			spool->used_hpages += delta - ret;
+			spool->pending_hpages += ret;
+		} else {
+			spool->used_hpages += delta;
+		}
+	}
+
 unlock_ret:
 	spin_unlock_irq(&spool->lock);
+	return ret;
+}
+
+/*
+ * Commit pending pages once the global pool backs them.  Return the number of
+ * subpool reservations that are no longer needed; the caller must drop them
+ * from the global pool.
+ */
+static long hugepage_subpool_commit_pages(struct hugepage_subpool *spool,
+					  long delta)
+{
+	long ret = 0;
+	unsigned long flags;
+
+	if (!spool || !delta || spool->max_hpages == -1 ||
+	    spool->min_hpages <= 0)
+		return 0;
+
+	spin_lock_irqsave(&spool->lock, flags);
+	spool->pending_hpages -= delta;
+	spool->used_hpages += delta;
+
+	if (spool->rsv_hpages) {
+		long needed = max(0L, spool->min_hpages - spool->used_hpages);
+
+		if (spool->rsv_hpages > needed) {
+			ret = spool->rsv_hpages - needed;
+			spool->rsv_hpages = needed;
+		}
+	}
+	spin_unlock_irqrestore(&spool->lock, flags);
+
 	return ret;
 }
 
@@ -1003,8 +1045,17 @@ void hugetlb_fix_reserve_counts(struct inode *inode)
 	if (rsv_adjust > 0) {
 		struct hstate *h = hstate_inode(inode);
 
-		if (!hugetlb_acct_memory(h, 1))
+		reserved = !hugetlb_acct_memory(h, 1);
+		rsv_adjust = hugepage_subpool_commit_pages(spool, 1);
+		if (!reserved && rsv_adjust) {
+			/*
+			 * One trimmed subpool reservation covers this entry;
+			 * drop any remaining excess from the global pool.
+			 */
 			reserved = true;
+			rsv_adjust--;
+		}
+		hugetlb_acct_memory(h, -rsv_adjust);
 	} else if (!rsv_adjust) {
 		reserved = true;
 	}
@@ -3196,6 +3247,12 @@ struct folio *alloc_hugetlb_folio(struct vm_area_struct *vma,
 	if (IS_ERR(folio)) {
 		ret = PTR_ERR(folio);
 		goto out_subpool_put;
+	}
+
+	if (gbl_chg) {
+		long rsv_adjust = hugepage_subpool_commit_pages(spool, gbl_chg);
+
+		hugetlb_acct_memory(h, -rsv_adjust);
 	}
 
 	hugetlb_set_folio_subpool(folio, spool);
@@ -6889,7 +6946,7 @@ long hugetlb_reserve_pages(struct inode *inode,
 		struct vm_area_struct *vma,
 		vma_flags_t vma_flags)
 {
-	long chg = -1, add = -1, spool_resv, gbl_resv;
+	long chg = -1, add = -1, spool_resv, gbl_resv, rsv_adjust;
 	struct hstate *h = hstate_inode(inode);
 	struct hugepage_subpool *spool = subpool_inode(inode);
 	struct resv_map *resv_map;
@@ -7003,7 +7060,10 @@ retry:
 			hugetlb_acct_memory(h, -gbl_reserve);
 			err = add;
 			goto out_put_pages;
-		} else if (unlikely(chg > add)) {
+		}
+		rsv_adjust = hugepage_subpool_commit_pages(spool, gbl_reserve);
+		hugetlb_acct_memory(h, -rsv_adjust);
+		if (unlikely(chg > add)) {
 			/*
 			 * pages in this range were added to the reserve
 			 * map between region_chg and region_add.  This
@@ -7011,7 +7071,6 @@ retry:
 			 * the subpool and reserve counts modified above
 			 * based on the difference.
 			 */
-			long rsv_adjust;
 
 			/*
 			 * hugetlb_cgroup_uncharge_cgroup_rsvd() will put the
@@ -7033,17 +7092,22 @@ retry:
 			 */
 			hugetlb_cgroup_put_rsvd_cgroup(h_cg);
 		}
+	} else {
+		rsv_adjust = hugepage_subpool_commit_pages(spool, gbl_reserve);
+		hugetlb_acct_memory(h, -rsv_adjust);
 	}
 	return chg;
 
 out_put_pages:
 	spool_resv = chg - gbl_reserve;
-	/* Restore used_hpages for pages that failed global reservation */
-	if (gbl_reserve && spool) {
+	/* Restore subpool accounting for pages that failed global reservation */
+	if (gbl_reserve && spool && spool->max_hpages != -1) {
 		unsigned long flags;
 
 		spin_lock_irqsave(&spool->lock, flags);
-		if (spool->max_hpages != -1)
+		if (spool->min_hpages > 0)
+			spool->pending_hpages -= gbl_reserve;
+		else
 			spool->used_hpages -= gbl_reserve;
 		unlock_or_release_subpool(spool, flags);
 	}
