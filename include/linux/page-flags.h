@@ -193,6 +193,11 @@ enum pageflags {
 #define PAGEFLAGS_MASK		((1UL << NR_PAGEFLAGS) - 1)
 
 #ifndef __GENERATING_BOUNDS_H
+static __always_inline bool vmemmap_optimization_supported(void)
+{
+	return IS_ENABLED(CONFIG_VMEMMAP_OPTIMIZATION) &&
+	       is_power_of_2(sizeof(struct page));
+}
 
 /*
  * For tail pages, if the size of struct page is power-of-2 ->compound_info
@@ -210,10 +215,7 @@ static __always_inline bool compound_info_has_mask(void)
 	 * but it requires validating that struct pages are naturally aligned
 	 * for all orders up to the MAX_FOLIO_ORDER, which can be tricky.
 	 */
-	if (!IS_ENABLED(CONFIG_VMEMMAP_OPTIMIZATION))
-		return false;
-
-	return is_power_of_2(sizeof(struct page));
+	return vmemmap_optimization_supported();
 }
 
 static __always_inline unsigned long _compound_head(const struct page *page)
