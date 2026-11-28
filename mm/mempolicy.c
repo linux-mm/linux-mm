@@ -396,7 +396,10 @@ static void mpol_relative_nodemask(nodemask_t *ret, const nodemask_t *orig,
 				   const nodemask_t *rel)
 {
 	nodemask_t tmp;
-	nodes_fold(tmp, *orig, nodes_weight(*rel));
+
+	/* Relative indices can exceed the runtime node ID limit. */
+	__nodes_fold(&tmp, orig, nodes_weight(*rel), MAX_NUMNODES);
+
 	nodes_onto(*ret, tmp, *rel);
 }
 
@@ -462,14 +465,16 @@ static int mpol_set_nodemask(struct mempolicy *pol,
 /*
  * This function just creates a new policy, does some check and simple
  * initialization. You must invoke mpol_set_nodemask() to set nodes.
+ * Input masks can include static IDs or relative indices above nr_node_ids.
  */
 static struct mempolicy *mpol_new(unsigned short mode, unsigned short flags,
 				  nodemask_t *nodes)
 {
 	struct mempolicy *policy;
+	bool empty = !nodes || __nodes_empty(nodes, MAX_NUMNODES);
 
 	if (mode == MPOL_DEFAULT) {
-		if (nodes && !nodes_empty(*nodes))
+		if (!empty)
 			return ERR_PTR(-EINVAL);
 		return NULL;
 	}
@@ -481,7 +486,7 @@ static struct mempolicy *mpol_new(unsigned short mode, unsigned short flags,
 	 * All other modes require a valid pointer to a non-empty nodemask.
 	 */
 	if (mode == MPOL_PREFERRED) {
-		if (nodes_empty(*nodes)) {
+		if (empty) {
 			if (((flags & MPOL_F_STATIC_NODES) ||
 			     (flags & MPOL_F_RELATIVE_NODES)))
 				return ERR_PTR(-EINVAL);
@@ -489,11 +494,11 @@ static struct mempolicy *mpol_new(unsigned short mode, unsigned short flags,
 			mode = MPOL_LOCAL;
 		}
 	} else if (mode == MPOL_LOCAL) {
-		if (!nodes_empty(*nodes) ||
+		if (!empty ||
 		    (flags & MPOL_F_STATIC_NODES) ||
 		    (flags & MPOL_F_RELATIVE_NODES))
 			return ERR_PTR(-EINVAL);
-	} else if (nodes_empty(*nodes))
+	} else if (empty)
 		return ERR_PTR(-EINVAL);
 
 	policy = kmem_cache_alloc(policy_cache, GFP_KERNEL);
@@ -1118,7 +1123,7 @@ static long do_set_mempolicy(unsigned short mode, unsigned short flags,
 	current->mempolicy = new;
 	if (new && (new->mode == MPOL_INTERLEAVE ||
 		    new->mode == MPOL_WEIGHTED_INTERLEAVE)) {
-		current->il_prev = MAX_NUMNODES-1;
+		current->il_prev = nr_node_ids - 1;
 		current->il_weight = 0;
 	}
 	task_unlock(current);
@@ -1685,7 +1690,8 @@ static int get_nodes(nodemask_t *nodes, const unsigned long __user *nmask,
 		     unsigned long maxnode)
 {
 	--maxnode;
-	nodes_clear(*nodes);
+	/* Userspace masks retain their full MAX_NUMNODES capacity. */
+	__nodes_clear(nodes, MAX_NUMNODES);
 	if (maxnode == 0 || !nmask)
 		return 0;
 	if (maxnode > PAGE_SIZE*BITS_PER_BYTE)
@@ -1905,6 +1911,12 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
 	if (err)
 		goto out;
 
+	/* Source node IDs must fit within the runtime nodemask. */
+	if (__next_node(nr_node_ids - 1, old, MAX_NUMNODES) < MAX_NUMNODES) {
+		err = -EINVAL;
+		goto out;
+	}
+
 	err = get_nodes(new, new_nodes, maxnode);
 	if (err)
 		goto out;
@@ -1934,7 +1946,9 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
 
 	task_nodes = cpuset_mems_allowed(task);
 	/* Is the user allowed to access the target nodes? */
-	if (!nodes_subset(*new, task_nodes) && !capable(CAP_SYS_NICE)) {
+	if ((!nodes_subset(*new, task_nodes) ||
+	     __next_node(nr_node_ids - 1, new, MAX_NUMNODES) < MAX_NUMNODES) &&
+	    !capable(CAP_SYS_NICE)) {
 		err = -EPERM;
 		goto out_put;
 	}
@@ -2127,7 +2141,7 @@ retry:
 		node = next_node_in(node, policy->nodes);
 		if (read_mems_allowed_retry(cpuset_mems_cookie))
 			goto retry;
-		if (node == MAX_NUMNODES)
+		if (node >= nr_node_ids)
 			return node;
 		current->il_prev = node;
 		current->il_weight = get_il_weight(node);
@@ -2148,7 +2162,7 @@ static unsigned int interleave_nodes(struct mempolicy *policy)
 		nid = next_node_in(current->il_prev, policy->nodes);
 	} while (read_mems_allowed_retry(cpuset_mems_cookie));
 
-	if (nid < MAX_NUMNODES)
+	if (nid < nr_node_ids)
 		current->il_prev = nid;
 	return nid;
 }
@@ -2247,7 +2261,7 @@ static unsigned int weighted_interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 	 * Clamp this loop to a single pass (nnodes) to keep the walk
 	 * bounded by node count.
 	 */
-	while (target && nnodes-- && nid < MAX_NUMNODES) {
+	while (target && nnodes-- && nid < nr_node_ids) {
 		/* detect system default usage */
 		weight = table ? table[nid] : 1;
 		if (target < weight)
@@ -2258,7 +2272,7 @@ static unsigned int weighted_interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 	rcu_read_unlock();
 
 	/* the mask emptied under the walk */
-	if (nid >= MAX_NUMNODES)
+	if (nid >= nr_node_ids)
 		return numa_node_id();
 	return nid;
 }
@@ -2281,11 +2295,11 @@ static unsigned int interleave_nid(struct mempolicy *pol, pgoff_t ilx)
 	nid = first_node(pol->nodes);
 
 	/* A concurrent cpuset rebind may cause us to see an empty nodemask */
-	for (i = 0; i < target && nid < MAX_NUMNODES; i++)
+	for (i = 0; i < target && nid < nr_node_ids; i++)
 		nid = next_node_in(nid, pol->nodes);
 
 	/* the mask emptied under the walk */
-	if (nid >= MAX_NUMNODES)
+	if (nid >= nr_node_ids)
 		return numa_node_id();
 	return nid;
 }
@@ -2683,7 +2697,7 @@ static unsigned long alloc_pages_bulk_weighted_interleave(gfp_t gfp,
 	unsigned int weight_total = 0;
 	unsigned long rem_pages = nr_pages;
 	int nnodes, node;
-	int resume_node = MAX_NUMNODES - 1;
+	int resume_node = nr_node_ids - 1;
 	u8 resume_weight = 0;
 	int prev_node;
 	int i;
@@ -2745,12 +2759,12 @@ static unsigned long alloc_pages_bulk_weighted_interleave(gfp_t gfp,
 	rounds = rem_pages / weight_total;
 	delta = rem_pages % weight_total;
 	resume_node = next_node_in(prev_node, pol->nodes);
-	if (resume_node >= MAX_NUMNODES)
+	if (resume_node >= nr_node_ids)
 		goto out;
 	resume_weight = table ? table[resume_node] : 1;
 	for (i = 0; i < nnodes; i++) {
 		node = next_node_in(prev_node, pol->nodes);
-		if (node >= MAX_NUMNODES)
+		if (node >= nr_node_ids)
 			break;
 		weight = table ? table[node] : 1;
 		node_pages = weight * rounds;
@@ -2896,7 +2910,8 @@ bool __mpol_equal(struct mempolicy *a, struct mempolicy *b)
 	if (a->home_node != b->home_node)
 		return false;
 	if (mpol_store_user_nodemask(a))
-		if (!nodes_equal(a->w.user_nodemask, b->w.user_nodemask))
+		if (!__nodes_equal(&a->w.user_nodemask, &b->w.user_nodemask,
+				   MAX_NUMNODES))
 			return false;
 
 	switch (a->mode) {
@@ -3375,7 +3390,7 @@ static inline void __init check_numabalancing_enable(void)
 
 void __init numa_policy_init(void)
 {
-	nodemask_t interleave_nodes;
+	nodemask_t interleave_nodes = NODE_MASK_NONE;
 	unsigned long largest = 0;
 	int nid, prefer = 0;
 
@@ -3461,7 +3476,7 @@ int mpol_parse_str(char *str, struct mempolicy **mpol)
 {
 	struct mempolicy *new = NULL;
 	unsigned short mode_flags;
-	nodemask_t nodes;
+	nodemask_t nodes = NODE_MASK_NONE;
 	char *nodelist = strchr(str, ':');
 	char *flags = strchr(str, '=');
 	int err = 1, mode;

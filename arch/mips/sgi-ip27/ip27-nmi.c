@@ -207,7 +207,7 @@ static void nmi_dump(void)
 		for_each_online_node(node)
 			if (NODEPDA(node)->dump_count == 0)
 				break;
-		if (node == MAX_NUMNODES)
+		if (node >= nr_node_ids)
 			break;
 		if (i == 1000) {
 			for_each_online_node(node)

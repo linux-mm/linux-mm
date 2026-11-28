@@ -3630,7 +3630,7 @@ static inline int mtip_get_next_rr_node(void)
 	}
 
 	next_node = next_online_node(next_node);
-	if (next_node == MAX_NUMNODES)
+	if (next_node >= nr_node_ids)
 		next_node = first_online_node;
 	return next_node;
 }

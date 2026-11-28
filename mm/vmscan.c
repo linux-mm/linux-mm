@@ -5755,7 +5755,7 @@ static void *lru_gen_seq_next(struct seq_file *m, void *v, loff_t *pos)
 	++*pos;
 
 	nid = next_memory_node(nid);
-	if (nid == MAX_NUMNODES) {
+	if (nid >= nr_node_ids) {
 		memcg = mem_cgroup_iter(NULL, memcg, NULL);
 		if (!memcg)
 			return NULL;
