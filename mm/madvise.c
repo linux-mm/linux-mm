@@ -195,6 +195,8 @@ static int madvise_update_vma(vma_flags_t new_vma_flags,
 static int swapin_walk_pmd_entry(pmd_t *pmd, unsigned long start,
 		unsigned long end, struct mm_walk *walk)
 {
+	/* Only a prefetch, as in readahead_gfp_mask() */
+	const gfp_t gfp = GFP_HIGHUSER_MOVABLE | __GFP_NORETRY | __GFP_NOWARN;
 	struct vm_area_struct *vma = walk->private;
 	struct swap_io_ctx ctx = {};
 	pte_t *ptep = NULL;
@@ -220,10 +222,13 @@ static int swapin_walk_pmd_entry(pmd_t *pmd, unsigned long start,
 		pte_unmap_unlock(ptep, ptl);
 		ptep = NULL;
 
-		folio = read_swap_cache_async(&ctx, entry, GFP_HIGHUSER_MOVABLE,
-					vma, addr);
-		if (folio)
+		folio = read_swap_cache_async(&ctx, entry, gfp, vma, addr);
+		if (folio) {
 			folio_put(folio);
+		} else {
+			/* Reclaim queues its swap writes in our plug */
+			blk_flush_plug(current->plug, false);
+		}
 	}
 
 	if (ptep)
@@ -266,9 +271,13 @@ static void shmem_swapin_range(struct vm_area_struct *vma,
 		rcu_read_unlock();
 
 		folio = read_swap_cache_async(&ctx, entry,
-				mapping_gfp_mask(mapping), vma, addr);
-		if (folio)
+				readahead_gfp_mask(mapping), vma, addr);
+		if (folio) {
 			folio_put(folio);
+		} else {
+			/* Reclaim queues its swap writes in our plug */
+			blk_flush_plug(current->plug, false);
+		}
 
 		rcu_read_lock();
 	}

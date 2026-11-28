@@ -240,7 +240,9 @@ in this IOCTL:
 - Write-protect the pages. The ``PM_SCAN_WP_MATCHING`` is used to write-protect
   the pages of interest. The ``PM_SCAN_CHECK_WPASYNC`` aborts the operation if
   non-Async Write Protected pages are found. The ``PM_SCAN_WP_MATCHING`` can be
-  used with or without ``PM_SCAN_CHECK_WPASYNC``.
+  used with or without ``PM_SCAN_CHECK_WPASYNC``. On the pagemap file of another
+  process, ``PM_SCAN_WP_MATCHING`` requires that the caller is allowed to attach
+  to that process with ptrace. Otherwise the IOCTL fails with ``EACCES``.
 - Both of those operations can be combined into one atomic operation where we can
   get and write protect the pages as well.
 

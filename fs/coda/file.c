@@ -182,7 +182,6 @@ coda_file_mmap(struct file *coda_file, struct vm_area_struct *vma)
 
 	cii = ITOC(coda_inode);
 	spin_lock(&cii->c_lock);
-	coda_file->f_mapping = host_file->f_mapping;
 	if (coda_inode->i_mapping == &coda_inode->i_data)
 		coda_inode->i_mapping = host_inode->i_mapping;
 
@@ -247,6 +246,19 @@ int coda_open(struct inode *coda_inode, struct file *coda_file)
 	}
 
 	host_file->f_flags |= coda_file->f_flags & (O_APPEND | O_SYNC);
+
+	/*
+	 * On mmap coda_inode->i_mapping is updated to point at the mapping of
+	 * the mmap()'d file's container, and do_dentry_open() propagates that
+	 * to coda_file->f_mapping.
+	 *
+	 * However coda_file's container may differ, in which case the lifetime
+	 * of that mapping may not match that of coda_file.
+	 *
+	 * To avoid a dangling pointer, reassign the mapping to the canonical
+	 * one.
+	 */
+	coda_file->f_mapping = &coda_inode->i_data;
 
 	cfi->cfi_magic = CODA_MAGIC;
 	cfi->cfi_mapcount = 0;
