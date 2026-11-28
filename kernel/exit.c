@@ -554,15 +554,16 @@ static void exit_mm(void)
 	struct mm_struct *mm = current->mm;
 
 	mm_exit_exec_release(current, mm);
-	if (!mm)
+	if (!mm) {
+		/* kthread_stop() waits for this. */
+		complete_vfork_done(current);
 		return;
+	}
 
 	sched_cache_exit_mm(current);
 
-	mmap_read_lock(mm);
 	mmgrab_lazy_tlb(mm);
 	BUG_ON(mm != current->active_mm);
-	/* more a memory barrier than a real lock */
 	task_lock(current);
 	/*
 	 * When a thread stops operating on an address space, the loop
@@ -581,7 +582,8 @@ static void exit_mm(void)
 	enter_lazy_tlb(mm, current);
 	local_irq_enable();
 	task_unlock(current);
-	mmap_read_unlock(mm);
+	/* We've left the mm so a vfork() parent can run again. */
+	complete_vfork_done(current);
 	mm_update_next_owner(mm);
 	mmput(mm);
 	if (test_thread_flag(TIF_MEMDIE))

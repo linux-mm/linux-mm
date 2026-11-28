@@ -2521,10 +2521,26 @@ static inline void flush_unauthorized_files(const struct cred *cred,
 		devnull = NULL;
 	/* replace all the matching ones with this */
 	do {
-		replace_fd(n - 1, devnull, 0);
+		/* replace_fd() fails for an fd at or above RLIMIT_NOFILE. */
+		if (replace_fd(n - 1, devnull, 0) < 0)
+			close_fd(n - 1);
 	} while ((n = iterate_fd(files, n, match_file, cred)) != 0);
 	if (devnull)
 		fput(devnull);
+}
+
+/*
+ * Close files for which the new task SID is not authorized. Called before
+ * exec_update_lock is taken as closing files may block in the filesystem.
+ */
+static void selinux_bprm_revalidate_files(const struct linux_binprm *bprm)
+{
+	const struct cred_security_struct *new_crsec = selinux_cred(bprm->cred);
+
+	if (new_crsec->sid == new_crsec->osid)
+		return;
+
+	flush_unauthorized_files(bprm->cred, current->files);
 }
 
 /*
@@ -2539,9 +2555,6 @@ static void selinux_bprm_committing_creds(const struct linux_binprm *bprm)
 	new_crsec = selinux_cred(bprm->cred);
 	if (new_crsec->sid == new_crsec->osid)
 		return;
-
-	/* Close files for which the new task SID is not authorized. */
-	flush_unauthorized_files(bprm->cred, current->files);
 
 	/* Always clear parent death signal on SID transitions. */
 	current->pdeath_signal = 0;
@@ -7691,6 +7704,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 	LSM_HOOK_INIT(netlink_send, selinux_netlink_send),
 
 	LSM_HOOK_INIT(bprm_creds_for_exec, selinux_bprm_creds_for_exec),
+	LSM_HOOK_INIT(bprm_revalidate_files, selinux_bprm_revalidate_files),
 	LSM_HOOK_INIT(bprm_committing_creds, selinux_bprm_committing_creds),
 	LSM_HOOK_INIT(bprm_committed_creds, selinux_bprm_committed_creds),
 

@@ -837,8 +837,10 @@ EXPORT_SYMBOL(read_code);
 /*
  * Maps the mm_struct mm into the current task struct.
  * On success, this function returns with exec_update_lock
- * held for writing. The replaced address space is stashed in
- * bprm->old_mm for setup_new_exec() to release outside the lock.
+ * held for writing. begin_new_exec() drops it once the new
+ * credentials are committed. The replaced address space is
+ * stashed in bprm->old_mm for setup_new_exec() to release
+ * outside the exec locks.
  */
 static int exec_mmap(struct linux_binprm *bprm)
 {
@@ -852,7 +854,6 @@ static int exec_mmap(struct linux_binprm *bprm)
 	if (!exec_state)
 		return -ENOMEM;
 
-	/* Notify parent that we're no longer interested in the old VM */
 	tsk = current;
 	old_mm = current->mm;
 	/* Clean up futexes and release the mm */
@@ -861,19 +862,6 @@ static int exec_mmap(struct linux_binprm *bprm)
 	ret = down_write_killable(&tsk->signal->exec_update_lock);
 	if (ret)
 		return ret;
-
-	if (old_mm) {
-		/*
-		 * If there is a pending fatal signal perhaps a signal
-		 * whose default action is to create a coredump get
-		 * out and die instead of going through with the exec.
-		 */
-		ret = mmap_read_lock_killable(old_mm);
-		if (ret) {
-			up_write(&tsk->signal->exec_update_lock);
-			return ret;
-		}
-	}
 
 	task_lock(tsk);
 	membarrier_exec_mmap(mm);
@@ -901,7 +889,6 @@ static int exec_mmap(struct linux_binprm *bprm)
 	task_unlock(tsk);
 	lru_gen_use_mm(mm);
 	if (old_mm) {
-		mmap_read_unlock(old_mm);
 		BUG_ON(active_mm != old_mm);
 		/* Defer teardown to setup_new_exec(), outside the exec locks. */
 		bprm->old_mm = old_mm;
@@ -909,6 +896,8 @@ static int exec_mmap(struct linux_binprm *bprm)
 		mmdrop_lazy_tlb(active_mm);
 	}
 	futex_exec_done(tsk);
+	/* We've left the old mm so a vfork() parent can run again. */
+	complete_vfork_done(tsk);
 	return 0;
 }
 
@@ -1171,6 +1160,14 @@ int begin_new_exec(struct linux_binprm * bprm)
 	 */
 	posixtimer_exec();
 
+	/*
+	 * Make the signal table private before a vfork() parent that shares
+	 * it is woken up.
+	 */
+	retval = unshare_sighand(me);
+	if (retval)
+		goto out;
+
 	/* see the comment in check_unsafe_exec() */
 	current->fs->in_exec = 0;
 
@@ -1183,8 +1180,8 @@ int begin_new_exec(struct linux_binprm * bprm)
 
 	/*
 	 * We have to apply CLOEXEC before we change whether the process is
-	 * dumpable (in setup_new_exec) to avoid a race with a process in userspace
-	 * trying to access the should-be-closed file descriptors of a process
+	 * dumpable to avoid a race with a process in userspace trying to
+	 * access the should-be-closed file descriptors of a process
 	 * undergoing exec(2).
 	 *
 	 * This can block on filesystem ->flush() and ->release() handlers,
@@ -1194,6 +1191,9 @@ int begin_new_exec(struct linux_binprm * bprm)
 	 * the FD table.
 	 */
 	close_cloexec_files(me->files);
+
+	/* Let LSMs revoke inherited files the new creds may not use. */
+	security_bprm_revalidate_files(bprm);
 
 	/*
 	 * Must be called _before_ exec_mmap() as bprm->mm is
@@ -1218,17 +1218,6 @@ int begin_new_exec(struct linux_binprm * bprm)
 		goto out;
 
 	bprm->mm = NULL;
-
-	retval = exec_task_namespaces();
-	if (retval)
-		goto out_unlock;
-
-	/*
-	 * Make the signal table private.
-	 */
-	retval = unshare_sighand(me);
-	if (retval)
-		goto out_unlock;
 
 	me->flags &= ~(PF_RANDOMIZE | PF_FORKNOEXEC |
 					PF_NOFREEZE | PF_NO_SETAFFINITY);
@@ -1299,7 +1288,7 @@ int begin_new_exec(struct linux_binprm * bprm)
 
 	retval = set_cred_ucounts(bprm->cred);
 	if (retval < 0)
-		goto out_unlock;
+		goto out_unlock_exec_update;
 
 	/*
 	 * install the new credentials for this executable
@@ -1317,12 +1306,21 @@ int begin_new_exec(struct linux_binprm * bprm)
 	 */
 	if (task_exec_state_get_dumpable(me) != TASK_DUMPABLE_OWNER)
 		perf_event_exit_task(me);
+
+	/* The mm, exec state and creds are switched. Let readers back in. */
+	up_write(&me->signal->exec_update_lock);
+
 	/*
 	 * cred_guard_mutex must be held at least to this point to prevent
 	 * ptrace_attach() from altering our determination of the task's
 	 * credentials; any time after this it may be unlocked.
 	 */
 	security_bprm_committed_creds(bprm);
+
+	/* Switch time namespace now that the task has a new mm. */
+	retval = exec_task_namespaces();
+	if (retval)
+		goto out_unlock_cred_guard;
 
 	/* Pass the opened binary to the interpreter. */
 	if (bprm->have_execfd) {
@@ -1335,17 +1333,20 @@ int begin_new_exec(struct linux_binprm * bprm)
 		if (retval < 0) {
 			/* The reference was not consumed. */
 			fput(executable);
-			goto out_unlock;
+			goto out_unlock_cred_guard;
 		}
 		bprm->execfd = retval;
 	}
 	return 0;
 
-out_unlock:
-	up_write(&me->signal->exec_update_lock);
-	if (!bprm->cred)
-		mutex_unlock(&me->signal->cred_guard_mutex);
+out_unlock_cred_guard:
+	/* free_bprm() only unlocks cred_guard_mutex if bprm->cred is set. */
+	mutex_unlock(&me->signal->cred_guard_mutex);
+	return retval;
 
+out_unlock_exec_update:
+	/* bprm->cred is still set so free_bprm() unlocks cred_guard_mutex. */
+	up_write(&me->signal->exec_update_lock);
 out:
 	return retval;
 }
@@ -1387,7 +1388,6 @@ void setup_new_exec(struct linux_binprm * bprm)
 	 * some architectures like powerpc
 	 */
 	me->mm->task_size = TASK_SIZE;
-	up_write(&me->signal->exec_update_lock);
 	mutex_unlock(&me->signal->cred_guard_mutex);
 
 	/* The exec locks are dropped: release the old address space now. */
@@ -1410,9 +1410,10 @@ EXPORT_SYMBOL(finalize_exec);
 
 /*
  * Prepare credentials and lock ->cred_guard_mutex.
- * setup_new_exec() commits the new creds and drops the lock.
- * Or, if exec fails before, free_bprm() should release ->cred
- * and unlock.
+ * begin_new_exec() commits the new creds and setup_new_exec()
+ * drops the lock. If exec fails before the creds are committed
+ * free_bprm() releases ->cred and unlocks. If it fails after
+ * that begin_new_exec() unlocks.
  */
 static int prepare_bprm_creds(struct linux_binprm *bprm)
 {

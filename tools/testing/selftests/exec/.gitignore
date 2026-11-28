@@ -16,6 +16,9 @@ null-argv
 !load_address.c
 /recursion-depth
 /set-exec
+/unshare-sighand
+/update-lock-fault
+/vfork-mm
 xxxxxxxx*
 pipe
 S_I*.test
