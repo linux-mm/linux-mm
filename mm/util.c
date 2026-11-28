@@ -1554,6 +1554,8 @@ int mmap_action_prepare(struct vm_area_desc *desc)
 		return map_kernel_pages_prepare(desc);
 	case MMAP_DISCONTIG_KERNEL_PAGES:
 		return map_discontig_kernel_pages_prepare(desc);
+	case MMAP_TRACK_PFN:
+		return track_pfn_range_prepare(desc);
 	}
 
 	WARN_ON_ONCE(1);
@@ -1589,6 +1591,9 @@ int mmap_action_complete(struct vm_area_struct *vma,
 	case MMAP_DISCONTIG_KERNEL_PAGES:
 		err = map_discontig_kernel_pages_complete(vma, action);
 		break;
+	case MMAP_TRACK_PFN:
+		err = track_pfn_range_complete(vma, action);
+		break;
 	case MMAP_IO_REMAP_PFN:
 	case MMAP_SIMPLE_IO_REMAP:
 		/* Should have been delegated. */
@@ -1611,6 +1616,7 @@ int mmap_action_prepare(struct vm_area_desc *desc)
 	case MMAP_SIMPLE_IO_REMAP:
 	case MMAP_KERNEL_PAGES:
 	case MMAP_DISCONTIG_KERNEL_PAGES:
+	case MMAP_TRACK_PFN:
 		WARN_ON_ONCE(1); /* nommu cannot handle these. */
 		break;
 	}
@@ -1633,6 +1639,7 @@ int mmap_action_complete(struct vm_area_struct *vma,
 	case MMAP_SIMPLE_IO_REMAP:
 	case MMAP_KERNEL_PAGES:
 	case MMAP_DISCONTIG_KERNEL_PAGES:
+	case MMAP_TRACK_PFN:
 		WARN_ON_ONCE(1); /* nommu cannot handle this. */
 
 		err = -EINVAL;

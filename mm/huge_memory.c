@@ -1630,8 +1630,9 @@ static vm_fault_t insert_pmd(struct vm_area_struct *vma, unsigned long addr,
 	spinlock_t *ptl;
 	pmd_t entry;
 
-	if (addr < vma->vm_start || addr >= vma->vm_end)
-		return VM_FAULT_SIGBUS;
+	/* If the whole PMD doesn't fit in the VMA, fall back to 4KiB pages */
+	if (addr < vma->vm_start || addr + HPAGE_PMD_SIZE > vma->vm_end)
+		return VM_FAULT_FALLBACK;
 
 	if (arch_needs_pgtable_deposit()) {
 		pgtable = pte_alloc_one(vma->vm_mm);
@@ -1729,6 +1730,10 @@ vm_fault_t vmf_insert_pfn_pmd(struct vm_fault *vmf, unsigned long pfn,
 	if (unlikely(is_huge_zero_pfn(pfn)))
 		return VM_FAULT_SIGBUS;
 
+	/* pfn_pmd() would round an unaligned pfn down and map the wrong memory */
+	if (!IS_ALIGNED(pfn, HPAGE_PMD_NR))
+		return VM_FAULT_FALLBACK;
+
 	pfnmap_setup_cachemode_pfn(pfn, &pgprot);
 
 	return insert_pmd(vma, addr, vmf->pmd, fop, pgprot, write);
@@ -1768,8 +1773,9 @@ static vm_fault_t insert_pud(struct vm_area_struct *vma, unsigned long addr,
 	spinlock_t *ptl;
 	pud_t entry;
 
-	if (addr < vma->vm_start || addr >= vma->vm_end)
-		return VM_FAULT_SIGBUS;
+	/* If the whole PUD doesn't fit in the VMA, fall back to smaller pages */
+	if (addr < vma->vm_start || addr + HPAGE_PUD_SIZE > vma->vm_end)
+		return VM_FAULT_FALLBACK;
 
 	ptl = pud_lock(mm, pud);
 	if (!pud_none(*pud)) {
@@ -1841,6 +1847,10 @@ vm_fault_t vmf_insert_pfn_pud(struct vm_fault *vmf, unsigned long pfn,
 	BUG_ON((vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP)) ==
 						(VM_PFNMAP|VM_MIXEDMAP));
 	BUG_ON((vma->vm_flags & VM_PFNMAP) && vma_is_cow_mapping(vma));
+
+	/* pfn_pud() would round an unaligned pfn down and map the wrong memory */
+	if (!IS_ALIGNED(pfn, HPAGE_PUD_NR))
+		return VM_FAULT_FALLBACK;
 
 	pfnmap_setup_cachemode_pfn(pfn, &pgprot);
 
