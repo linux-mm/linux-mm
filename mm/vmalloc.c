@@ -4391,6 +4391,7 @@ void *__vmalloc_node_noprof(unsigned long size, unsigned long align,
  */
 #ifdef CONFIG_TEST_VMALLOC_MODULE
 EXPORT_SYMBOL_GPL(__vmalloc_node_noprof);
+EXPORT_SYMBOL_GPL(find_vm_area);
 #endif
 
 void *__vmalloc_noprof(unsigned long size, gfp_t gfp_mask)
